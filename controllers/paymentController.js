@@ -1,4 +1,5 @@
 const paymentService = require('../services/paymentService');
+const Payment = require('../models/Payment');
 
 async function initiatePayment(req, res) {
   try {
@@ -18,4 +19,17 @@ async function initiatePayment(req, res) {
   }
 }
 
-module.exports = { initiatePayment };
+async function getPaymentStatus(req, res) {
+  try {
+    const payment = await Payment.findByCheckoutId(req.params.checkoutRequestId);
+    if (!payment) {
+      return res.status(404).json({ error: 'Payment not found' });
+    }
+    res.json({ status: payment.status, mpesaReceipt: payment.mpesa_receipt });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch payment status' });
+  }
+}
+
+module.exports = { initiatePayment, getPaymentStatus };
