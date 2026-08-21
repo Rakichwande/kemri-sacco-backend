@@ -141,7 +141,9 @@ async function handleDeposit(phoneNumber, steps) {
       await paymentService.initiatePayment({ memberId: member.id, phoneNumber, amount });
       return 'END An M-Pesa prompt has been sent to your phone. Enter your PIN to complete the deposit.';
     } catch (err) {
-      console.error('USSD deposit STK push failed:', err.message);
+      console.error('USSD deposit STK push failed - status:', err.response?.status);
+      console.error('USSD deposit STK push failed - data:', JSON.stringify(err.response?.data));
+      console.error('USSD deposit STK push failed - message:', err.message);
       return 'END We could not process your deposit right now. Please try again shortly.';
     }
   }
