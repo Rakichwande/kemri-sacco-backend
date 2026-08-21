@@ -109,7 +109,15 @@ async function handleBalance(phoneNumber) {
   }
 
   const balance = await Payment.getMemberBalance(member.id);
-  return `END Your KEMRI SACCO balance is KES ${balance.toLocaleString()}.`;
+  const balanceText = `Your KEMRI SACCO balance is KES ${balance.toLocaleString()}.`;
+
+  try {
+    await smsService.sendSMS(phoneNumber, balanceText);
+  } catch (smsErr) {
+    console.error('USSD balance SMS failed (still shown on screen):', smsErr.message);
+  }
+
+  return `END ${balanceText}`;
 }
 
 async function handleDeposit(phoneNumber, steps) {
