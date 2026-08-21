@@ -11,17 +11,22 @@ const memberRoutes = require('./routes/members');
 const paymentRoutes = require('./routes/payments');
 const darajaWebhook = require('./webhooks/darajaWebhook');
 const errorHandler = require('./middleware/errorHandler');
+const ussdRoutes = require('./routes/ussd');
+
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
 
 // Routes
 app.use('/api/members', memberRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/webhooks', darajaWebhook);
+app.use('/ussd', ussdRoutes);
+
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 

@@ -39,4 +39,21 @@ async function findByCheckoutId(checkout_request_id) {
   return result.rows[0];
 }
 
-module.exports = { init, create, updateStatus, findByCheckoutId };
+async function getMemberBalance(member_id) {
+  const result = await pool.query(
+    `SELECT COALESCE(SUM(amount), 0) AS balance FROM payments WHERE member_id = $1 AND status = 'completed'`,
+    [member_id]
+  );
+  return Number(result.rows[0].balance);
+}
+
+async function findRecentByMember(member_id, limit = 5) {
+  const result = await pool.query(
+    `SELECT amount, status, created_at FROM payments WHERE member_id = $1 ORDER BY created_at DESC LIMIT $2`,
+    [member_id, limit]
+  );
+  return result.rows;
+}
+
+module.exports = { init, create, updateStatus, findByCheckoutId, getMemberBalance, findRecentByMember };
+
