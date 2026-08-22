@@ -42,6 +42,11 @@ function getTimestamp() {
 }
 
 async function stkPush({ phoneNumber, amount, accountReference, description }) {
+  // Daraja rejects numbers with a leading + or any non-digit characters.
+  // Africa's Talking (USSD/SMS) sends numbers as +254..., so normalize here
+  // regardless of which caller (portal or USSD) triggered this.
+  const cleanPhone = String(phoneNumber).replace(/\D/g, '');
+
   const token = await getAccessToken();
   const timestamp = getTimestamp();
   const password = Buffer.from(
@@ -54,9 +59,9 @@ async function stkPush({ phoneNumber, amount, accountReference, description }) {
     Timestamp: timestamp,
     TransactionType: 'CustomerPayBillOnline',
     Amount: amount,
-    PartyA: phoneNumber,
+    PartyA: cleanPhone,
     PartyB: process.env.DARAJA_SHORTCODE,
-    PhoneNumber: phoneNumber,
+    PhoneNumber: cleanPhone,
     CallBackURL: process.env.DARAJA_CALLBACK_URL,
     AccountReference: accountReference,
     TransactionDesc: description || 'SACCO payment',
