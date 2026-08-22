@@ -25,7 +25,12 @@ async function registerMember(req, res) {
     }
 
     res.status(201).json(member);
-  } catch (err) {
+    } catch (err) {
+    if (err.code === '23505') {
+      // Postgres unique constraint violation - most likely a duplicate ID
+      // number, since duplicate phone is already checked before this point
+      return res.status(409).json({ error: 'This ID number is already registered with KEMRI SACCO.' });
+    }
     console.error(err);
     res.status(500).json({ error: 'Failed to register member' });
   }
