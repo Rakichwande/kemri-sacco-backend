@@ -31,8 +31,8 @@ async function sendSMS(to, message) {
 
 // Templates kept here so wording can be changed in one place
 const templates = {
-  paymentConfirmed: (name, amount, receipt) =>
-    `Hi ${name}, we've received your payment of KES ${amount}. M-Pesa ref: ${receipt}. Thank you for saving with KEMRI SACCO.`,
+  paymentConfirmed: (name, amount, accountRef, receipt) =>
+    `Dear ${name}, we have received your payment of KES ${Number(amount).toLocaleString()} for account ${accountRef}. M-Pesa ref: ${receipt}. Thank you for saving with KEMRI SACCO.`,
   paymentFailed: (name) =>
     `Hi ${name}, your recent payment attempt to KEMRI SACCO was not completed. Please try again or contact us for help.`,
   applicationReceived: (name) =>

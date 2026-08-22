@@ -44,7 +44,7 @@ async function handleCallback(callbackBody) {
     if (member) {
       await smsService.sendSMS(
         member.phone_number,
-        smsService.templates.paymentConfirmed(member.full_name, payment.amount, mpesaReceipt)
+        smsService.templates.paymentConfirmed(member.full_name, payment.amount, `SACCO-${payment.member_id}`, mpesaReceipt)
       );
     }
   } else {
