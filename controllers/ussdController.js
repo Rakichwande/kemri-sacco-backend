@@ -1,5 +1,7 @@
 const Member = require('../models/Member');
 const Payment = require('../models/Payment');
+const Loan = require('../models/Loan');               // <-- NEW
+const LoanService = require('../services/loanService'); // <-- NEW
 const paymentService = require('../services/paymentService');
 const smsService = require('../services/smsService');
 
@@ -27,8 +29,10 @@ async function handleUssd(req, res) {
           response = await handleDeposit(phoneNumber, steps);
           break;
         case '4':
+          response = await handleApplyLoan(phoneNumber, steps); // <-- REPLACED
+          break;
         case '5':
-          response = 'END This feature is coming soon. Please contact the SACCO office for loan services.';
+          response = await handleRepayLoan(phoneNumber, steps); // <-- REPLACED
           break;
         case '6':
           response = await handleTransactions(phoneNumber);
@@ -55,13 +59,16 @@ function mainMenu() {
     '1. Register\n' +
     '2. Balance\n' +
     '3. Deposit\n' +
-    '4. Loan\n' +
-    '5. Repay Loan\n' +
+    '4. Apply Loan\n' +       // <-- UPDATED text
+    '5. Repay Loan\n' +       // <-- UPDATED text
     '6. Transactions\n' +
     '7. Exit'
   );
 }
 
+// --------------------------------------------------------------
+// 1. REGISTER (UNCHANGED - uses your exact logic)
+// --------------------------------------------------------------
 async function handleRegister(phoneNumber, steps) {
   const existing = await Member.findByPhone(phoneNumber);
   if (existing) {
@@ -102,6 +109,9 @@ async function handleRegister(phoneNumber, steps) {
   return 'END Invalid input. Please dial again.';
 }
 
+// --------------------------------------------------------------
+// 2. BALANCE (UNCHANGED)
+// --------------------------------------------------------------
 async function handleBalance(phoneNumber) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) {
@@ -120,6 +130,9 @@ async function handleBalance(phoneNumber) {
   return `END ${balanceText}`;
 }
 
+// --------------------------------------------------------------
+// 3. DEPOSIT (UNCHANGED)
+// --------------------------------------------------------------
 async function handleDeposit(phoneNumber, steps) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) {
@@ -151,6 +164,111 @@ async function handleDeposit(phoneNumber, steps) {
   return 'END Invalid input. Please dial again.';
 }
 
+// --------------------------------------------------------------
+// 4. APPLY LOAN (NEW)
+// --------------------------------------------------------------
+async function handleApplyLoan(phoneNumber, steps) {
+  // Step 0: Check if member exists
+  const member = await Member.findByPhone(phoneNumber);
+  if (!member) {
+    return 'END You are not registered. Dial and select option 1 to register first.';
+  }
+
+  // Step 1: Check eligibility (active loans, credit limit)
+  const eligibility = await LoanService.canApply(member.id);
+  if (!eligibility.allowed) {
+    return `END ${eligibility.reason}`;
+  }
+
+  // Step 2: If no input yet, ask for the amount
+  if (steps.length === 0) {
+    return `CON Enter amount to borrow (Min: 1000, Max: ${eligibility.creditLimit}):`;
+  }
+
+  // Step 3: Validate the amount entered
+  if (steps.length === 1) {
+    const amount = Number(steps[0]);
+
+    if (isNaN(amount) || amount < 1000 || amount > eligibility.creditLimit) {
+      return `END Invalid amount. Must be between KES 1000 and ${eligibility.creditLimit}.`;
+    }
+
+    // Calculate the repayment schedule to show the user
+    const schedule = LoanService.calculateRepaymentSchedule(amount);
+    return `CON You will pay KES ${schedule.monthlyInstallment} monthly for 3 months.\nTotal repayment: KES ${schedule.totalRepayment}.\nReply 1 to confirm.`;
+  }
+
+  // Step 4: User confirmed (replied '1')
+  if (steps.length === 2 && steps[1] === '1') {
+    const amount = Number(steps[0]);
+    const result = await LoanService.apply(member.id, amount);
+
+    if (!result.success) {
+      return `END ${result.message}`;
+    }
+
+    // Send SMS confirmation to member
+    try {
+      await smsService.sendSMS(
+        phoneNumber,
+        `KEMRI SACCO: Your loan of KES ${amount} has been submitted. Monthly installment: KES ${result.loan.monthly_installment}. Awaiting admin approval.`
+      );
+    } catch (smsErr) {
+      console.error('Loan application SMS failed:', smsErr.message);
+    }
+
+    return `END Loan submitted! Amount: KES ${result.loan.principal}, Monthly: KES ${result.loan.monthly_installment}. Awaiting admin approval.`;
+  }
+
+  return 'END Invalid input. Please dial again.';
+}
+
+// --------------------------------------------------------------
+// 5. REPAY LOAN (NEW)
+// --------------------------------------------------------------
+async function handleRepayLoan(phoneNumber, steps) {
+  // Step 0: Check if member exists
+  const member = await Member.findByPhone(phoneNumber);
+  if (!member) {
+    return 'END You are not registered. Dial and select option 1 to register first.';
+  }
+
+  // Step 1: Check for an active loan
+  const activeLoan = await Loan.getActiveLoan(member.id);
+  if (!activeLoan) {
+    return 'END You have no active loan.';
+  }
+
+  // Calculate the amount due this month (min of installment or remaining balance)
+  const dueAmount = Math.min(activeLoan.monthly_installment, activeLoan.outstanding_balance);
+
+  // Step 2: Show outstanding details and ask for confirmation
+  if (steps.length === 0) {
+    return `CON Outstanding: KES ${activeLoan.outstanding_balance}\nDue this month: KES ${dueAmount}\nReply 1 to pay KES ${dueAmount} via M-Pesa.`;
+  }
+
+  // Step 3: User confirmed (replied '1')
+  if (steps.length === 1 && steps[0] === '1') {
+    try {
+      // Trigger STK Push for the due amount
+      await paymentService.initiatePayment({
+        memberId: member.id,
+        phoneNumber,
+        amount: dueAmount,
+      });
+      return `END STK Push sent for KES ${dueAmount}. Please complete payment on your phone.`;
+    } catch (err) {
+      console.error('USSD loan repayment STK push failed:', err.message);
+      return 'END We could not process your repayment. Please try again shortly.';
+    }
+  }
+
+  return 'END Invalid input. Please dial again.';
+}
+
+// --------------------------------------------------------------
+// 6. TRANSACTIONS (UNCHANGED)
+// --------------------------------------------------------------
 async function handleTransactions(phoneNumber) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) {
