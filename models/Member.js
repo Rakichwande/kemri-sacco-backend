@@ -30,19 +30,31 @@ async function create(member) {
   return result.rows[0];
 }
 
+// Find by phone number (used in USSD and other places)
 async function findByPhone(phone_number) {
   const result = await pool.query('SELECT * FROM members WHERE phone_number = $1', [phone_number]);
   return result.rows[0];
 }
 
+// Find by ID (used by loan module)
 async function findById(id) {
   const result = await pool.query('SELECT * FROM members WHERE id = $1', [id]);
   return result.rows[0];
 }
 
+// Find by either phone or ID number (used for duplicate registration checks)
+async function findByPhoneOrId(phone_number, id_number) {
+  const result = await pool.query(
+    'SELECT * FROM members WHERE phone_number = $1 OR id_number = $2',
+    [phone_number, id_number]
+  );
+  return result.rows[0];
+}
+
+// Get all members (admin use)
 async function findAll() {
   const result = await pool.query('SELECT * FROM members ORDER BY created_at DESC');
   return result.rows;
 }
 
-module.exports = { init, create, findByPhone, findById, findAll };
+module.exports = { init, create, findByPhone, findById, findByPhoneOrId, findAll };

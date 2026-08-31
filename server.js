@@ -13,6 +13,9 @@ const darajaWebhook = require('./webhooks/darajaWebhook');
 const errorHandler = require('./middleware/errorHandler');
 const ussdRoutes = require('./routes/ussd');
 
+// Add this line with your other route registrations
+const loanRoutes = require('./routes/loans');
+app.use('/api/loans', loanRoutes);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
