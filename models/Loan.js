@@ -1,154 +1,99 @@
-const { query } = require('../config/database');
+const pool = require('../config/database');
 
-class Loan {
-    // Create a new loan application
-    static async create({
-        member_id,
-        principal,
-        interest_rate = 6.0,
-        tenure_months = 3
-    }) {
-        const total_interest = Math.round(principal * (interest_rate / 100) * tenure_months);
-        const total_repayment = principal + total_interest;
-        const monthly_installment = Math.round(total_repayment / tenure_months);
+const createLoansTableQuery = `
+CREATE TABLE IF NOT EXISTS loans (
+  id SERIAL PRIMARY KEY,
+  member_id INT REFERENCES members(id) NOT NULL,
+  principal NUMERIC(10, 2) NOT NULL,
+  interest_rate NUMERIC(5, 2) NOT NULL,
+  tenure_months INT NOT NULL,
+  total_interest NUMERIC(10, 2) NOT NULL,
+  total_repayment NUMERIC(10, 2) NOT NULL,
+  monthly_installment NUMERIC(10, 2) NOT NULL,
+  outstanding_balance NUMERIC(10, 2) NOT NULL,
+  status VARCHAR(30) DEFAULT 'pending',
+  created_at TIMESTAMP DEFAULT NOW(),
+  disbursed_at TIMESTAMP
+);
+`;
 
-        const sql = `
-            INSERT INTO loans (
-                member_id, principal, interest_rate, tenure_months,
-                total_interest, total_repayment, monthly_installment,
-                outstanding_balance, status, applied_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', NOW())
-            RETURNING *
-        `;
-        const values = [
-            member_id, principal, interest_rate, tenure_months,
-            total_interest, total_repayment, monthly_installment,
-            total_repayment
-        ];
-
-        const result = await query(sql, values);
-        return result.rows[0];
-    }
-
-    // Approve a loan (sets it active, updates member's outstanding balance)
-    static async approve(loanId) {
-        // Start transaction
-        const client = await pool.connect();
-        try {
-            await client.query('BEGIN');
-
-            // 1. Get loan details
-            const loanRes = await client.query(
-                'SELECT member_id, total_repayment FROM loans WHERE id = $1',
-                [loanId]
-            );
-            if (loanRes.rows.length === 0) throw new Error('Loan not found');
-            const loan = loanRes.rows[0];
-
-            // 2. Update loan status
-            await client.query(
-                `UPDATE loans 
-                 SET status = 'active', approved_at = NOW(), 
-                     next_payment_due = NOW() + INTERVAL '1 month'
-                 WHERE id = $1`,
-                [loanId]
-            );
-
-            // 3. Add to member's outstanding balance
-            await client.query(
-                `UPDATE members 
-                 SET total_outstanding_balance = total_outstanding_balance + $1
-                 WHERE id = $2`,
-                [loan.total_repayment, loan.member_id]
-            );
-
-            await client.query('COMMIT');
-            return { success: true };
-        } catch (err) {
-            await client.query('ROLLBACK');
-            throw err;
-        } finally {
-            client.release();
-        }
-    }
-
-    // Record a repayment (partial or full)
-    static async recordRepayment(loanId, amount) {
-        const client = await pool.connect();
-        try {
-            await client.query('BEGIN');
-
-            // Get current loan status
-            const loanRes = await client.query(
-                'SELECT member_id, outstanding_balance, status, total_repayment FROM loans WHERE id = $1 FOR UPDATE',
-                [loanId]
-            );
-            if (loanRes.rows.length === 0) throw new Error('Loan not found');
-            const loan = loanRes.rows[0];
-            if (loan.status !== 'active') throw new Error('Loan is not active');
-
-            const newBalance = loan.outstanding_balance - amount;
-            const newAmountPaid = loan.total_repayment - newBalance;
-
-            // Update loan
-            await client.query(
-                `UPDATE loans 
-                 SET outstanding_balance = $1, amount_paid = $2,
-                     status = CASE WHEN $1 <= 0 THEN 'repaid' ELSE status END,
-                     repaid_at = CASE WHEN $1 <= 0 THEN NOW() ELSE repaid_at END
-                 WHERE id = $3`,
-                [newBalance, newAmountPaid, loanId]
-            );
-
-            // Update member's total outstanding and successful repayments
-            const memberUpdateQuery = newBalance <= 0 ? `
-                UPDATE members 
-                SET total_outstanding_balance = total_outstanding_balance - $1,
-                    successful_repayments = successful_repayments + 1
-                WHERE id = $2
-            ` : `
-                UPDATE members 
-                SET total_outstanding_balance = total_outstanding_balance - $1
-                WHERE id = $2
-            `;
-            await client.query(memberUpdateQuery, [amount, loan.member_id]);
-
-            await client.query('COMMIT');
-            return { 
-                success: true, 
-                fully_repaid: newBalance <= 0,
-                new_balance: newBalance 
-            };
-        } catch (err) {
-            await client.query('ROLLBACK');
-            throw err;
-        } finally {
-            client.release();
-        }
-    }
-
-    // Get active loan for a member
-    static async getActiveLoan(memberId) {
-        const sql = `
-            SELECT * FROM loans 
-            WHERE member_id = $1 AND status IN ('pending', 'active')
-            ORDER BY applied_at DESC LIMIT 1
-        `;
-        const result = await query(sql, [memberId]);
-        return result.rows[0] || null;
-    }
-
-    // Get loan history for a member
-    static async getHistory(memberId, limit = 10) {
-        const sql = `
-            SELECT * FROM loans 
-            WHERE member_id = $1 
-            ORDER BY applied_at DESC 
-            LIMIT $2
-        `;
-        const result = await query(sql, [memberId, limit]);
-        return result.rows;
-    }
+async function init() {
+  await pool.query(createLoansTableQuery);
 }
 
-module.exports = Loan;
+async function create({ member_id, principal, interest_rate, tenure_months }) {
+  const totalInterest = Math.round(principal * (interest_rate / 100) * tenure_months);
+  const totalRepayment = Number(principal) + totalInterest;
+  const monthlyInstallment = Math.round(totalRepayment / tenure_months);
+
+  const result = await pool.query(
+    `INSERT INTO loans (
+       member_id, principal, interest_rate, tenure_months,
+       total_interest, total_repayment, monthly_installment, outstanding_balance
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+    [member_id, principal, interest_rate, tenure_months, totalInterest, totalRepayment, monthlyInstallment, totalRepayment]
+  );
+  return result.rows[0];
+}
+
+async function getActiveLoan(member_id) {
+  const result = await pool.query(
+    `SELECT * FROM loans WHERE member_id = $1 AND status IN ('pending', 'approved', 'disbursed') ORDER BY created_at DESC LIMIT 1`,
+    [member_id]
+  );
+  return result.rows[0];
+}
+
+async function countRepaidByMember(member_id) {
+  const result = await pool.query(
+    `SELECT COUNT(*) FROM loans WHERE member_id = $1 AND status = 'repaid'`,
+    [member_id]
+  );
+  return Number(result.rows[0].count);
+}
+
+async function approve(loan_id) {
+  const result = await pool.query(
+    `UPDATE loans SET status = 'approved' WHERE id = $1 RETURNING *`,
+    [loan_id]
+  );
+  return result.rows[0];
+}
+
+async function markDisbursed(loan_id) {
+  const result = await pool.query(
+    `UPDATE loans SET status = 'disbursed', disbursed_at = NOW() WHERE id = $1 RETURNING *`,
+    [loan_id]
+  );
+  return result.rows[0];
+}
+
+async function applyRepayment(loan_id, amount) {
+  const loan = await findById(loan_id);
+  if (!loan) return null;
+
+  const newBalance = Math.max(0, Number(loan.outstanding_balance) - Number(amount));
+  const newStatus = newBalance <= 0 ? 'repaid' : loan.status;
+
+  const result = await pool.query(
+    `UPDATE loans SET outstanding_balance = $1, status = $2 WHERE id = $3 RETURNING *`,
+    [newBalance, newStatus, loan_id]
+  );
+  return result.rows[0];
+}
+
+async function findById(id) {
+  const result = await pool.query('SELECT * FROM loans WHERE id = $1', [id]);
+  return result.rows[0];
+}
+
+module.exports = {
+  init,
+  create,
+  getActiveLoan,
+  countRepaidByMember,
+  approve,
+  markDisbursed,
+  applyRepayment,
+  findById,
+};

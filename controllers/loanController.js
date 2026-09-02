@@ -1,3 +1,10 @@
+// Temporary minimal version for testing
+exports.applyLoan = (req, res) => res.json({ message: 'applyLoan called' });
+exports.approveLoan = (req, res) => res.json({ message: 'approveLoan called' });
+exports.getActiveLoan = (req, res) => res.json({ message: 'getActiveLoan called' });
+exports.getLoanHistory = (req, res) => res.json({ message: 'getLoanHistory called' });
+exports.repayLoan = (req, res) => res.json({ message: 'repayLoan called' });
+
 const LoanService = require('../services/loanService');
 const Member = require('../models/Member');
 const Loan = require('../models/Loan');

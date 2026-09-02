@@ -4,21 +4,28 @@ const Payment = require('../models/Payment');
 const Member = require('../models/Member');
 
 async function initiatePayment({ memberId, phoneNumber, amount }) {
-  const stkResponse = await darajaService.stkPush({
-    phoneNumber,
-    amount,
-    accountReference: `SACCO-${memberId}`,
-    description: 'Holiday Savings Scheme contribution',
-  });
+  try {
+    const stkResponse = await darajaService.stkPush({
+      phoneNumber,
+      amount,
+      accountReference: `SACCO-${memberId}`,
+      description: 'Holiday Savings Scheme contribution',
+    });
 
-  await Payment.create({
-    member_id: memberId,
-    amount,
-    phone_number: phoneNumber,
-    checkout_request_id: stkResponse.CheckoutRequestID,
-  });
+    await Payment.create({
+      member_id: memberId,
+      amount,
+      phone: phoneNumber,           // ✅ changed from phone_number to phone
+      account_reference: `SACCO-${memberId}`,
+      description: 'Holiday Savings Scheme contribution',
+      checkout_request_id: stkResponse.CheckoutRequestID,
+    });
 
-  return stkResponse;
+    return stkResponse;
+  } catch (error) {
+    console.error('❌ initiatePayment error:', error.response?.data || error.message);
+    throw error;
+  }
 }
 
 // Called by the Daraja webhook once Safaricom confirms the transaction outcome
