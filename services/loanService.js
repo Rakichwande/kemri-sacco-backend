@@ -4,7 +4,7 @@ const Loan = require('../models/Loan');
 const MAX_ABSOLUTE_LIMIT = 20000;
 const MIN_LOAN_AMOUNT = 1000;
 const INTEREST_RATE = 6.0;
-const TENURE_MONTHS = 3;
+const TENURE_MONTHS = 6;
 
 class LoanService {
   static calculateCreditLimit(successfulRepayments) {
