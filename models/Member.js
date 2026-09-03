@@ -1,6 +1,6 @@
 const pool = require('../config/database');
 
-// Run this once to set up the table (or move into a migrations folder later)
+// Create the members table with loan-related columns
 const createTableQuery = `
 CREATE TABLE IF NOT EXISTS members (
   id SERIAL PRIMARY KEY,
@@ -12,6 +12,10 @@ CREATE TABLE IF NOT EXISTS members (
   employer VARCHAR(150),
   scheme VARCHAR(100) DEFAULT 'holiday_savings',
   status VARCHAR(20) DEFAULT 'pending',
+  -- Loan-related fields
+  credit_limit INTEGER DEFAULT 10000,
+  total_outstanding_balance INTEGER DEFAULT 0,
+  successful_repayments INTEGER DEFAULT 0,
   created_at TIMESTAMP DEFAULT NOW()
 );
 `;
@@ -20,12 +24,26 @@ async function init() {
   await pool.query(createTableQuery);
 }
 
+// Create a new member with default loan fields
 async function create(member) {
   const { full_name, id_number, phone_number, nationality, age, employer, scheme } = member;
   const result = await pool.query(
-    `INSERT INTO members (full_name, id_number, phone_number, nationality, age, employer, scheme)
-     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-    [full_name, id_number, phone_number, nationality, age, employer, scheme]
+    `INSERT INTO members 
+      (full_name, id_number, phone_number, nationality, age, employer, scheme, credit_limit, total_outstanding_balance, successful_repayments)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) 
+     RETURNING *`,
+    [
+      full_name,
+      id_number,
+      phone_number,
+      nationality || null,
+      age || null,
+      employer || null,
+      scheme || 'holiday_savings',
+      10000, // default credit_limit for new members
+      0,     // total_outstanding_balance
+      0      // successful_repayments
+    ]
   );
   return result.rows[0];
 }
@@ -57,4 +75,41 @@ async function findAll() {
   return result.rows;
 }
 
-module.exports = { init, create, findByPhone, findById, findByPhoneOrId, findAll };
+// Update the member's total outstanding balance (add amount)
+async function updateOutstandingBalance(memberId, amount) {
+  const result = await pool.query(
+    `UPDATE members 
+     SET total_outstanding_balance = total_outstanding_balance + $1 
+     WHERE id = $2 
+     RETURNING *`,
+    [amount, memberId]
+  );
+  return result.rows[0];
+}
+
+// Increment successful repayments and update credit limit (optional helper)
+async function incrementRepayments(memberId) {
+  const result = await pool.query(
+    `UPDATE members 
+     SET successful_repayments = successful_repayments + 1,
+         credit_limit = CASE 
+           WHEN successful_repayments >= 1 THEN 20000 
+           ELSE 10000 
+         END
+     WHERE id = $1 
+     RETURNING *`,
+    [memberId]
+  );
+  return result.rows[0];
+}
+
+module.exports = {
+  init,
+  create,
+  findByPhone,
+  findById,
+  findByPhoneOrId,
+  findAll,
+  updateOutstandingBalance,
+  incrementRepayments,
+};

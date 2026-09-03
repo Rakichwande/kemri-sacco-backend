@@ -66,6 +66,9 @@ function mainMenu() {
   );
 }
 
+// ============================================================
+// 1. REGISTER
+// ============================================================
 async function handleRegister(phoneNumber, steps) {
   const existing = await Member.findByPhone(phoneNumber);
   if (existing) {
@@ -89,6 +92,7 @@ async function handleRegister(phoneNumber, steps) {
       scheme: 'holiday_savings',
     });
 
+    // Send registration SMS using the template
     try {
       await smsService.sendSMS(phoneNumber, smsService.templates.applicationReceived(full_name));
     } catch (smsErr) {
@@ -101,6 +105,9 @@ async function handleRegister(phoneNumber, steps) {
   return 'END Invalid input. Please dial again.';
 }
 
+// ============================================================
+// 2. BALANCE
+// ============================================================
 async function handleBalance(phoneNumber) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) {
@@ -110,6 +117,7 @@ async function handleBalance(phoneNumber) {
   const balance = await Payment.getMemberBalance(member.id);
   const balanceText = `Your KEMRI SACCO balance is KES ${balance.toLocaleString()}.`;
 
+  // Send the balance via SMS (simple, no template needed)
   try {
     await smsService.sendSMS(phoneNumber, balanceText);
   } catch (smsErr) {
@@ -119,6 +127,9 @@ async function handleBalance(phoneNumber) {
   return `END ${balanceText}`;
 }
 
+// ============================================================
+// 3. DEPOSIT
+// ============================================================
 async function handleDeposit(phoneNumber, steps) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) {
@@ -147,6 +158,9 @@ async function handleDeposit(phoneNumber, steps) {
   return 'END Invalid input. Please dial again.';
 }
 
+// ============================================================
+// 4. LOAN APPLICATION (UPDATED WITH NEW SMS TEMPLATE)
+// ============================================================
 async function handleLoanApplication(phoneNumber, steps) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) {
@@ -168,16 +182,19 @@ async function handleLoanApplication(phoneNumber, steps) {
     }
 
     const { loan } = result;
+    const ref = `LN-${String(loan.id).padStart(5, '0')}`;
+
     const summary =
       `Loan approved for application: KES ${Number(loan.principal).toLocaleString()}\n` +
       `Total repayable (incl. interest): KES ${Number(loan.total_repayment).toLocaleString()}\n` +
       `Over ${loan.tenure_months} months, ~KES ${Number(loan.monthly_installment).toLocaleString()}/month\n` +
-      `Ref: LN-${String(loan.id).padStart(5, '0')}. Awaiting SACCO review.`;
+      `Ref: ${ref}. Awaiting SACCO review.`;
 
+    // Send SMS using the new loan application template
     try {
       await smsService.sendSMS(
         phoneNumber,
-        `Dear ${member.full_name}, ${summary.replace(/\n/g, ' ')}`
+        smsService.templates.loanApplicationReceived(member.full_name, loan.principal, ref)
       );
     } catch (smsErr) {
       console.error('USSD loan application SMS failed (application still recorded):', smsErr.message);
@@ -189,6 +206,9 @@ async function handleLoanApplication(phoneNumber, steps) {
   return 'END Invalid input. Please dial again.';
 }
 
+// ============================================================
+// 5. REPAY LOAN
+// ============================================================
 async function handleRepayLoan(phoneNumber, steps) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) {
@@ -227,6 +247,9 @@ async function handleRepayLoan(phoneNumber, steps) {
   return 'END Invalid input. Please dial again.';
 }
 
+// ============================================================
+// 6. TRANSACTIONS
+// ============================================================
 async function handleTransactions(phoneNumber) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) {

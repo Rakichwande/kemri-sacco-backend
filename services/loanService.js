@@ -1,5 +1,6 @@
 const Member = require('../models/Member');
 const Loan = require('../models/Loan');
+const smsService = require('./smsService'); // <-- ADD THIS
 
 const MAX_ABSOLUTE_LIMIT = 20000;
 const MIN_LOAN_AMOUNT = 1000;
@@ -76,8 +77,37 @@ class LoanService {
     return { success: true, message: 'Loan application submitted successfully.', loan };
   }
 
-  static async approveLoan(loanId) {
+  static async approveLoan(loanId, adminNotes = '') {
+    // 1. Approve the loan (changes status to 'approved')
     const loan = await Loan.approve(loanId);
+    if (!loan) {
+      return { success: false, message: 'Loan not found.' };
+    }
+
+    // 2. Get the member details
+    const member = await Member.findById(loan.member_id);
+    if (!member) {
+      return { success: false, message: 'Member not found.' };
+    }
+
+    // 3. Update member's outstanding balance
+    await Member.updateOutstandingBalance(member.id, loan.total_repayment);
+
+    // 4. Send SMS to member (Loan Approved)
+    try {
+      await smsService.sendSMS(
+        member.phone_number,
+        smsService.templates.loanApproved(
+          member.full_name,
+          loan.principal,
+          loan.monthly_installment,
+          loan.tenure_months
+        )
+      );
+    } catch (smsErr) {
+      console.error('Loan approval SMS failed (loan still approved):', smsErr.message);
+    }
+
     return {
       success: true,
       loan,

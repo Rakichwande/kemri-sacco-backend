@@ -1,15 +1,11 @@
-// Temporary minimal version for testing
-exports.applyLoan = (req, res) => res.json({ message: 'applyLoan called' });
-exports.approveLoan = (req, res) => res.json({ message: 'approveLoan called' });
-exports.getActiveLoan = (req, res) => res.json({ message: 'getActiveLoan called' });
-exports.getLoanHistory = (req, res) => res.json({ message: 'getLoanHistory called' });
-exports.repayLoan = (req, res) => res.json({ message: 'repayLoan called' });
-
 const LoanService = require('../services/loanService');
 const Member = require('../models/Member');
 const Loan = require('../models/Loan');
+const smsService = require('../services/smsService');
 
+// ============================================================
 // 1. Apply for a loan (Web or USSD)
+// ============================================================
 exports.applyLoan = async (req, res) => {
     try {
         const { memberId, amount } = req.body;
@@ -29,7 +25,9 @@ exports.applyLoan = async (req, res) => {
     }
 };
 
-// 2. Admin: Approve loan
+// ============================================================
+// 2. Admin: Approve loan (sends SMS)
+// ============================================================
 exports.approveLoan = async (req, res) => {
     try {
         const { loanId } = req.params;
@@ -37,6 +35,11 @@ exports.approveLoan = async (req, res) => {
         
         // In production, add admin authentication middleware here
         const result = await LoanService.approveLoan(loanId, adminNotes);
+        
+        if (!result.success) {
+            return res.status(400).json({ error: result.message });
+        }
+
         res.json(result);
     } catch (err) {
         console.error('Approve loan error:', err);
@@ -44,7 +47,9 @@ exports.approveLoan = async (req, res) => {
     }
 };
 
+// ============================================================
 // 3. Member: Get active loan status
+// ============================================================
 exports.getActiveLoan = async (req, res) => {
     try {
         const { memberId } = req.params;
@@ -59,7 +64,9 @@ exports.getActiveLoan = async (req, res) => {
     }
 };
 
+// ============================================================
 // 4. Get loan history for a member
+// ============================================================
 exports.getLoanHistory = async (req, res) => {
     try {
         const { memberId } = req.params;
@@ -71,7 +78,9 @@ exports.getLoanHistory = async (req, res) => {
     }
 };
 
+// ============================================================
 // 5. Member: Repay loan (initiate STK push for installment)
+// ============================================================
 exports.repayLoan = async (req, res) => {
     try {
         const { memberId } = req.body;
@@ -87,18 +96,14 @@ exports.repayLoan = async (req, res) => {
         }
 
         // Reuse your existing Daraja STK Push logic from paymentService
-        // This expects a payment initiation function that takes phone, amount, account ref
         const { initiatePayment } = require('../services/paymentService');
         
-        // Note: Your paymentService might use different function names.
-        // If it's called 'initiatePayment', use that.
-        // If it's called something else, adjust accordingly.
         const paymentResult = await initiatePayment({
             memberId: member.id,
             phoneNumber: member.phone_number,
             amount: repaymentInfo.dueAmount,
-            accountReference: `LOAN-${repaymentInfo.loan.id}`,
-            description: `Loan repayment for KEMRI SACCO`
+            loanId: repaymentInfo.loan.id, // Pass loanId for repayment tracking
+            description: 'Loan repayment for KEMRI SACCO'
         });
 
         res.json({
@@ -109,6 +114,89 @@ exports.repayLoan = async (req, res) => {
         });
     } catch (err) {
         console.error('Repay loan error:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+
+// ============================================================
+// 6. Admin: Mark loan as manually disbursed (Phase 1)
+// ============================================================
+exports.markDisbursed = async (req, res) => {
+    try {
+        const { loanId } = req.params;
+        const { mpesaReceipt } = req.body;
+
+        if (!loanId) {
+            return res.status(400).json({ error: 'Loan ID required' });
+        }
+
+        // 1. Mark loan as disbursed
+        const loan = await Loan.markDisbursed(loanId, mpesaReceipt || null);
+        
+        if (!loan) {
+            return res.status(404).json({ error: 'Loan not found' });
+        }
+
+        // 2. Get member details for SMS
+        const member = await Member.findById(loan.member_id);
+        if (!member) {
+            return res.status(404).json({ error: 'Member not found' });
+        }
+
+        // 3. Send loan disbursed SMS
+        try {
+            const disbursementDate = new Date().toLocaleDateString('en-GB', {
+                day: '2-digit',
+                month: 'short',
+                year: 'numeric'
+            });
+            
+            await smsService.sendSMS(
+                member.phone_number,
+                smsService.templates.loanDisbursed(
+                    member.full_name,
+                    loan.principal,
+                    loan.total_repayment,
+                    disbursementDate
+                )
+            );
+        } catch (smsErr) {
+            console.error('Loan disbursement SMS failed (loan still disbursed):', smsErr.message);
+        }
+
+        res.json({
+            success: true,
+            message: 'Loan marked as manually disbursed. SMS sent to member.',
+            loan,
+        });
+    } catch (err) {
+        console.error('Manual disbursement error:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+
+// ============================================================
+// 7. Admin: Get all loans for dashboard
+// ============================================================
+exports.getAdminLoans = async (req, res) => {
+    try {
+        const loans = await Loan.findAllForAdmin();
+        res.json(loans);
+    } catch (err) {
+        console.error('Admin loan list error:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+
+// ============================================================
+// 8. Admin: Get pending loans only
+// ============================================================
+exports.getPendingLoans = async (req, res) => {
+    try {
+        const loans = await Loan.findPending();
+        res.json(loans);
+    } catch (err) {
+        console.error('Pending loans error:', err);
         res.status(500).json({ error: 'Server error' });
     }
 };
