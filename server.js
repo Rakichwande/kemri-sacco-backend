@@ -7,6 +7,9 @@ const pool = require('./config/database');
 const Member = require('./models/Member');
 const Payment = require('./models/Payment');
 const Loan = require('./models/Loan');
+// Add these lines
+const authRoutes = require('./routes/auth');
+const Admin = require('./models/Admin');
 
 const memberRoutes = require('./routes/members');
 const paymentRoutes = require('./routes/payments');
@@ -30,6 +33,7 @@ app.use('/api/members', memberRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/webhooks', darajaWebhook);
 app.use('/ussd', ussdRoutes);
+app.use('/api/auth', authRoutes);
 
 // ----- LOAN ROUTES (NEW) -----
 const loanRoutes = require('./routes/loans');
@@ -47,6 +51,7 @@ async function start() {
     await Member.init();
     await Payment.init();
     await Loan.init();
+    await Admin.init();
 
     app.listen(PORT, () => {
       console.log(`KEMRI SACCO backend running on port ${PORT}`);

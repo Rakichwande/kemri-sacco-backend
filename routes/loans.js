@@ -1,17 +1,18 @@
 const express = require('express');
 const router = express.Router();
 const loanController = require('../controllers/loanController');
+const { authenticate, requireAdmin } = require('../middleware/auth');
 
-// Member routes
+// Member routes (no auth required - USSD uses these)
 router.post('/apply', loanController.applyLoan);
 router.get('/active/:memberId', loanController.getActiveLoan);
 router.get('/history/:memberId', loanController.getLoanHistory);
 router.post('/repay', loanController.repayLoan);
 
-// Admin routes (add authentication middleware in production)
-router.post('/approve/:loanId', loanController.approveLoan);
-router.post('/disburse/:loanId', loanController.markDisbursed);
-router.get('/admin/list', loanController.getAdminLoans);
-router.get('/admin/pending', loanController.getPendingLoans);
+// Admin routes (authentication required)
+router.post('/approve/:loanId', authenticate, requireAdmin, loanController.approveLoan);
+router.post('/disburse/:loanId', authenticate, requireAdmin, loanController.markDisbursed);
+router.get('/admin/list', authenticate, requireAdmin, loanController.getAdminLoans);
+router.get('/admin/pending', authenticate, requireAdmin, loanController.getPendingLoans);
 
 module.exports = router;
