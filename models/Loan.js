@@ -1,4 +1,4 @@
-const pool = require('../config/database');
+const db = require('../config/database');
 
 const createLoansTableQuery = `
 CREATE TABLE IF NOT EXISTS loans (
@@ -27,16 +27,15 @@ CREATE INDEX IF NOT EXISTS idx_loans_status ON loans(status);
 `;
 
 async function init() {
-  await pool.query(createLoansTableQuery);
+  await db.query(createLoansTableQuery);
 }
 
-// Create a new loan application
 async function create({ member_id, principal, interest_rate, tenure_months }) {
   const totalInterest = Math.round(principal * (interest_rate / 100) * tenure_months);
   const totalRepayment = Number(principal) + totalInterest;
   const monthlyInstallment = Math.round(totalRepayment / tenure_months);
 
-  const result = await pool.query(
+  const result = await db.query(
     `INSERT INTO loans (
        member_id, principal, interest_rate, tenure_months,
        total_interest, total_repayment, monthly_installment, outstanding_balance, amount_paid
@@ -46,9 +45,8 @@ async function create({ member_id, principal, interest_rate, tenure_months }) {
   return result.rows[0];
 }
 
-// Get the active loan for a member (pending, approved, or disbursed)
 async function getActiveLoan(member_id) {
-  const result = await pool.query(
+  const result = await db.query(
     `SELECT * FROM loans 
      WHERE member_id = $1 AND status IN ('pending', 'approved', 'disbursed') 
      ORDER BY applied_at DESC LIMIT 1`,
@@ -57,18 +55,16 @@ async function getActiveLoan(member_id) {
   return result.rows[0];
 }
 
-// Count how many loans a member has successfully repaid
 async function countRepaidByMember(member_id) {
-  const result = await pool.query(
+  const result = await db.query(
     `SELECT COUNT(*) FROM loans WHERE member_id = $1 AND status = 'repaid'`,
     [member_id]
   );
   return Number(result.rows[0].count);
 }
 
-// Get loan history for a member
 async function getHistory(member_id, limit = 10) {
-  const result = await pool.query(
+  const result = await db.query(
     `SELECT * FROM loans 
      WHERE member_id = $1 
      ORDER BY applied_at DESC 
@@ -78,24 +74,22 @@ async function getHistory(member_id, limit = 10) {
   return result.rows;
 }
 
-// Find a loan by ID
 async function findById(id) {
-  const result = await pool.query('SELECT * FROM loans WHERE id = $1', [id]);
+  const result = await db.query('SELECT * FROM loans WHERE id = $1', [id]);
   return result.rows[0];
 }
 
-// Approve a loan (with transaction to update member's outstanding balance)
 async function approve(loan_id) {
-  const client = await pool.connect();
+  const client = await db.pool.connect(); // <-- FIX: use db.pool
   try {
     await client.query('BEGIN');
 
-    // 1. Get loan details
+    // 1. Get loan details with FOR UPDATE
     const loanRes = await client.query('SELECT * FROM loans WHERE id = $1 FOR UPDATE', [loan_id]);
     if (loanRes.rows.length === 0) throw new Error('Loan not found');
     const loan = loanRes.rows[0];
 
-    // 2. Update loan status to 'approved'
+    // 2. Update loan status
     const updateRes = await client.query(
       `UPDATE loans 
        SET status = 'approved', approved_at = NOW() 
@@ -104,7 +98,7 @@ async function approve(loan_id) {
       [loan_id]
     );
 
-    // 3. Update member's total outstanding balance
+    // 3. Update member's outstanding balance
     await client.query(
       `UPDATE members 
        SET total_outstanding_balance = total_outstanding_balance + $1 
@@ -122,9 +116,8 @@ async function approve(loan_id) {
   }
 }
 
-// Mark a loan as manually disbursed (Phase 1 - manual M-Pesa transfer)
 async function markDisbursed(loan_id, mpesa_receipt = null) {
-  const result = await pool.query(
+  const result = await db.query(
     `UPDATE loans 
      SET status = 'disbursed', 
          disbursed_at = NOW(),
@@ -136,37 +129,32 @@ async function markDisbursed(loan_id, mpesa_receipt = null) {
   return result.rows[0];
 }
 
-// Apply a repayment to a loan
 async function applyRepayment(loan_id, amount) {
-  const client = await pool.connect();
+  const client = await db.pool.connect(); // <-- FIX: use db.pool
   try {
     await client.query('BEGIN');
 
-    // 1. Get current loan with FOR UPDATE (lock)
     const loanRes = await client.query('SELECT * FROM loans WHERE id = $1 FOR UPDATE', [loan_id]);
     if (loanRes.rows.length === 0) throw new Error('Loan not found');
     const loan = loanRes.rows[0];
 
-    // 2. Calculate new values
     const newBalance = Math.max(0, Number(loan.outstanding_balance) - Number(amount));
     const newAmountPaid = Number(loan.amount_paid) + Number(amount);
     const newStatus = newBalance <= 0 ? 'repaid' : loan.status;
-    const repaidAt = newBalance <= 0 ? 'NOW()' : 'NULL';
+    const isFullyRepaid = newBalance <= 0;
 
-    // 3. Update loan
     const updateRes = await client.query(
       `UPDATE loans 
        SET outstanding_balance = $1, 
            amount_paid = $2, 
            status = $3,
-           repaid_at = CASE WHEN $4 THEN NOW() ELSE NULL END,
-           next_payment_due = CASE WHEN $4 THEN NULL ELSE next_payment_due END
+           repaid_at = CASE WHEN $4 THEN NOW() ELSE NULL END
        WHERE id = $5 
        RETURNING *`,
-      [newBalance, newAmountPaid, newStatus, newBalance <= 0, loan_id]
+      [newBalance, newAmountPaid, newStatus, isFullyRepaid, loan_id]
     );
 
-    // 4. Update member's outstanding balance
+    // Update member's outstanding balance
     await client.query(
       `UPDATE members 
        SET total_outstanding_balance = total_outstanding_balance - $1 
@@ -174,8 +162,8 @@ async function applyRepayment(loan_id, amount) {
       [amount, loan.member_id]
     );
 
-    // 5. If fully repaid, increment successful_repayments and update credit limit
-    if (newBalance <= 0) {
+    // If fully repaid, increment successful_repayments and update credit limit
+    if (isFullyRepaid) {
       await client.query(
         `UPDATE members 
          SET successful_repayments = successful_repayments + 1,
@@ -198,9 +186,8 @@ async function applyRepayment(loan_id, amount) {
   }
 }
 
-// Get all loans for admin dashboard (with member name)
 async function findAllForAdmin() {
-  const result = await pool.query(
+  const result = await db.query(
     `SELECT l.*, m.full_name as member_name, m.phone_number 
      FROM loans l
      LEFT JOIN members m ON l.member_id = m.id
@@ -211,9 +198,8 @@ async function findAllForAdmin() {
   return result.rows;
 }
 
-// Get all pending loans for admin
 async function findPending() {
-  const result = await pool.query(
+  const result = await db.query(
     `SELECT l.*, m.full_name as member_name, m.phone_number 
      FROM loans l
      LEFT JOIN members m ON l.member_id = m.id

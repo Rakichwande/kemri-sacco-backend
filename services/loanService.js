@@ -90,9 +90,6 @@ class LoanService {
       return { success: false, message: 'Member not found.' };
     }
 
-    // 3. Update member's outstanding balance
-    await Member.updateOutstandingBalance(member.id, loan.total_repayment);
-
     // 4. Send SMS to member (Loan Approved)
     try {
       await smsService.sendSMS(
