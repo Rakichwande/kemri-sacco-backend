@@ -46,8 +46,40 @@ router.get('/me', authenticate, (req, res) => {
   res.json({ user: req.user });
 });
 
-// Create a new staff or admin account. Admin-only - a staff account can
-// never create another account, by design (requireAdmin gates this).
+// Any logged-in user can change their OWN password. Requires proving the
+// current password first - never a silent overwrite.
+router.post('/change-password', authenticate, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: 'currentPassword and newPassword are required' });
+    }
+    if (newPassword.length < 8) {
+      return res.status(400).json({ error: 'New password must be at least 8 characters' });
+    }
+    if (newPassword === currentPassword) {
+      return res.status(400).json({ error: 'New password must be different from the current one' });
+    }
+
+    const admin = await Admin.findByIdWithHash(req.user.id);
+    if (!admin) {
+      return res.status(404).json({ error: 'Account not found' });
+    }
+
+    const validCurrent = await Admin.verifyPassword(admin, currentPassword);
+    if (!validCurrent) {
+      return res.status(401).json({ error: 'Current password is incorrect' });
+    }
+
+    await Admin.updatePassword(admin.id, newPassword);
+    res.json({ message: 'Password updated successfully' });
+  } catch (err) {
+    console.error('Password change error:', err);
+    res.status(500).json({ error: 'Failed to update password' });
+  }
+});
+
 router.post('/register', authenticate, requireAdmin, async (req, res) => {
   try {
     const { username, password, full_name, role } = req.body;
@@ -75,7 +107,6 @@ router.post('/register', authenticate, requireAdmin, async (req, res) => {
   }
 });
 
-// List all staff/admin accounts. Admin-only.
 router.get('/users', authenticate, requireAdmin, async (req, res) => {
   try {
     const users = await Admin.findAll();

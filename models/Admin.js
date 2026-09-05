@@ -22,7 +22,7 @@ async function init() {
        VALUES ('admin', $1, 'System Administrator')`,
       [hash]
     );
-    console.log('✅ Default admin created: admin / KemriAdmin2026!');
+    console.log('✅ Default admin created: admin / KemriAdmin2026! - CHANGE THIS IMMEDIATELY');
   }
 }
 
@@ -31,12 +31,18 @@ async function findByUsername(username) {
   return result.rows[0];
 }
 
+async function findById(id) {
+  const result = await db.query(
+    'SELECT id, username, full_name, role, created_at FROM admins WHERE id = $1',
+    [id]
+  );
+  return result.rows[0];
+}
+
 async function verifyPassword(admin, password) {
   return await bcrypt.compare(password, admin.password_hash);
 }
 
-// Creates a staff or admin account. Only reachable via an admin-gated
-// route (requireAdmin middleware) - never exposed publicly.
 async function create({ username, password, full_name, role }) {
   const hash = await bcrypt.hash(password, 10);
   const result = await db.query(
@@ -47,7 +53,6 @@ async function create({ username, password, full_name, role }) {
   return result.rows[0];
 }
 
-// Never returns password_hash - this is for listing staff, not auth
 async function findAll() {
   const result = await db.query(
     'SELECT id, username, full_name, role, created_at FROM admins ORDER BY created_at DESC'
@@ -55,4 +60,27 @@ async function findAll() {
   return result.rows;
 }
 
-module.exports = { init, findByUsername, verifyPassword, create, findAll };
+async function updatePassword(id, newPassword) {
+  const hash = await bcrypt.hash(newPassword, 10);
+  const result = await db.query(
+    `UPDATE admins SET password_hash = $1 WHERE id = $2 RETURNING id, username, full_name, role`,
+    [hash, id]
+  );
+  return result.rows[0];
+}
+
+async function findByIdWithHash(id) {
+  const result = await db.query('SELECT * FROM admins WHERE id = $1', [id]);
+  return result.rows[0];
+}
+
+module.exports = {
+  init,
+  findByUsername,
+  findById,
+  findByIdWithHash,
+  verifyPassword,
+  create,
+  findAll,
+  updatePassword,
+};
