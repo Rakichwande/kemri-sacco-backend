@@ -14,12 +14,11 @@ CREATE TABLE IF NOT EXISTS admins (
 
 async function init() {
   await db.query(createAdminTableQuery);
-  // Seed default admin if none exists
   const existing = await db.query('SELECT * FROM admins LIMIT 1');
   if (existing.rows.length === 0) {
     const hash = await bcrypt.hash('KemriAdmin2026!', 10);
     await db.query(
-      `INSERT INTO admins (username, password_hash, full_name) 
+      `INSERT INTO admins (username, password_hash, full_name)
        VALUES ('admin', $1, 'System Administrator')`,
       [hash]
     );
@@ -36,4 +35,24 @@ async function verifyPassword(admin, password) {
   return await bcrypt.compare(password, admin.password_hash);
 }
 
-module.exports = { init, findByUsername, verifyPassword };
+// Creates a staff or admin account. Only reachable via an admin-gated
+// route (requireAdmin middleware) - never exposed publicly.
+async function create({ username, password, full_name, role }) {
+  const hash = await bcrypt.hash(password, 10);
+  const result = await db.query(
+    `INSERT INTO admins (username, password_hash, full_name, role)
+     VALUES ($1, $2, $3, $4) RETURNING id, username, full_name, role, created_at`,
+    [username, hash, full_name, role]
+  );
+  return result.rows[0];
+}
+
+// Never returns password_hash - this is for listing staff, not auth
+async function findAll() {
+  const result = await db.query(
+    'SELECT id, username, full_name, role, created_at FROM admins ORDER BY created_at DESC'
+  );
+  return result.rows;
+}
+
+module.exports = { init, findByUsername, verifyPassword, create, findAll };
