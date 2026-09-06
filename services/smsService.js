@@ -32,7 +32,7 @@ function normalizePhone(phoneNumber) {
     // Still return it, but we'll log a warning
   }
 
-  return cleaned;
+  return "+" + cleaned;
 }
 
 // SMS Templates
