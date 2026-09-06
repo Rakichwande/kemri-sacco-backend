@@ -73,7 +73,7 @@ async function sendSMS(phoneNumber, message) {
   }
 
   // Optionally, you can enforce that cleanPhone starts with '254' and length >= 10
-  if (!cleanPhone.startsWith('254') || cleanPhone.length < 10) {
+  if (!cleanPhone.startsWith('+254') || cleanPhone.length < 10) {
     console.warn('SMS not sent: normalized number does not look like a Kenyan number:', cleanPhone);
     return;
   }
