@@ -2,10 +2,11 @@ const express = require('express');
 const router = express.Router();
 const memberController = require('../controllers/memberController');
 const { validateMemberRegistration } = require('../middleware/validate');
-const requireApiKey = require('../middleware/requireApiKey');
+const { authenticate, requireAdmin } = require('../middleware/auth');
 
 router.post('/', validateMemberRegistration, memberController.registerMember);
-router.get('/:id', requireApiKey, memberController.getMember);
-router.get('/', requireApiKey, memberController.listMembers);
+router.get('/:id', authenticate, requireAdmin, memberController.getMember);
+router.get('/', authenticate, requireAdmin, memberController.listMembers);
+router.patch('/:id', authenticate, requireAdmin, memberController.updateMember);
 
 module.exports = router;

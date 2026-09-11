@@ -57,4 +57,32 @@ async function listMembers(req, res) {
   }
 }
 
-module.exports = { registerMember, getMember, listMembers };
+// Admin-only edit. Deliberately excludes id_number, phone_number, credit_limit,
+// total_outstanding_balance and successful_repayments - those are either
+// registration-fixed identity fields or values the loan/payment flows own
+// and must stay in sync with actual transactions, not a manual edit.
+const EDITABLE_FIELDS = ['full_name', 'nationality', 'age', 'employer', 'scheme', 'status'];
+
+async function updateMember(req, res) {
+  try {
+    const existing = await Member.findById(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Member not found' });
+
+    const updates = {};
+    for (const field of EDITABLE_FIELDS) {
+      if (req.body[field] !== undefined) updates[field] = req.body[field];
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: `No editable fields provided. Editable: ${EDITABLE_FIELDS.join(', ')}` });
+    }
+
+    const updated = await Member.update(req.params.id, updates);
+    res.json(updated);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to update member' });
+  }
+}
+
+module.exports = { registerMember, getMember, listMembers, updateMember };

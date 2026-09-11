@@ -1,4 +1,5 @@
 require('dotenv').config();
+require('./config/env'); // fails fast if JWT_SECRET/DATABASE_URL are missing or unsafe
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');

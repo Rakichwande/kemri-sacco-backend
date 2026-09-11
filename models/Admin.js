@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const db = require('../config/database');
 const bcrypt = require('bcryptjs');
 
@@ -8,21 +9,57 @@ CREATE TABLE IF NOT EXISTS admins (
   password_hash VARCHAR(255) NOT NULL,
   full_name VARCHAR(100) NOT NULL,
   role VARCHAR(20) DEFAULT 'admin',
+  must_change_password BOOLEAN DEFAULT true,
   created_at TIMESTAMP DEFAULT NOW()
 );
 `;
 
+// Older deployments may already have the table without this column.
+const addMustChangeColumnQuery = `
+ALTER TABLE admins ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN DEFAULT true;
+`;
+
+function generateRandomPassword() {
+  // 24 random bytes -> 32-char base64url string. Not memorable by design:
+  // it only ever needs to be typed once, immediately followed by a change.
+  return crypto.randomBytes(24).toString('base64url');
+}
+
 async function init() {
   await db.query(createAdminTableQuery);
+  await db.query(addMustChangeColumnQuery);
+
   const existing = await db.query('SELECT * FROM admins LIMIT 1');
-  if (existing.rows.length === 0) {
-    const hash = await bcrypt.hash('KemriAdmin2026!', 10);
-    await db.query(
-      `INSERT INTO admins (username, password_hash, full_name)
-       VALUES ('admin', $1, 'System Administrator')`,
-      [hash]
-    );
-    console.log('✅ Default admin created: admin / KemriAdmin2026! - CHANGE THIS IMMEDIATELY');
+  if (existing.rows.length > 0) return;
+
+  // No admin exists yet (fresh database). Bootstrap one account.
+  //
+  // Preferred: set ADMIN_BOOTSTRAP_USERNAME / ADMIN_BOOTSTRAP_PASSWORD in
+  // Render's environment (never in source) before first boot.
+  //
+  // Fallback: generate a random password and print it once to the server
+  // log. Render's logs are private to the account, unlike a committed file,
+  // and the account is flagged must_change_password so it can't stay in use
+  // long-term.
+  const bootstrapUsername = process.env.ADMIN_BOOTSTRAP_USERNAME || 'admin';
+  const bootstrapPassword = process.env.ADMIN_BOOTSTRAP_PASSWORD || generateRandomPassword();
+
+  const hash = await bcrypt.hash(bootstrapPassword, 10);
+  await db.query(
+    `INSERT INTO admins (username, password_hash, full_name, must_change_password)
+     VALUES ($1, $2, 'System Administrator', true)`,
+    [bootstrapUsername, hash]
+  );
+
+  if (process.env.ADMIN_BOOTSTRAP_PASSWORD) {
+    console.log(`Bootstrap admin created from ADMIN_BOOTSTRAP_USERNAME/PASSWORD (username: ${bootstrapUsername}).`);
+  } else {
+    console.log('==============================================================');
+    console.log('No ADMIN_BOOTSTRAP_PASSWORD set — generated a one-time password.');
+    console.log(`  username: ${bootstrapUsername}`);
+    console.log(`  password: ${bootstrapPassword}`);
+    console.log('Log in and change it immediately. This will not be shown again.');
+    console.log('==============================================================');
   }
 }
 
@@ -33,7 +70,7 @@ async function findByUsername(username) {
 
 async function findById(id) {
   const result = await db.query(
-    'SELECT id, username, full_name, role, created_at FROM admins WHERE id = $1',
+    'SELECT id, username, full_name, role, must_change_password, created_at FROM admins WHERE id = $1',
     [id]
   );
   return result.rows[0];
@@ -46,8 +83,8 @@ async function verifyPassword(admin, password) {
 async function create({ username, password, full_name, role }) {
   const hash = await bcrypt.hash(password, 10);
   const result = await db.query(
-    `INSERT INTO admins (username, password_hash, full_name, role)
-     VALUES ($1, $2, $3, $4) RETURNING id, username, full_name, role, created_at`,
+    `INSERT INTO admins (username, password_hash, full_name, role, must_change_password)
+     VALUES ($1, $2, $3, $4, true) RETURNING id, username, full_name, role, must_change_password, created_at`,
     [username, hash, full_name, role]
   );
   return result.rows[0];
@@ -55,7 +92,7 @@ async function create({ username, password, full_name, role }) {
 
 async function findAll() {
   const result = await db.query(
-    'SELECT id, username, full_name, role, created_at FROM admins ORDER BY created_at DESC'
+    'SELECT id, username, full_name, role, must_change_password, created_at FROM admins ORDER BY created_at DESC'
   );
   return result.rows;
 }
@@ -63,7 +100,8 @@ async function findAll() {
 async function updatePassword(id, newPassword) {
   const hash = await bcrypt.hash(newPassword, 10);
   const result = await db.query(
-    `UPDATE admins SET password_hash = $1 WHERE id = $2 RETURNING id, username, full_name, role`,
+    `UPDATE admins SET password_hash = $1, must_change_password = false WHERE id = $2
+     RETURNING id, username, full_name, role, must_change_password`,
     [hash, id]
   );
   return result.rows[0];

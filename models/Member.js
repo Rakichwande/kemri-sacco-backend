@@ -75,6 +75,20 @@ async function findAll() {
   return result.rows;
 }
 
+// Admin edit of member profile fields. `updates` is a plain object whose keys
+// are already whitelisted by the controller - this function trusts its caller
+// on that, but still builds the query parametrically rather than interpolating.
+async function update(id, updates) {
+  const keys = Object.keys(updates);
+  const setClause = keys.map((key, i) => `${key} = $${i + 2}`).join(', ');
+  const values = keys.map((key) => updates[key]);
+  const result = await pool.query(
+    `UPDATE members SET ${setClause} WHERE id = $1 RETURNING *`,
+    [id, ...values]
+  );
+  return result.rows[0];
+}
+
 // Update the member's total outstanding balance (add amount)
 async function updateOutstandingBalance(memberId, amount) {
   const result = await pool.query(
@@ -110,6 +124,7 @@ module.exports = {
   findById,
   findByPhoneOrId,
   findAll,
+  update,
   updateOutstandingBalance,
   incrementRepayments,
 };

@@ -3,8 +3,8 @@ const jwt = require('jsonwebtoken');
 const router = express.Router();
 const Admin = require('../models/Admin');
 const { authenticate, requireAdmin } = require('../middleware/auth');
+const { JWT_SECRET } = require('../config/env');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your_super_secret_key_change_me';
 const JWT_EXPIRY = '8h';
 const VALID_ROLES = ['admin', 'staff'];
 
@@ -34,6 +34,7 @@ router.post('/login', async (req, res) => {
         username: admin.username,
         full_name: admin.full_name,
         role: admin.role,
+        must_change_password: admin.must_change_password,
       },
     });
   } catch (err) {
