@@ -57,6 +57,9 @@ const templates = {
 
   loanRepaymentConfirmed: (name, amount, newBalance, receipt) =>
     `KEMRI SACCO: Repayment of ${formatKES(amount)} received. Outstanding loan: ${formatKES(newBalance)}. Receipt: ${receipt}. Thank you!`,
+
+  loanRejected: (name, reason) =>
+    `KEMRI SACCO: Your loan application was not approved.${reason ? ' Reason: ' + reason : ''} Contact the SACCO office for details.`,
 };
 
 // Send SMS function with enhanced validation and logging

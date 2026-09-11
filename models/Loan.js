@@ -26,8 +26,14 @@ CREATE INDEX IF NOT EXISTS idx_loans_member_id ON loans(member_id);
 CREATE INDEX IF NOT EXISTS idx_loans_status ON loans(status);
 `;
 
+// Older deployments may already have the table without this column.
+const addRejectedAtColumnQuery = `
+ALTER TABLE loans ADD COLUMN IF NOT EXISTS rejected_at TIMESTAMP;
+`;
+
 async function init() {
   await db.query(createLoansTableQuery);
+  await db.query(addRejectedAtColumnQuery);
 }
 
 async function create({ member_id, principal, interest_rate, tenure_months }) {
@@ -114,6 +120,24 @@ async function approve(loan_id) {
   } finally {
     client.release();
   }
+}
+
+// Only a pending loan can be rejected - guards against rejecting a loan
+// that's already been approved or disbursed. Returns undefined if the loan
+// doesn't exist or isn't pending, so the caller can distinguish that from
+// a successful rejection.
+async function reject(loan_id, adminNotes = '') {
+  const result = await db.query(
+    `UPDATE loans
+     SET status = 'rejected',
+         rejected_at = NOW(),
+         admin_notes = COALESCE(admin_notes, '') ||
+           CASE WHEN $2 <> '' THEN ' | Rejected: ' || $2 ELSE ' | Rejected' END
+     WHERE id = $1 AND status = 'pending'
+     RETURNING *`,
+    [loan_id, adminNotes]
+  );
+  return result.rows[0];
 }
 
 async function markDisbursed(loan_id, mpesa_receipt = null) {
@@ -217,6 +241,7 @@ module.exports = {
   getHistory,
   findById,
   approve,
+  reject,
   markDisbursed,
   applyRepayment,
   findAllForAdmin,

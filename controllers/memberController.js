@@ -1,5 +1,6 @@
 const Member = require('../models/Member');
 const smsService = require('../services/smsService');
+const AuditLog = require('../models/AuditLog');
 
 async function registerMember(req, res) {
   try {
@@ -78,6 +79,18 @@ async function updateMember(req, res) {
     }
 
     const updated = await Member.update(req.params.id, updates);
+
+    await AuditLog.log({
+      actorId: req.user.id,
+      actorUsername: req.user.username,
+      action: 'Updated member',
+      category: 'member_edit',
+      targetType: 'member',
+      targetId: req.params.id,
+      targetLabel: updated.full_name,
+      details: `Changed: ${Object.keys(updates).join(', ')}`,
+    });
+
     res.json(updated);
   } catch (err) {
     console.error(err);

@@ -17,6 +17,8 @@ const paymentRoutes = require('./routes/payments');
 const darajaWebhook = require('./webhooks/darajaWebhook');
 const errorHandler = require('./middleware/errorHandler');
 const ussdRoutes = require('./routes/ussd');
+const AuditLog = require('./models/AuditLog');
+const auditLogRoutes = require('./routes/auditLog');
 
 // ============================================================
 // IMPORTANT: Define `app` BEFORE using it!
@@ -39,6 +41,7 @@ app.use('/api/auth', authRoutes);
 // ----- LOAN ROUTES (NEW) -----
 const loanRoutes = require('./routes/loans');
 app.use('/api/loans', loanRoutes);   // <-- Now placed after app is defined
+app.use('/api/audit-log', auditLogRoutes);
 
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
@@ -53,6 +56,7 @@ async function start() {
     await Payment.init();
     await Loan.init();
     await Admin.init();
+    await AuditLog.init();
 
     app.listen(PORT, () => {
       console.log(`KEMRI SACCO backend running on port ${PORT}`);

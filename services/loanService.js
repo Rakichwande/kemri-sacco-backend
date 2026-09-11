@@ -112,6 +112,27 @@ class LoanService {
     };
   }
 
+  static async rejectLoan(loanId, adminNotes = '') {
+    const loan = await Loan.reject(loanId, adminNotes);
+    if (!loan) {
+      return { success: false, message: 'Loan not found or not in a pending state.' };
+    }
+
+    const member = await Member.findById(loan.member_id);
+    if (member) {
+      try {
+        await smsService.sendSMS(
+          member.phone_number,
+          smsService.templates.loanRejected(member.full_name, adminNotes)
+        );
+      } catch (smsErr) {
+        console.error('Loan rejection SMS failed (loan still rejected):', smsErr.message);
+      }
+    }
+
+    return { success: true, loan, message: 'Loan rejected.' };
+  }
+
   static async repayLoan(memberId) {
     const activeLoan = await Loan.getActiveLoan(memberId);
     if (!activeLoan) {

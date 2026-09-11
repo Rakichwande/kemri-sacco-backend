@@ -2,6 +2,7 @@ const LoanService = require('../services/loanService');
 const Member = require('../models/Member');
 const Loan = require('../models/Loan');
 const smsService = require('../services/smsService');
+const AuditLog = require('../models/AuditLog');
 
 // ============================================================
 // 1. Apply for a loan (Web or USSD)
@@ -32,17 +33,61 @@ exports.approveLoan = async (req, res) => {
     try {
         const { loanId } = req.params;
         const { adminNotes } = req.body;
-        
-        // In production, add admin authentication middleware here
+
         const result = await LoanService.approveLoan(loanId, adminNotes);
-        
+
         if (!result.success) {
             return res.status(400).json({ error: result.message });
         }
 
+        const member = await Member.findById(result.loan.member_id);
+        await AuditLog.log({
+            actorId: req.user.id,
+            actorUsername: req.user.username,
+            action: 'Approved loan',
+            category: 'loan_decision',
+            targetType: 'loan',
+            targetId: loanId,
+            targetLabel: member ? `${member.full_name} (loan #${loanId})` : `loan #${loanId}`,
+            details: `Approved KES ${result.loan.principal} loan.${adminNotes ? ' Notes: ' + adminNotes : ''}`,
+        });
+
         res.json(result);
     } catch (err) {
         console.error('Approve loan error:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+
+// ============================================================
+// 2b. Admin: Reject loan (sends SMS)
+// ============================================================
+exports.rejectLoan = async (req, res) => {
+    try {
+        const { loanId } = req.params;
+        const { adminNotes } = req.body;
+
+        const result = await LoanService.rejectLoan(loanId, adminNotes);
+
+        if (!result.success) {
+            return res.status(400).json({ error: result.message });
+        }
+
+        const member = await Member.findById(result.loan.member_id);
+        await AuditLog.log({
+            actorId: req.user.id,
+            actorUsername: req.user.username,
+            action: 'Rejected loan',
+            category: 'loan_decision',
+            targetType: 'loan',
+            targetId: loanId,
+            targetLabel: member ? `${member.full_name} (loan #${loanId})` : `loan #${loanId}`,
+            details: `Rejected KES ${result.loan.principal} loan application.${adminNotes ? ' Reason: ' + adminNotes : ''}`,
+        });
+
+        res.json(result);
+    } catch (err) {
+        console.error('Reject loan error:', err);
         res.status(500).json({ error: 'Server error' });
     }
 };
@@ -163,6 +208,17 @@ exports.markDisbursed = async (req, res) => {
         } catch (smsErr) {
             console.error('Loan disbursement SMS failed (loan still disbursed):', smsErr.message);
         }
+
+        await AuditLog.log({
+            actorId: req.user.id,
+            actorUsername: req.user.username,
+            action: 'Disbursed loan',
+            category: 'loan_decision',
+            targetType: 'loan',
+            targetId: loanId,
+            targetLabel: `${member.full_name} (loan #${loanId})`,
+            details: `Disbursed KES ${loan.principal} to ${member.full_name}.${mpesaReceipt ? ' Receipt: ' + mpesaReceipt : ''}`,
+        });
 
         res.json({
             success: true,

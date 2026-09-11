@@ -11,6 +11,7 @@ router.post('/repay', loanController.repayLoan);
 
 // Admin routes (authentication required)
 router.post('/approve/:loanId', authenticate, requireAdmin, loanController.approveLoan);
+router.post('/reject/:loanId', authenticate, requireAdmin, loanController.rejectLoan);
 router.post('/disburse/:loanId', authenticate, requireAdmin, loanController.markDisbursed);
 router.get('/admin/list', authenticate, requireAdmin, loanController.getAdminLoans);
 router.get('/admin/pending', authenticate, requireAdmin, loanController.getPendingLoans);
