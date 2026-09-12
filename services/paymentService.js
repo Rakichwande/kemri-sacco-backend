@@ -2,7 +2,8 @@ const darajaService = require('./darajaService');
 const smsService = require('./smsService');
 const Payment = require('../models/Payment');
 const Member = require('../models/Member');
-const Loan = require('../models/Loan'); // <-- ADD THIS
+const Loan = require('../models/Loan');
+const Repayment = require('../models/Repayment');
 
 /**
  * Initiate a payment (deposit or loan repayment)
@@ -75,6 +76,20 @@ async function handleCallback(callbackBody) {
       if (!updatedLoan) {
         console.error('Loan repayment failed: loan not found for ID', payment.loan_id);
         return;
+      }
+
+      // One row per confirmed repayment transaction - backs Repayment History
+      // and the dashboard chart. Never blocks the repayment itself if it fails.
+      try {
+        await Repayment.create({
+          loan_id: payment.loan_id,
+          member_id: payment.member_id,
+          amount: payment.amount,
+          channel: 'mpesa',
+          mpesa_receipt: mpesaReceipt,
+        });
+      } catch (repaymentLogErr) {
+        console.error('Repayment log write failed (repayment itself still applied):', repaymentLogErr.message);
       }
 
       // Send repayment confirmation SMS
