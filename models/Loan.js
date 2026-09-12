@@ -215,7 +215,7 @@ async function findAllForAdmin() {
     `SELECT l.*, m.full_name as member_name, m.phone_number 
      FROM loans l
      LEFT JOIN members m ON l.member_id = m.id
-     WHERE l.status IN ('pending', 'approved', 'disbursed', 'repaid')
+     WHERE l.status IN ('pending', 'approved', 'disbursed', 'repaid', 'rejected')
      ORDER BY l.applied_at DESC
      LIMIT 100`
   );
