@@ -50,7 +50,7 @@ async function getMember(req, res) {
 
 async function listMembers(req, res) {
   try {
-    const members = await Member.findAll();
+    const members = await Member.findAllForDirectory();
     res.json(members);
   } catch (err) {
     console.error(err);

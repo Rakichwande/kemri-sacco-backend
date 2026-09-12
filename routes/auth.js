@@ -4,6 +4,7 @@ const router = express.Router();
 const Admin = require('../models/Admin');
 const { authenticate, requireAdmin } = require('../middleware/auth');
 const { JWT_SECRET } = require('../config/env');
+const AuditLog = require('../models/AuditLog');
 
 const JWT_EXPIRY = '8h';
 const VALID_ROLES = ['admin', 'staff'];
@@ -101,6 +102,16 @@ router.post('/register', authenticate, requireAdmin, async (req, res) => {
     }
 
     const newAccount = await Admin.create({ username, password, full_name, role });
+    await AuditLog.log({
+      actorId: req.user.id,
+      actorUsername: req.user.username,
+      action: 'Created staff account',
+      category: 'staff_management',
+      targetType: 'admin',
+      targetId: newAccount.id,
+      targetLabel: full_name,
+      details: `Created account "${username}" with role "${role}".`,
+    });
     res.status(201).json(newAccount);
   } catch (err) {
     console.error('Account creation error:', err);
@@ -115,6 +126,81 @@ router.get('/users', authenticate, requireAdmin, async (req, res) => {
   } catch (err) {
     console.error('Failed to list accounts:', err);
     res.status(500).json({ error: 'Failed to list accounts' });
+  }
+});
+
+// Change another account's role. Guards against removing the last admin -
+// otherwise a mistaken demotion could lock every admin out of the console
+// with no way to promote anyone back.
+router.patch('/users/:id/role', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const { role } = req.body;
+    if (!VALID_ROLES.includes(role)) {
+      return res.status(400).json({ error: `role must be one of: ${VALID_ROLES.join(', ')}` });
+    }
+
+    const target = await Admin.findById(req.params.id);
+    if (!target) return res.status(404).json({ error: 'Account not found' });
+
+    if (target.role === 'admin' && role !== 'admin') {
+      const allAdmins = (await Admin.findAll()).filter((a) => a.role === 'admin');
+      if (allAdmins.length <= 1) {
+        return res.status(400).json({ error: 'Cannot demote the last remaining admin account.' });
+      }
+    }
+
+    const updated = await Admin.updateRole(req.params.id, role);
+    await AuditLog.log({
+      actorId: req.user.id,
+      actorUsername: req.user.username,
+      action: 'Changed staff role',
+      category: 'staff_management',
+      targetType: 'admin',
+      targetId: req.params.id,
+      targetLabel: target.full_name,
+      details: `Changed role from ${target.role} to ${role}.`,
+    });
+    res.json(updated);
+  } catch (err) {
+    console.error('Role update error:', err);
+    res.status(500).json({ error: 'Failed to update role' });
+  }
+});
+
+// Remove a staff/admin account. Guards against removing yourself and against
+// removing the last admin, for the same reason as above.
+router.delete('/users/:id', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const targetId = Number(req.params.id);
+    if (targetId === req.user.id) {
+      return res.status(400).json({ error: 'You cannot remove your own account.' });
+    }
+
+    const target = await Admin.findById(targetId);
+    if (!target) return res.status(404).json({ error: 'Account not found' });
+
+    if (target.role === 'admin') {
+      const allAdmins = (await Admin.findAll()).filter((a) => a.role === 'admin');
+      if (allAdmins.length <= 1) {
+        return res.status(400).json({ error: 'Cannot remove the last remaining admin account.' });
+      }
+    }
+
+    await Admin.remove(targetId);
+    await AuditLog.log({
+      actorId: req.user.id,
+      actorUsername: req.user.username,
+      action: 'Removed staff account',
+      category: 'staff_management',
+      targetType: 'admin',
+      targetId: targetId,
+      targetLabel: target.full_name,
+      details: `Removed account "${target.username}" (${target.role}).`,
+    });
+    res.json({ message: 'Account removed.' });
+  } catch (err) {
+    console.error('Account removal error:', err);
+    res.status(500).json({ error: 'Failed to remove account' });
   }
 });
 

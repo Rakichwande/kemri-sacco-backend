@@ -45,6 +45,8 @@ const loanRoutes = require('./routes/loans');
 app.use('/api/loans', loanRoutes);   // <-- Now placed after app is defined
 app.use('/api/audit-log', auditLogRoutes);
 app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/repayments', require('./routes/repayments'));
+app.use('/api/reports', require('./routes/reports'));
 
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
@@ -56,8 +58,8 @@ async function start() {
   try {
     // Creates tables if they don't exist yet
     await Member.init();
-    await Payment.init();
     await Loan.init();
+    await Payment.init();
     await Repayment.init();
     await Admin.init();
     await AuditLog.init();

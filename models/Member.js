@@ -75,6 +75,32 @@ async function findAll() {
   return result.rows;
 }
 
+// One query, all members, with computed savings balance and current loan
+// status - for the Member Directory page. Avoids an N+1 query per member.
+async function findAllForDirectory() {
+  const result = await pool.query(`
+    SELECT
+      m.*,
+      COALESCE(sav.balance, 0) AS savings_balance,
+      loan.status AS current_loan_status
+    FROM members m
+    LEFT JOIN LATERAL (
+      SELECT SUM(amount) AS balance
+      FROM payments p
+      WHERE p.member_id = m.id AND p.status = 'completed' AND p.loan_id IS NULL
+    ) sav ON true
+    LEFT JOIN LATERAL (
+      SELECT status
+      FROM loans l
+      WHERE l.member_id = m.id AND l.status IN ('pending', 'approved', 'disbursed')
+      ORDER BY l.applied_at DESC
+      LIMIT 1
+    ) loan ON true
+    ORDER BY m.created_at DESC
+  `);
+  return result.rows;
+}
+
 // Admin edit of member profile fields. `updates` is a plain object whose keys
 // are already whitelisted by the controller - this function trusts its caller
 // on that, but still builds the query parametrically rather than interpolating.
@@ -124,6 +150,7 @@ module.exports = {
   findById,
   findByPhoneOrId,
   findAll,
+  findAllForDirectory,
   update,
   updateOutstandingBalance,
   incrementRepayments,

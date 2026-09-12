@@ -112,6 +112,19 @@ async function findByIdWithHash(id) {
   return result.rows[0];
 }
 
+async function updateRole(id, role) {
+  const result = await db.query(
+    `UPDATE admins SET role = $1 WHERE id = $2
+     RETURNING id, username, full_name, role, must_change_password, created_at`,
+    [role, id]
+  );
+  return result.rows[0];
+}
+
+async function remove(id) {
+  await db.query('DELETE FROM admins WHERE id = $1', [id]);
+}
+
 module.exports = {
   init,
   findByUsername,
@@ -121,4 +134,6 @@ module.exports = {
   create,
   findAll,
   updatePassword,
+  updateRole,
+  remove,
 };

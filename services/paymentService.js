@@ -27,7 +27,7 @@ async function initiatePayment({ memberId, phoneNumber, amount, loanId }) {
       description,
     });
 
-    // Save payment record with optional loan_id
+    // Save payment record, tagging it with loan_id when this is a repayment
     await Payment.create({
       member_id: memberId,
       amount,
@@ -35,7 +35,7 @@ async function initiatePayment({ memberId, phoneNumber, amount, loanId }) {
       account_reference: accountReference,
       description,
       checkout_request_id: stkResponse.CheckoutRequestID,
-      loan_id: loanId || null, // <-- ADD THIS FIELD
+      loan_id: loanId || null,
     });
 
     return stkResponse;
