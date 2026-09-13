@@ -56,4 +56,4 @@ function validatePaymentInitiation(req, res, next) {
   next();
 }
 
-module.exports = { validateMemberRegistration, validatePaymentInitiation, isValidKenyanPhone };
+module.exports = { validateMemberRegistration, validatePaymentInitiation, isValidKenyanPhone, isValidIdNumber };

@@ -1,4 +1,5 @@
 const pool = require('../config/database');
+const Member = require('./Member');
 
 // Create the payments table if it doesn't exist
 async function init() {
@@ -107,7 +108,7 @@ async function findAllAdmin({ search, from, to, limit = 50, offset = 0 } = {}) {
   values.push(limit, offset);
 
   const result = await pool.query(
-    `SELECT p.*, m.full_name AS member_name
+    `SELECT p.*, m.full_name AS member_name, ${Member.REFERENCE_SQL} AS member_reference
      FROM payments p
      LEFT JOIN members m ON p.member_id = m.id
      ${where}

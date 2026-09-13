@@ -1,4 +1,5 @@
 const db = require('../config/database');
+const Member = require('./Member');
 
 const createTableQuery = `
 CREATE TABLE IF NOT EXISTS repayments (
@@ -60,7 +61,7 @@ async function findAll({ search, from, to, channel, limit = 50, offset = 0 } = {
   values.push(limit, offset);
 
   const result = await db.query(
-    `SELECT r.*, m.full_name AS member_name
+    `SELECT r.*, m.full_name AS member_name, ${Member.REFERENCE_SQL} AS member_reference
      FROM repayments r
      LEFT JOIN members m ON r.member_id = m.id
      ${where}

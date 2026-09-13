@@ -1,4 +1,5 @@
 const db = require('../config/database');
+const Member = require('./Member');
 
 const createLoansTableQuery = `
 CREATE TABLE IF NOT EXISTS loans (
@@ -212,7 +213,7 @@ async function applyRepayment(loan_id, amount) {
 
 async function findAllForAdmin() {
   const result = await db.query(
-    `SELECT l.*, m.full_name as member_name, m.phone_number 
+    `SELECT l.*, m.full_name as member_name, m.phone_number, ${Member.REFERENCE_SQL} AS member_reference
      FROM loans l
      LEFT JOIN members m ON l.member_id = m.id
      WHERE l.status IN ('pending', 'approved', 'disbursed', 'repaid', 'rejected')
@@ -224,7 +225,7 @@ async function findAllForAdmin() {
 
 async function findPending() {
   const result = await db.query(
-    `SELECT l.*, m.full_name as member_name, m.phone_number 
+    `SELECT l.*, m.full_name as member_name, m.phone_number, ${Member.REFERENCE_SQL} AS member_reference
      FROM loans l
      LEFT JOIN members m ON l.member_id = m.id
      WHERE l.status = 'pending'

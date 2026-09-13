@@ -4,10 +4,22 @@ const Loan = require('../models/Loan');
 const paymentService = require('../services/paymentService');
 const LoanService = require('../services/loanService');
 const smsService = require('../services/smsService');
+const UssdSession = require('../models/UssdSession');
+
+// Heuristic for whether a USSD response represents a failed step, based on
+// the response text itself - there's no separate error flag in the Africa's
+// Talking response format (just CON/END + a message), so this is the most
+// honest signal available without changing the underlying menu logic.
+const FAILURE_PHRASES = ['invalid', 'wrong', 'failed', 'error', 'something went wrong', 'not found', 'insufficient'];
+function looksLikeFailure(responseText) {
+  const lower = responseText.toLowerCase();
+  return FAILURE_PHRASES.some((phrase) => lower.includes(phrase));
+}
 
 async function handleUssd(req, res) {
-  const { phoneNumber, text } = req.body;
+  const { sessionId, phoneNumber, serviceCode, text } = req.body;
   const input = (text || '').split('*').filter(Boolean);
+  const startedAt = Date.now();
 
   let response;
 
@@ -48,6 +60,16 @@ async function handleUssd(req, res) {
     console.error('USSD error:', err);
     response = 'END Something went wrong. Please try again shortly.';
   }
+
+  UssdSession.log({
+    sessionId,
+    phoneNumber,
+    serviceCode,
+    inputText: text || '',
+    status: looksLikeFailure(response) ? 'failed' : 'success',
+    durationMs: Date.now() - startedAt,
+    message: response.replace(/^(CON|END)\s*/, '').split('\n')[0].slice(0, 300),
+  });
 
   res.set('Content-Type', 'text/plain');
   res.send(response);

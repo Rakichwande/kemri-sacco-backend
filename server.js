@@ -21,6 +21,7 @@ const ussdRoutes = require('./routes/ussd');
 const AuditLog = require('./models/AuditLog');
 const auditLogRoutes = require('./routes/auditLog');
 const dashboardRoutes = require('./routes/dashboard');
+const UssdSession = require('./models/UssdSession');
 
 // ============================================================
 // IMPORTANT: Define `app` BEFORE using it!
@@ -47,6 +48,7 @@ app.use('/api/audit-log', auditLogRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/repayments', require('./routes/repayments'));
 app.use('/api/reports', require('./routes/reports'));
+app.use('/api/system-health', require('./routes/systemHealth'));
 
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
@@ -61,6 +63,7 @@ async function start() {
     await Loan.init();
     await Payment.init();
     await Repayment.init();
+    await UssdSession.init();
     await Admin.init();
     await AuditLog.init();
 
