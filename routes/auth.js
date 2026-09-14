@@ -7,19 +7,45 @@ const { JWT_SECRET } = require('../config/env');
 const AuditLog = require('../models/AuditLog');
 const StaffInvite = require('../models/StaffInvite');
 const emailService = require('../services/emailService');
+const crypto = require('crypto');
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://kemri-sacco-portal.onrender.com';
+const OTP_EXPIRY_MINUTES = 10;
+const OTP_MAX_ATTEMPTS = 5;
+const RESET_EXPIRY_MINUTES = 60;
+
+function issueSessionToken(admin) {
+  const token = jwt.sign(
+    { id: admin.id, username: admin.username, role: admin.role },
+    JWT_SECRET,
+    { expiresIn: JWT_EXPIRY }
+  );
+  return {
+    token,
+    user: {
+      id: admin.id,
+      username: admin.username,
+      full_name: admin.full_name,
+      role: admin.role,
+      must_change_password: admin.must_change_password,
+    },
+  };
+}
+
+function generateOtpCode() {
+  return String(crypto.randomInt(100000, 999999)); // 6 digits
+}
 
 const JWT_EXPIRY = '8h';
 const VALID_ROLES = ['admin', 'staff'];
 
 router.post('/login', async (req, res) => {
   try {
-    const { username, password } = req.body;
+    const { username, password } = req.body; // `username` field accepts username OR email
     if (!username || !password) {
       return res.status(400).json({ error: 'Username and password required' });
     }
-    const admin = await Admin.findByUsername(username);
+    const admin = await Admin.findByUsernameOrEmail(username);
     if (!admin) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
@@ -27,23 +53,168 @@ router.post('/login', async (req, res) => {
     if (!valid) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
-    const token = jwt.sign(
-      { id: admin.id, username: admin.username, role: admin.role },
-      JWT_SECRET,
-      { expiresIn: JWT_EXPIRY }
-    );
+
+    // OTP only kicks in when the account has opted into email notifications,
+    // has a real email on file, AND email sending is actually configured.
+    // Any one of those missing falls back to normal password-only login -
+    // this can never lock an account out over something outside its control.
+    const otpEligible = admin.notify_email && admin.email && emailService.isConfigured();
+
+    if (!otpEligible) {
+      return res.json(issueSessionToken(admin));
+    }
+
+    const code = generateOtpCode();
+    const expiresAt = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000);
+    await Admin.setOtp(admin.id, code, expiresAt);
+
+    const { subject, html, text } = emailService.otpEmailContent(code);
+    await emailService.sendEmail({ to: admin.email, subject, html, text });
+
+    // Short-lived token identifying WHICH login attempt this OTP belongs to -
+    // not a session token, can't be used to access anything until verified.
+    const otpToken = jwt.sign({ id: admin.id, purpose: 'otp' }, JWT_SECRET, { expiresIn: '15m' });
+
     res.json({
-      token,
-      user: {
-        id: admin.id,
-        username: admin.username,
-        full_name: admin.full_name,
-        role: admin.role,
-        must_change_password: admin.must_change_password,
-      },
+      otpRequired: true,
+      otpToken,
+      message: `A verification code was sent to ${admin.email.replace(/(.{2}).+(@.+)/, '$1***$2')}.`,
     });
   } catch (err) {
     console.error('Login error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.post('/verify-otp', async (req, res) => {
+  try {
+    const { otpToken, code } = req.body;
+    if (!otpToken || !code) {
+      return res.status(400).json({ error: 'otpToken and code are required' });
+    }
+
+    let payload;
+    try {
+      payload = jwt.verify(otpToken, JWT_SECRET);
+    } catch (err) {
+      return res.status(401).json({ error: 'This verification session has expired. Please log in again.' });
+    }
+    if (payload.purpose !== 'otp') {
+      return res.status(401).json({ error: 'Invalid verification session.' });
+    }
+
+    const admin = await Admin.findById(payload.id);
+    if (!admin || !admin.otp_code) {
+      return res.status(401).json({ error: 'No pending verification. Please log in again.' });
+    }
+    if (new Date(admin.otp_expires_at) < new Date()) {
+      await Admin.clearOtp(admin.id);
+      return res.status(401).json({ error: 'This code has expired. Please log in again.' });
+    }
+    if (admin.otp_attempts >= OTP_MAX_ATTEMPTS) {
+      await Admin.clearOtp(admin.id);
+      return res.status(401).json({ error: 'Too many incorrect attempts. Please log in again.' });
+    }
+
+    if (code !== admin.otp_code) {
+      const attempts = await Admin.incrementOtpAttempts(admin.id);
+      return res.status(401).json({ error: `Incorrect code. ${Math.max(0, OTP_MAX_ATTEMPTS - attempts)} attempt(s) left.` });
+    }
+
+    await Admin.clearOtp(admin.id);
+    res.json(issueSessionToken(admin));
+  } catch (err) {
+    console.error('OTP verification error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.post('/resend-otp', async (req, res) => {
+  try {
+    const { otpToken } = req.body;
+    let payload;
+    try {
+      payload = jwt.verify(otpToken, JWT_SECRET);
+    } catch (err) {
+      return res.status(401).json({ error: 'This verification session has expired. Please log in again.' });
+    }
+    const admin = await Admin.findById(payload.id);
+    if (!admin || !admin.email) {
+      return res.status(401).json({ error: 'No pending verification. Please log in again.' });
+    }
+
+    const code = generateOtpCode();
+    const expiresAt = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000);
+    await Admin.setOtp(admin.id, code, expiresAt);
+
+    const { subject, html, text } = emailService.otpEmailContent(code);
+    await emailService.sendEmail({ to: admin.email, subject, html, text });
+
+    res.json({ message: 'A new code has been sent.' });
+  } catch (err) {
+    console.error('Resend OTP error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Deliberately responds the same way whether or not the account/email
+// exists - standard practice, avoids letting someone probe which
+// usernames or emails are registered.
+router.post('/forgot-password', async (req, res) => {
+  const genericResponse = { message: 'If an account with that username or email exists and has an email on file, a reset link has been sent.' };
+  try {
+    const { identifier } = req.body;
+    if (!identifier) return res.json(genericResponse);
+
+    const admin = await Admin.findByUsernameOrEmail(identifier);
+    if (admin && admin.email && emailService.isConfigured()) {
+      const token = crypto.randomBytes(24).toString('base64url');
+      const expiresAt = new Date(Date.now() + RESET_EXPIRY_MINUTES * 60 * 1000);
+      await Admin.setResetToken(admin.id, token, expiresAt);
+
+      const resetLink = `${FRONTEND_URL}/reset-password/${token}`;
+      const { subject, html, text } = emailService.passwordResetEmailContent(resetLink);
+      await emailService.sendEmail({ to: admin.email, subject, html, text });
+    } else if (admin && !admin.email) {
+      console.log(`Password reset requested for "${identifier}" but no email is on file - cannot send a reset link.`);
+    }
+
+    res.json(genericResponse);
+  } catch (err) {
+    console.error('Forgot password error:', err);
+    res.json(genericResponse); // still generic, even on an internal error
+  }
+});
+
+router.get('/reset-password/:token', async (req, res) => {
+  try {
+    const admin = await Admin.findByResetToken(req.params.token);
+    if (!admin) return res.status(404).json({ error: 'This reset link is invalid or has already been used.' });
+    if (new Date(admin.reset_token_expires_at) < new Date()) {
+      return res.status(400).json({ error: 'This reset link has expired.' });
+    }
+    res.json({ valid: true, username: admin.username });
+  } catch (err) {
+    console.error('Reset token check error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.post('/reset-password/:token', async (req, res) => {
+  try {
+    const admin = await Admin.findByResetToken(req.params.token);
+    if (!admin) return res.status(404).json({ error: 'This reset link is invalid or has already been used.' });
+    if (new Date(admin.reset_token_expires_at) < new Date()) {
+      return res.status(400).json({ error: 'This reset link has expired.' });
+    }
+    const { newPassword } = req.body;
+    if (!newPassword || newPassword.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    }
+    await Admin.resetPasswordWithToken(admin.id, newPassword);
+    res.json({ message: 'Password updated. You can now log in.' });
+  } catch (err) {
+    console.error('Reset password error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });

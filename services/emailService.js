@@ -81,4 +81,36 @@ const staffTemplates = {
     staffEventEmail('Deposit received', `A deposit of KES ${Number(amount).toLocaleString()} was received from ${name}.`),
 };
 
-module.exports = { isConfigured, sendEmail, inviteEmailContent, staffTemplates };
+function otpEmailContent(code) {
+  const subject = `Your KEMRI SACCO verification code: ${code}`;
+  const html = `
+    <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
+      <h2 style="color: #1F3D2E;">KEMRI SACCO Admin Console</h2>
+      <p>Your verification code is:</p>
+      <p style="font-size: 2em; font-weight: bold; letter-spacing: 0.1em; color: #1F3D2E;">${code}</p>
+      <p style="color: #666; font-size: 0.85em;">This code expires in 10 minutes. If you didn't try to log in, you can ignore this email.</p>
+    </div>
+  `;
+  const text = `Your KEMRI SACCO verification code is: ${code}\n\nThis code expires in 10 minutes. If you didn't try to log in, you can ignore this email.`;
+  return { subject, html, text };
+}
+
+function passwordResetEmailContent(resetLink) {
+  const subject = 'Reset your KEMRI SACCO Admin Console password';
+  const html = `
+    <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
+      <h2 style="color: #1F3D2E;">KEMRI SACCO Admin Console</h2>
+      <p>Someone requested a password reset for this account. If that was you, click below:</p>
+      <p>
+        <a href="${resetLink}" style="background: #1F3D2E; color: #fff; padding: 10px 20px; text-decoration: none; border-radius: 4px; display: inline-block;">
+          Reset Password
+        </a>
+      </p>
+      <p style="color: #666; font-size: 0.85em;">This link expires in 1 hour. If you didn't request this, you can ignore this email - your password won't change.</p>
+    </div>
+  `;
+  const text = `Someone requested a password reset for this account.\n\nReset your password: ${resetLink}\n\nThis link expires in 1 hour. If you didn't request this, ignore this email.`;
+  return { subject, html, text };
+}
+
+module.exports = { isConfigured, sendEmail, inviteEmailContent, staffTemplates, otpEmailContent, passwordResetEmailContent };

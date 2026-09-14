@@ -127,7 +127,8 @@ async function handleRegister(phoneNumber, steps) {
       emailContent: emailService.staffTemplates.newMember(full_name),
     });
 
-    return `END Thank you, ${full_name}. Your registration is received. Ref: KSC-${String(member.id).padStart(5, '0')}. Visit our portal to complete your application.`;
+    const memberRef = `KEMRI-${new Date(member.created_at).getFullYear()}-${String(member.id).padStart(4, '0')}`;
+    return `END Thank you, ${full_name}. Your registration is received. Ref: ${memberRef}. Visit our portal to complete your application.`;
   }
 
   return 'END Invalid input. Please dial again.';
@@ -210,10 +211,10 @@ async function handleLoanApplication(phoneNumber, steps) {
     }
 
     const { loan } = result;
-    const ref = `LN-${String(loan.id).padStart(5, '0')}`;
+    const ref = `KEMRI-${new Date(loan.applied_at).getFullYear()}-${String(loan.member_id).padStart(4, '0')}`;
 
     const summary =
-      `Loan approved for application: KES ${Number(loan.principal).toLocaleString()}\n` +
+      `Loan application received: KES ${Number(loan.principal).toLocaleString()}\n` +
       `Total repayable (incl. interest): KES ${Number(loan.total_repayment).toLocaleString()}\n` +
       `Over ${loan.tenure_months} months, ~KES ${Number(loan.monthly_installment).toLocaleString()}/month\n` +
       `Ref: ${ref}. Awaiting SACCO review.`;

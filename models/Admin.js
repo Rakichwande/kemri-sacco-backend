@@ -26,6 +26,13 @@ ALTER TABLE admins ADD COLUMN IF NOT EXISTS email VARCHAR(150);
 ALTER TABLE admins ADD COLUMN IF NOT EXISTS notify_sms BOOLEAN DEFAULT true;
 ALTER TABLE admins ADD COLUMN IF NOT EXISTS notify_email BOOLEAN DEFAULT false;
 `;
+const addAuthSecurityColumnsQuery = `
+ALTER TABLE admins ADD COLUMN IF NOT EXISTS otp_code VARCHAR(10);
+ALTER TABLE admins ADD COLUMN IF NOT EXISTS otp_expires_at TIMESTAMP;
+ALTER TABLE admins ADD COLUMN IF NOT EXISTS otp_attempts INT DEFAULT 0;
+ALTER TABLE admins ADD COLUMN IF NOT EXISTS reset_token VARCHAR(64);
+ALTER TABLE admins ADD COLUMN IF NOT EXISTS reset_token_expires_at TIMESTAMP;
+`;
 
 function generateRandomPassword() {
   // 24 random bytes -> 32-char base64url string. Not memorable by design:
@@ -38,6 +45,7 @@ async function init() {
   await db.query(addMustChangeColumnQuery);
   await db.query(addPhoneColumnQuery);
   await db.query(addNotificationColumnsQuery);
+  await db.query(addAuthSecurityColumnsQuery);
 
   const existing = await db.query('SELECT * FROM admins LIMIT 1');
   if (existing.rows.length > 0) return;
@@ -76,6 +84,59 @@ async function init() {
 async function findByUsername(username) {
   const result = await db.query('SELECT * FROM admins WHERE username = $1', [username]);
   return result.rows[0];
+}
+
+// Login accepts either a username or an email - this single lookup covers both.
+async function findByUsernameOrEmail(identifier) {
+  const result = await db.query(
+    'SELECT * FROM admins WHERE username = $1 OR email = $1',
+    [identifier]
+  );
+  return result.rows[0];
+}
+
+async function setOtp(id, code, expiresAt) {
+  await db.query(
+    'UPDATE admins SET otp_code = $1, otp_expires_at = $2, otp_attempts = 0 WHERE id = $3',
+    [code, expiresAt, id]
+  );
+}
+
+async function clearOtp(id) {
+  await db.query(
+    'UPDATE admins SET otp_code = NULL, otp_expires_at = NULL, otp_attempts = 0 WHERE id = $1',
+    [id]
+  );
+}
+
+async function incrementOtpAttempts(id) {
+  const result = await db.query(
+    'UPDATE admins SET otp_attempts = otp_attempts + 1 WHERE id = $1 RETURNING otp_attempts',
+    [id]
+  );
+  return result.rows[0]?.otp_attempts;
+}
+
+async function setResetToken(id, token, expiresAt) {
+  await db.query(
+    'UPDATE admins SET reset_token = $1, reset_token_expires_at = $2 WHERE id = $3',
+    [token, expiresAt, id]
+  );
+}
+
+async function findByResetToken(token) {
+  const result = await db.query('SELECT * FROM admins WHERE reset_token = $1', [token]);
+  return result.rows[0];
+}
+
+async function resetPasswordWithToken(id, newPassword) {
+  const hash = await bcrypt.hash(newPassword, 10);
+  await db.query(
+    `UPDATE admins SET password_hash = $1, must_change_password = false,
+       reset_token = NULL, reset_token_expires_at = NULL
+     WHERE id = $2`,
+    [hash, id]
+  );
 }
 
 async function findById(id) {
@@ -166,4 +227,11 @@ module.exports = {
   updateRole,
   remove,
   updateNotificationPreferences,
+  findByUsernameOrEmail,
+  setOtp,
+  clearOtp,
+  incrementOtpAttempts,
+  setResetToken,
+  findByResetToken,
+  resetPasswordWithToken,
 };
