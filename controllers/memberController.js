@@ -1,6 +1,8 @@
 const Member = require('../models/Member');
 const smsService = require('../services/smsService');
 const AuditLog = require('../models/AuditLog');
+const notificationService = require('../services/notificationService');
+const emailService = require('../services/emailService');
 
 async function registerMember(req, res) {
   try {
@@ -28,6 +30,10 @@ async function registerMember(req, res) {
     } catch (smsErr) {
       console.error('SMS notification failed (member still registered):', smsErr.message);
     }
+    notificationService.notifyStaff({
+      smsText: smsService.templates.staffNewMember(full_name),
+      emailContent: emailService.staffTemplates.newMember(full_name),
+    });
 
     return member;
   } catch (err) {

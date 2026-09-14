@@ -5,6 +5,8 @@ const paymentService = require('../services/paymentService');
 const LoanService = require('../services/loanService');
 const smsService = require('../services/smsService');
 const UssdSession = require('../models/UssdSession');
+const notificationService = require('../services/notificationService');
+const emailService = require('../services/emailService');
 
 // Heuristic for whether a USSD response represents a failed step, based on
 // the response text itself - there's no separate error flag in the Africa's
@@ -120,6 +122,10 @@ async function handleRegister(phoneNumber, steps) {
     } catch (smsErr) {
       console.error('USSD registration SMS failed (member still registered):', smsErr.message);
     }
+    notificationService.notifyStaff({
+      smsText: smsService.templates.staffNewMember(full_name),
+      emailContent: emailService.staffTemplates.newMember(full_name),
+    });
 
     return `END Thank you, ${full_name}. Your registration is received. Ref: KSC-${String(member.id).padStart(5, '0')}. Visit our portal to complete your application.`;
   }
@@ -221,6 +227,10 @@ async function handleLoanApplication(phoneNumber, steps) {
     } catch (smsErr) {
       console.error('USSD loan application SMS failed (application still recorded):', smsErr.message);
     }
+    notificationService.notifyStaff({
+      smsText: smsService.templates.staffLoanApplication(member.full_name, loan.principal, ref),
+      emailContent: emailService.staffTemplates.loanApplication(member.full_name, loan.principal, ref),
+    });
 
     return `END ${summary}`;
   }

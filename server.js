@@ -22,6 +22,7 @@ const AuditLog = require('./models/AuditLog');
 const auditLogRoutes = require('./routes/auditLog');
 const dashboardRoutes = require('./routes/dashboard');
 const UssdSession = require('./models/UssdSession');
+const StaffInvite = require('./models/StaffInvite');
 
 // ============================================================
 // IMPORTANT: Define `app` BEFORE using it!
@@ -64,6 +65,7 @@ async function start() {
     await Payment.init();
     await Repayment.init();
     await UssdSession.init();
+    await StaffInvite.init();
     await Admin.init();
     await AuditLog.init();
 

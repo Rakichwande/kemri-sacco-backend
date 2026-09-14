@@ -60,6 +60,20 @@ const templates = {
 
   loanRejected: (name, reason) =>
     `KEMRI SACCO: Your loan application was not approved.${reason ? ' Reason: ' + reason : ''} Contact the SACCO office for details.`,
+
+  // Staff-facing - shorter and more clinical than the member-facing ones,
+  // since these land on a staff phone, not a member's.
+  staffNewMember: (name) =>
+    `KEMRI SACCO Admin: New member registered - ${name}.`,
+
+  staffLoanApplication: (name, amount, ref) =>
+    `KEMRI SACCO Admin: Loan application ${formatKES(amount)} from ${name}. Ref: ${ref}. Awaiting review.`,
+
+  staffRepayment: (name, amount) =>
+    `KEMRI SACCO Admin: Repayment of ${formatKES(amount)} received from ${name}.`,
+
+  staffDeposit: (name, amount) =>
+    `KEMRI SACCO Admin: Deposit of ${formatKES(amount)} received from ${name}.`,
 };
 
 // Send SMS function with enhanced validation and logging
@@ -94,4 +108,19 @@ async function sendSMS(phoneNumber, message) {
   }
 }
 
-module.exports = { sendSMS, templates };
+module.exports = { sendSMS, notifyStaff, templates };
+
+// Sends one message to every admin/staff account that has a phone number
+// set. Staff without a phone on file are silently skipped, not an error -
+// phone is optional on staff accounts. Each send is independent: one
+// failed/missing number never blocks the others.
+async function notifyStaff(message) {
+  const Admin = require('../models/Admin'); // required here, not at top, to avoid a require cycle risk
+  try {
+    const staff = await Admin.findAll();
+    const withPhone = staff.filter((s) => s.phone);
+    await Promise.all(withPhone.map((s) => sendSMS(s.phone, message)));
+  } catch (err) {
+    console.error('notifyStaff failed to look up staff accounts:', err.message);
+  }
+}

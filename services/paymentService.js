@@ -4,6 +4,8 @@ const Payment = require('../models/Payment');
 const Member = require('../models/Member');
 const Loan = require('../models/Loan');
 const Repayment = require('../models/Repayment');
+const notificationService = require('./notificationService');
+const emailService = require('./emailService');
 
 /**
  * Initiate a payment (deposit or loan repayment)
@@ -103,6 +105,10 @@ async function handleCallback(callbackBody) {
             mpesaReceipt
           )
         );
+        notificationService.notifyStaff({
+          smsText: smsService.templates.staffRepayment(member.full_name, payment.amount),
+          emailContent: emailService.staffTemplates.repayment(member.full_name, payment.amount),
+        });
       }
     } else {
       // --- DEPOSIT SUCCESS ---
@@ -116,6 +122,10 @@ async function handleCallback(callbackBody) {
             mpesaReceipt
           )
         );
+        notificationService.notifyStaff({
+          smsText: smsService.templates.staffDeposit(member.full_name, payment.amount),
+          emailContent: emailService.staffTemplates.deposit(member.full_name, payment.amount),
+        });
       }
     }
   } else {

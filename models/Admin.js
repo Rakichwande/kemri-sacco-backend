@@ -18,6 +18,14 @@ CREATE TABLE IF NOT EXISTS admins (
 const addMustChangeColumnQuery = `
 ALTER TABLE admins ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN DEFAULT true;
 `;
+const addPhoneColumnQuery = `
+ALTER TABLE admins ADD COLUMN IF NOT EXISTS phone VARCHAR(15);
+`;
+const addNotificationColumnsQuery = `
+ALTER TABLE admins ADD COLUMN IF NOT EXISTS email VARCHAR(150);
+ALTER TABLE admins ADD COLUMN IF NOT EXISTS notify_sms BOOLEAN DEFAULT true;
+ALTER TABLE admins ADD COLUMN IF NOT EXISTS notify_email BOOLEAN DEFAULT false;
+`;
 
 function generateRandomPassword() {
   // 24 random bytes -> 32-char base64url string. Not memorable by design:
@@ -28,6 +36,8 @@ function generateRandomPassword() {
 async function init() {
   await db.query(createAdminTableQuery);
   await db.query(addMustChangeColumnQuery);
+  await db.query(addPhoneColumnQuery);
+  await db.query(addNotificationColumnsQuery);
 
   const existing = await db.query('SELECT * FROM admins LIMIT 1');
   if (existing.rows.length > 0) return;
@@ -70,7 +80,7 @@ async function findByUsername(username) {
 
 async function findById(id) {
   const result = await db.query(
-    'SELECT id, username, full_name, role, must_change_password, created_at FROM admins WHERE id = $1',
+    'SELECT id, username, full_name, role, phone, email, notify_sms, notify_email, must_change_password, created_at FROM admins WHERE id = $1',
     [id]
   );
   return result.rows[0];
@@ -80,19 +90,38 @@ async function verifyPassword(admin, password) {
   return await bcrypt.compare(password, admin.password_hash);
 }
 
-async function create({ username, password, full_name, role }) {
+async function create({ username, password, full_name, role, phone, email, notify_sms, notify_email }) {
   const hash = await bcrypt.hash(password, 10);
   const result = await db.query(
-    `INSERT INTO admins (username, password_hash, full_name, role, must_change_password)
-     VALUES ($1, $2, $3, $4, true) RETURNING id, username, full_name, role, must_change_password, created_at`,
-    [username, hash, full_name, role]
+    `INSERT INTO admins (username, password_hash, full_name, role, phone, email, notify_sms, notify_email, must_change_password)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)
+     RETURNING id, username, full_name, role, phone, email, notify_sms, notify_email, must_change_password, created_at`,
+    [
+      username, hash, full_name, role, phone || null, email || null,
+      notify_sms === undefined ? true : notify_sms,
+      notify_email === undefined ? false : notify_email,
+    ]
+  );
+  return result.rows[0];
+}
+
+async function updateNotificationPreferences(id, { notify_sms, notify_email, phone, email }) {
+  const result = await db.query(
+    `UPDATE admins SET
+       notify_sms = COALESCE($1, notify_sms),
+       notify_email = COALESCE($2, notify_email),
+       phone = COALESCE($3, phone),
+       email = COALESCE($4, email)
+     WHERE id = $5
+     RETURNING id, username, full_name, role, phone, email, notify_sms, notify_email`,
+    [notify_sms, notify_email, phone, email, id]
   );
   return result.rows[0];
 }
 
 async function findAll() {
   const result = await db.query(
-    'SELECT id, username, full_name, role, must_change_password, created_at FROM admins ORDER BY created_at DESC'
+    'SELECT id, username, full_name, role, phone, email, notify_sms, notify_email, must_change_password, created_at FROM admins ORDER BY created_at DESC'
   );
   return result.rows;
 }
@@ -136,4 +165,5 @@ module.exports = {
   updatePassword,
   updateRole,
   remove,
+  updateNotificationPreferences,
 };

@@ -5,6 +5,10 @@ const Admin = require('../models/Admin');
 const { authenticate, requireAdmin } = require('../middleware/auth');
 const { JWT_SECRET } = require('../config/env');
 const AuditLog = require('../models/AuditLog');
+const StaffInvite = require('../models/StaffInvite');
+const emailService = require('../services/emailService');
+
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://kemri-sacco-portal.onrender.com';
 
 const JWT_EXPIRY = '8h';
 const VALID_ROLES = ['admin', 'staff'];
@@ -44,8 +48,28 @@ router.post('/login', async (req, res) => {
   }
 });
 
-router.get('/me', authenticate, (req, res) => {
-  res.json({ user: req.user });
+router.get('/me', authenticate, async (req, res) => {
+  try {
+    const admin = await Admin.findById(req.user.id);
+    if (!admin) return res.status(404).json({ error: 'Account not found' });
+    res.json({ user: admin });
+  } catch (err) {
+    console.error('Fetch current user error:', err);
+    res.status(500).json({ error: 'Failed to load account' });
+  }
+});
+
+// Self-service - any logged-in staff/admin can update their own notification
+// preferences and contact details, without needing another admin to do it.
+router.patch('/me/notifications', authenticate, async (req, res) => {
+  try {
+    const { notify_sms, notify_email, phone, email } = req.body;
+    const updated = await Admin.updateNotificationPreferences(req.user.id, { notify_sms, notify_email, phone, email });
+    res.json(updated);
+  } catch (err) {
+    console.error('Notification preferences update error:', err);
+    res.status(500).json({ error: 'Failed to update preferences' });
+  }
 });
 
 // Any logged-in user can change their OWN password. Requires proving the
@@ -84,7 +108,7 @@ router.post('/change-password', authenticate, async (req, res) => {
 
 router.post('/register', authenticate, requireAdmin, async (req, res) => {
   try {
-    const { username, password, full_name, role } = req.body;
+    const { username, password, full_name, role, phone } = req.body;
 
     if (!username || !password || !full_name || !role) {
       return res.status(400).json({ error: 'username, password, full_name, and role are required' });
@@ -101,7 +125,7 @@ router.post('/register', authenticate, requireAdmin, async (req, res) => {
       return res.status(409).json({ error: 'This username is already taken' });
     }
 
-    const newAccount = await Admin.create({ username, password, full_name, role });
+    const newAccount = await Admin.create({ username, password, full_name, role, phone });
     await AuditLog.log({
       actorId: req.user.id,
       actorUsername: req.user.username,
@@ -116,6 +140,114 @@ router.post('/register', authenticate, requireAdmin, async (req, res) => {
   } catch (err) {
     console.error('Account creation error:', err);
     res.status(500).json({ error: 'Failed to create account' });
+  }
+});
+
+// --- Invite flow: admin sends an invite (email only + role), recipient
+// picks their own username/password when they accept it. ---
+
+router.post('/invites', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const { email, role } = req.body;
+    if (!email || !role) {
+      return res.status(400).json({ error: 'email and role are required' });
+    }
+    if (!VALID_ROLES.includes(role)) {
+      return res.status(400).json({ error: `role must be one of: ${VALID_ROLES.join(', ')}` });
+    }
+
+    const invite = await StaffInvite.create({ email, role, invitedBy: req.user.id });
+    const inviteLink = `${FRONTEND_URL}/accept-invite/${invite.token}`;
+
+    const { subject, html, text } = emailService.inviteEmailContent({
+      inviteLink, role, inviterName: req.user.username,
+    });
+    const emailResult = await emailService.sendEmail({ to: email, subject, html, text });
+
+    await AuditLog.log({
+      actorId: req.user.id,
+      actorUsername: req.user.username,
+      action: 'Invited staff member',
+      category: 'staff_management',
+      targetType: 'invite',
+      targetId: invite.id,
+      targetLabel: email,
+      details: `Invited ${email} as ${role}.${emailResult.sent ? '' : ' Email not sent: ' + emailResult.reason}`,
+    });
+
+    res.status(201).json({
+      invite: { id: invite.id, email: invite.email, role: invite.role, expiresAt: invite.expires_at },
+      inviteLink,
+      emailSent: emailResult.sent,
+      emailReason: emailResult.reason || null,
+    });
+  } catch (err) {
+    console.error('Invite creation error:', err);
+    res.status(500).json({ error: 'Failed to create invite' });
+  }
+});
+
+// Public - lets the accept-invite page show who invited them / what role,
+// before asking them to set a password.
+router.get('/invites/:token', async (req, res) => {
+  try {
+    const invite = await StaffInvite.findByToken(req.params.token);
+    if (!invite) return res.status(404).json({ error: 'Invite not found' });
+    if (invite.status !== 'pending') return res.status(400).json({ error: 'This invite has already been used' });
+    if (new Date(invite.expires_at) < new Date()) return res.status(400).json({ error: 'This invite has expired' });
+    res.json({ email: invite.email, role: invite.role });
+  } catch (err) {
+    console.error('Invite lookup error:', err);
+    res.status(500).json({ error: 'Failed to look up invite' });
+  }
+});
+
+// Public - the recipient completes their own account setup
+router.post('/invites/:token/accept', async (req, res) => {
+  try {
+    const invite = await StaffInvite.findByToken(req.params.token);
+    if (!invite) return res.status(404).json({ error: 'Invite not found' });
+    if (invite.status !== 'pending') return res.status(400).json({ error: 'This invite has already been used' });
+    if (new Date(invite.expires_at) < new Date()) return res.status(400).json({ error: 'This invite has expired' });
+
+    const { full_name, username, password, phone, notify_sms, notify_email } = req.body;
+    if (!full_name || !username || !password) {
+      return res.status(400).json({ error: 'full_name, username, and password are required' });
+    }
+    if (password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    }
+
+    const existingUsername = await Admin.findByUsername(username);
+    if (existingUsername) {
+      return res.status(409).json({ error: 'This username is already taken' });
+    }
+
+    const newAccount = await Admin.create({
+      username, password, full_name, role: invite.role, phone,
+      email: invite.email, // captured automatically from the invite, not re-typed
+      notify_sms, notify_email,
+    });
+    // The account they just set a real password for doesn't need the
+    // must-change-password flag that bootstrap/admin-created accounts get.
+    await Admin.updatePassword(newAccount.id, password);
+    await StaffInvite.markAccepted(invite.id);
+
+    await AuditLog.log({
+      actorId: newAccount.id,
+      actorUsername: newAccount.username,
+      action: 'Accepted staff invite',
+      category: 'staff_management',
+      targetType: 'admin',
+      targetId: newAccount.id,
+      targetLabel: full_name,
+      details: `Accepted invite as "${username}" (${invite.role}), invited to ${invite.email}.`,
+    });
+
+    res.status(201).json({ message: 'Account created. You can now log in.' });
+  } catch (err) {
+    console.error('Invite accept error:', err);
+    res.status(500).json({ error: 'Failed to accept invite' });
   }
 });
 
