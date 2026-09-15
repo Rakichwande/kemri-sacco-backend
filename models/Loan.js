@@ -105,12 +105,17 @@ async function approve(loan_id) {
       [loan_id]
     );
 
-    // 3. Update member's outstanding balance
+    // 3. Update member's outstanding balance. total_outstanding_balance is
+    // an INTEGER column, but loan.total_repayment comes back from Postgres
+    // as a decimal string (e.g. "6800.00", since it's NUMERIC(10,2)) -
+    // passing that directly makes Postgres reject it outright for an
+    // integer column. Round to the nearest whole KES, matching the
+    // column's actual precision.
     await client.query(
       `UPDATE members 
        SET total_outstanding_balance = total_outstanding_balance + $1 
        WHERE id = $2`,
-      [loan.total_repayment, loan.member_id]
+      [Math.round(Number(loan.total_repayment)), loan.member_id]
     );
 
     await client.query('COMMIT');
