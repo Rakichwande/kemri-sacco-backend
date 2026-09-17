@@ -50,6 +50,24 @@ async function findByCheckoutId(checkout_request_id) {
 }
 
 // Update payment status and optionally M-Pesa receipt
+// Atomically claims a pending payment for processing - the WHERE status =
+// 'pending' guard means only ONE concurrent request can ever successfully
+// claim a given payment, even if Daraja sends the same callback twice at
+// nearly the same instant. A second, near-simultaneous claim attempt gets
+// back zero rows and knows to back off, instead of both requests racing
+// past a separate read-then-write check and double-processing the same
+// payment.
+async function claimForProcessing(checkout_request_id) {
+  const result = await pool.query(
+    `UPDATE payments
+     SET status = 'processing', updated_at = NOW()
+     WHERE checkout_request_id = $1 AND status = 'pending'
+     RETURNING *`,
+    [checkout_request_id]
+  );
+  return result.rows[0];
+}
+
 async function updateStatus(checkout_request_id, status, mpesa_receipt = null) {
   const result = await pool.query(
     `UPDATE payments 
@@ -124,6 +142,7 @@ module.exports = {
   create,
   findByCheckoutId,
   updateStatus,
+  claimForProcessing,
   getMemberBalance,
   findRecentByMember,
   findAllAdmin,

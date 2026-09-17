@@ -8,6 +8,7 @@ const AuditLog = require('../models/AuditLog');
 const StaffInvite = require('../models/StaffInvite');
 const emailService = require('../services/emailService');
 const crypto = require('crypto');
+const { loginLimiter, otpLimiter, emailActionLimiter } = require('../middleware/rateLimit');
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://kemri-sacco-portal.onrender.com';
 const OTP_EXPIRY_MINUTES = 10;
@@ -39,7 +40,7 @@ function generateOtpCode() {
 const JWT_EXPIRY = '8h';
 const VALID_ROLES = ['admin', 'staff'];
 
-router.post('/login', async (req, res) => {
+router.post('/login', loginLimiter, async (req, res) => {
   try {
     const { username, password } = req.body; // `username` field accepts username OR email
     if (!username || !password) {
@@ -86,7 +87,7 @@ router.post('/login', async (req, res) => {
   }
 });
 
-router.post('/verify-otp', async (req, res) => {
+router.post('/verify-otp', otpLimiter, async (req, res) => {
   try {
     const { otpToken, code } = req.body;
     if (!otpToken || !code) {
@@ -129,7 +130,7 @@ router.post('/verify-otp', async (req, res) => {
   }
 });
 
-router.post('/resend-otp', async (req, res) => {
+router.post('/resend-otp', emailActionLimiter, async (req, res) => {
   try {
     const { otpToken } = req.body;
     let payload;
@@ -160,7 +161,7 @@ router.post('/resend-otp', async (req, res) => {
 // Deliberately responds the same way whether or not the account/email
 // exists - standard practice, avoids letting someone probe which
 // usernames or emails are registered.
-router.post('/forgot-password', async (req, res) => {
+router.post('/forgot-password', emailActionLimiter, async (req, res) => {
   const genericResponse = { message: 'If an account with that username or email exists and has an email on file, a reset link has been sent.' };
   try {
     const { identifier } = req.body;

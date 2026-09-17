@@ -61,6 +61,17 @@ async function handleCallback(callbackBody) {
     return;
   }
 
+  // Daraja is documented to sometimes resend the same callback (network
+  // retries on Safaricom's end). This atomically claims the payment for
+  // processing - if it's already been claimed (by this exact request
+  // arriving twice, or two near-simultaneous deliveries), this returns
+  // nothing and we skip entirely rather than double-applying the payment.
+  const claimed = await Payment.claimForProcessing(checkoutRequestId);
+  if (!claimed) {
+    console.log(`Duplicate/concurrent webhook for checkout ${checkoutRequestId} - already claimed, ignoring.`);
+    return;
+  }
+
   const member = await Member.findById(payment.member_id);
   const isRepayment = !!payment.loan_id; // Check if this payment is for a loan repayment
 
