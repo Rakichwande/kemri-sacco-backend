@@ -28,6 +28,8 @@ const StaffInvite = require('./models/StaffInvite');
 // IMPORTANT: Define `app` BEFORE using it!
 // ============================================================
 const app = express();
+app.set('trust proxy', 1); // Render sits behind a proxy; required for express-rate-limit
+                            // and for req.ip to resolve the real client IP correctly
 const PORT = process.env.PORT || 3000;
 
 // Middleware
