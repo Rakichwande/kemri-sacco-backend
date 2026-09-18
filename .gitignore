@@ -1,3 +1,8 @@
 node_modules/
 .env
 *.log
+
+# Local backups, dumps, and scan output - never commit these
+*.dump
+schema.sql
+secrets-scan.json
