@@ -166,16 +166,17 @@ async function create({ username, password, full_name, role, phone, email, notif
   return result.rows[0];
 }
 
-async function updateNotificationPreferences(id, { notify_sms, notify_email, phone, email }) {
+async function updateNotificationPreferences(id, { notify_sms, notify_email, phone, email, full_name }) {
   const result = await db.query(
     `UPDATE admins SET
        notify_sms = COALESCE($1, notify_sms),
        notify_email = COALESCE($2, notify_email),
        phone = COALESCE($3, phone),
-       email = COALESCE($4, email)
-     WHERE id = $5
+       email = COALESCE($4, email),
+       full_name = COALESCE($5, full_name)
+     WHERE id = $6
      RETURNING id, username, full_name, role, phone, email, notify_sms, notify_email`,
-    [notify_sms, notify_email, phone, email, id]
+    [notify_sms, notify_email, phone, email, full_name, id]
   );
   return result.rows[0];
 }

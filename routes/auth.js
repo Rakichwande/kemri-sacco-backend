@@ -235,8 +235,8 @@ router.get('/me', authenticate, async (req, res) => {
 // preferences and contact details, without needing another admin to do it.
 router.patch('/me/notifications', authenticate, async (req, res) => {
   try {
-    const { notify_sms, notify_email, phone, email } = req.body;
-    const updated = await Admin.updateNotificationPreferences(req.user.id, { notify_sms, notify_email, phone, email });
+    const { notify_sms, notify_email, phone, email, full_name } = req.body;
+    const updated = await Admin.updateNotificationPreferences(req.user.id, { notify_sms, notify_email, phone, email, full_name });
     res.json(updated);
   } catch (err) {
     console.error('Notification preferences update error:', err);
