@@ -6,19 +6,39 @@ async function init() {
   const query = `
     CREATE TABLE IF NOT EXISTS payments (
       id SERIAL PRIMARY KEY,
-      member_id INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
-      amount INTEGER NOT NULL,
-      phone VARCHAR(20),
-      account_reference VARCHAR(50),
-      description TEXT,
-      status VARCHAR(20) DEFAULT 'pending',
+      member_id INTEGER REFERENCES members(id),
+      amount NUMERIC(10, 2) NOT NULL,
+      phone_number VARCHAR(15) NOT NULL,
+      checkout_request_id VARCHAR(100) NOT NULL,
       mpesa_receipt VARCHAR(50),
-      checkout_request_id VARCHAR(100),
+      status VARCHAR(20) NOT NULL DEFAULT 'pending',
       created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW()
+      loan_id INTEGER REFERENCES loans(id)
     );
   `;
   await pool.query(query);
+
+  // IMPORTANT: CREATE TABLE IF NOT EXISTS only runs its column definitions
+  // when the table doesn't already exist. On every deploy since this table
+  // was first created, this clause has been a no-op - the live schema is
+  // whatever the table looked like the day it was first created, plus only
+  // whatever explicit ALTER TABLE statements have run below. The block
+  // above is written to describe the table's REAL current shape (confirmed
+  // via \d payments against production) for anyone reading this file, not
+  // because it's expected to ever actually execute again.
+  //
+  // account_reference and description were referenced by an earlier version
+  // of create()/paymentService.js but NEVER actually existed as columns in
+  // the live table - CREATE TABLE IF NOT EXISTS silently didn't add them,
+  // since the table already existed by the time that code was written. That
+  // meant every Payment.create() call was almost certainly failing with a
+  // "column does not exist" error from Postgres - i.e. every deposit and
+  // loan repayment initiation via USSD or the portal - for as long as that
+  // mismatched code was deployed. This ALTER actually creates the columns
+  // for real, so the code and schema agree from here on.
+  await pool.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS account_reference VARCHAR(50);`);
+  await pool.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS description TEXT;`);
+  await pool.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();`);
 
   // Older deployments (and this table's own original schema) never had this
   // column, even though paymentService.js has always tried to use it to tell
@@ -35,6 +55,11 @@ async function init() {
   // as the index that findByCheckoutId() / claimForProcessing() rely on.
   // Postgres has no ADD CONSTRAINT IF NOT EXISTS, so this DO block is the
   // idempotent equivalent - safe to run on every boot.
+  //
+  // NOTE: production already had an existing UNIQUE constraint on this
+  // column (payments_checkout_request_id_key) before this one was added -
+  // both now coexist harmlessly. Worth eventually dropping this duplicate
+  // constraint, but leaving both in place is not a bug.
   await pool.query(`
     DO $$
     BEGIN
@@ -50,7 +75,8 @@ async function init() {
   // Every payment is created with checkout_request_id already populated
   // (paymentService.initiatePayment calls Daraja before it ever writes the
   // row), and status always has the 'pending' default, so both are safe to
-  // enforce as NOT NULL for defense-in-depth.
+  // enforce as NOT NULL for defense-in-depth. Both are already NOT NULL in
+  // production's real schema, but this stays idempotent/safe to run anyway.
   await pool.query(`ALTER TABLE payments ALTER COLUMN checkout_request_id SET NOT NULL;`);
   await pool.query(`ALTER TABLE payments ALTER COLUMN status SET NOT NULL;`);
 }
@@ -59,7 +85,7 @@ async function init() {
 async function create({ member_id, amount, phone, account_reference, description, checkout_request_id, loan_id = null }) {
   const result = await pool.query(
     `INSERT INTO payments 
-      (member_id, amount, phone, account_reference, description, checkout_request_id, loan_id, status)
+      (member_id, amount, phone_number, account_reference, description, checkout_request_id, loan_id, status)
      VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
      RETURNING *`,
     [member_id, amount, phone, account_reference, description, checkout_request_id, loan_id]
@@ -170,7 +196,7 @@ async function findAllAdmin({ search, from, to, limit = 50, offset = 0 } = {}) {
   let i = 1;
 
   if (search) {
-    conditions.push(`(m.full_name ILIKE $${i} OR p.phone ILIKE $${i})`);
+    conditions.push(`(m.full_name ILIKE $${i} OR p.phone_number ILIKE $${i})`);
     values.push(`%${search}%`);
     i++;
   }
