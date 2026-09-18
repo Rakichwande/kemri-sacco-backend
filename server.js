@@ -1,5 +1,5 @@
 require('dotenv').config();
-require('./config/env'); // fails fast if JWT_SECRET/DATABASE_URL are missing or unsafe
+require('./config/env'); // fails fast if JWT_SECRET/DATABASE_URL/AT_USSD_SHARED_SECRET are missing or unsafe
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
@@ -33,7 +33,32 @@ app.set('trust proxy', 1); // Render sits behind a proxy; required for express-r
 const PORT = process.env.PORT || 3000;
 
 // Middleware
-app.use(cors());
+// CORS is restricted to an explicit allowlist rather than the previous bare
+// cors() (which reflected Access-Control-Allow-Origin: * for every origin).
+// ALLOWED_ORIGINS is a comma-separated list set in Render's environment,
+// e.g. "https://kemri-sacco-portal.onrender.com,http://localhost:5173" -
+// add a new origin there (no code change needed) rather than here.
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+app.use(cors({
+  origin(origin, callback) {
+    // Requests with no Origin header (server-to-server calls, curl, the
+    // Daraja/AT webhooks) are allowed through unconditionally - this check
+    // only governs browser cross-origin requests.
+    if (!origin) return callback(null, true);
+
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    console.warn(`CORS: blocked request from unrecognized origin: ${origin}`);
+    return callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+}));
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
