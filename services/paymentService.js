@@ -1,3 +1,4 @@
+const db = require('../config/database');
 const darajaService = require('./darajaService');
 const smsService = require('./smsService');
 const Payment = require('../models/Payment');
@@ -48,9 +49,73 @@ async function initiatePayment({ memberId, phoneNumber, amount, loanId }) {
 }
 
 /**
+ * Send the member/staff notifications for a completed transaction.
+ * Isolated in its own try/catch so an SMS/email outage can never look like
+ * a genuine processing failure to the caller - the financial state has
+ * already been committed by the time this runs, and a notification hiccup
+ * shouldn't trigger a webhook retry or an "unclaim" of an otherwise
+ * successfully processed payment.
+ */
+async function notifyRepaymentSuccess(member, payment, updatedLoan, mpesaReceipt) {
+  try {
+    await smsService.sendSMS(
+      member.phone_number,
+      smsService.templates.loanRepaymentConfirmed(
+        member.full_name,
+        payment.amount,
+        updatedLoan.outstanding_balance,
+        mpesaReceipt
+      )
+    );
+    await notificationService.notifyStaff({
+      smsText: smsService.templates.staffRepayment(member.full_name, payment.amount),
+      emailContent: emailService.staffTemplates.repayment(member.full_name, payment.amount),
+    });
+  } catch (notifyErr) {
+    console.error('Repayment notification failed (repayment itself still applied):', notifyErr.message);
+  }
+}
+
+async function notifyDepositSuccess(member, payment, mpesaReceipt) {
+  try {
+    await smsService.sendSMS(
+      member.phone_number,
+      smsService.templates.paymentConfirmed(
+        member.full_name,
+        payment.amount,
+        payment.account_reference,
+        mpesaReceipt
+      )
+    );
+    await notificationService.notifyStaff({
+      smsText: smsService.templates.staffDeposit(member.full_name, payment.amount),
+      emailContent: emailService.staffTemplates.deposit(member.full_name, payment.amount),
+    });
+  } catch (notifyErr) {
+    console.error('Deposit notification failed (deposit itself still recorded):', notifyErr.message);
+  }
+}
+
+async function notifyPaymentFailed(member, payment, isRepayment) {
+  try {
+    const message = isRepayment
+      ? `KEMRI SACCO: Your loan repayment of KES ${payment.amount} failed. Please try again or visit our office.`
+      : smsService.templates.paymentFailed(member.full_name);
+    await smsService.sendSMS(member.phone_number, message);
+  } catch (notifyErr) {
+    console.error('Payment-failed notification failed:', notifyErr.message);
+  }
+}
+
+/**
  * Handle Daraja webhook callback (both deposits and repayments)
  */
 async function handleCallback(callbackBody) {
+  // Log the raw payload before anything else can fail, so a genuine
+  // processing error downstream never means the original callback is gone
+  // without a trace - this line survives regardless of what happens next.
+  console.log('Daraja callback received:', JSON.stringify(callbackBody));
+
   const stkCallback = callbackBody.Body.stkCallback;
   const checkoutRequestId = stkCallback.CheckoutRequestID;
   const resultCode = stkCallback.ResultCode; // 0 = success
@@ -58,7 +123,7 @@ async function handleCallback(callbackBody) {
   const payment = await Payment.findByCheckoutId(checkoutRequestId);
   if (!payment) {
     console.error('Webhook received for unknown checkout ID:', checkoutRequestId);
-    return;
+    return; // Nothing to retry - malformed/unrecognized, not a processing failure.
   }
 
   // Daraja is documented to sometimes resend the same callback (network
@@ -75,83 +140,98 @@ async function handleCallback(callbackBody) {
   const member = await Member.findById(payment.member_id);
   const isRepayment = !!payment.loan_id; // Check if this payment is for a loan repayment
 
-  if (resultCode === 0) {
-    // --- SUCCESSFUL PAYMENT ---
-    const items = stkCallback.CallbackMetadata.Item;
-    const mpesaReceipt = items.find((i) => i.Name === 'MpesaReceiptNumber')?.Value;
+  try {
+    if (resultCode === 0) {
+      // --- SUCCESSFUL PAYMENT ---
+      const items = stkCallback.CallbackMetadata.Item;
+      const mpesaReceipt = items.find((i) => i.Name === 'MpesaReceiptNumber')?.Value;
 
-    await Payment.updateStatus(checkoutRequestId, 'completed', mpesaReceipt);
+      if (isRepayment) {
+        // --- REPAYMENT SUCCESS ---
+        // Payment status and the loan's outstanding balance are committed
+        // together in one transaction. Previously these were two separate
+        // writes; a crash between them could leave a payment marked
+        // 'completed' with the loan balance never actually reduced - real
+        // money "received" but never credited. Now either both land or
+        // neither does.
+        const client = await db.pool.connect();
+        let updatedLoan;
+        try {
+          await client.query('BEGIN');
+          await Payment.updateStatus(checkoutRequestId, 'completed', mpesaReceipt, client);
+          updatedLoan = await Loan.applyRepayment(payment.loan_id, payment.amount, client);
+          if (!updatedLoan) {
+            // loan_id pointed at a loan that doesn't exist - shouldn't
+            // happen given the FK, but guard anyway. Rolling back means
+            // the payment stays 'processing' momentarily, then gets
+            // reverted to 'pending' by the catch block below for a retry
+            // (which won't help here since the loan genuinely doesn't
+            // exist, but keeps behavior consistent and loud rather than
+            // silently marking a payment completed with nothing applied).
+            throw new Error(`Loan repayment failed: loan not found for ID ${payment.loan_id}`);
+          }
+          await client.query('COMMIT');
+        } catch (txErr) {
+          await client.query('ROLLBACK');
+          throw txErr;
+        } finally {
+          client.release();
+        }
 
-    if (isRepayment) {
-      // --- REPAYMENT SUCCESS ---
-      // Update the loan's outstanding balance
-      const updatedLoan = await Loan.applyRepayment(payment.loan_id, payment.amount);
-      if (!updatedLoan) {
-        console.error('Loan repayment failed: loan not found for ID', payment.loan_id);
-        return;
-      }
+        // One row per confirmed repayment transaction - backs Repayment
+        // History and the dashboard chart. Never blocks the repayment
+        // itself if it fails; this is audit/reporting data, not the
+        // financial state itself.
+        try {
+          await Repayment.create({
+            loan_id: payment.loan_id,
+            member_id: payment.member_id,
+            amount: payment.amount,
+            channel: 'mpesa',
+            mpesa_receipt: mpesaReceipt,
+          });
+        } catch (repaymentLogErr) {
+          console.error('Repayment log write failed (repayment itself still applied):', repaymentLogErr.message);
+        }
 
-      // One row per confirmed repayment transaction - backs Repayment History
-      // and the dashboard chart. Never blocks the repayment itself if it fails.
-      try {
-        await Repayment.create({
-          loan_id: payment.loan_id,
-          member_id: payment.member_id,
-          amount: payment.amount,
-          channel: 'mpesa',
-          mpesa_receipt: mpesaReceipt,
-        });
-      } catch (repaymentLogErr) {
-        console.error('Repayment log write failed (repayment itself still applied):', repaymentLogErr.message);
-      }
+        if (member) {
+          await notifyRepaymentSuccess(member, payment, updatedLoan, mpesaReceipt);
+        }
+      } else {
+        // --- DEPOSIT SUCCESS ---
+        await Payment.updateStatus(checkoutRequestId, 'completed', mpesaReceipt);
 
-      // Send repayment confirmation SMS
-      if (member) {
-        await smsService.sendSMS(
-          member.phone_number,
-          smsService.templates.loanRepaymentConfirmed(
-            member.full_name,
-            payment.amount,
-            updatedLoan.outstanding_balance,
-            mpesaReceipt
-          )
-        );
-        notificationService.notifyStaff({
-          smsText: smsService.templates.staffRepayment(member.full_name, payment.amount),
-          emailContent: emailService.staffTemplates.repayment(member.full_name, payment.amount),
-        });
+        if (member) {
+          await notifyDepositSuccess(member, payment, mpesaReceipt);
+        }
       }
     } else {
-      // --- DEPOSIT SUCCESS ---
-      if (member) {
-        await smsService.sendSMS(
-          member.phone_number,
-          smsService.templates.paymentConfirmed(
-            member.full_name,
-            payment.amount,
-            payment.account_reference,
-            mpesaReceipt
-          )
-        );
-        notificationService.notifyStaff({
-          smsText: smsService.templates.staffDeposit(member.full_name, payment.amount),
-          emailContent: emailService.staffTemplates.deposit(member.full_name, payment.amount),
-        });
-      }
-    }
-  } else {
-    // --- PAYMENT FAILED ---
-    await Payment.updateStatus(checkoutRequestId, 'failed');
+      // --- PAYMENT FAILED ---
+      await Payment.updateStatus(checkoutRequestId, 'failed');
 
-    if (member) {
-      let message;
-      if (isRepayment) {
-        message = `KEMRI SACCO: Your loan repayment of KES ${payment.amount} failed. Please try again or visit our office.`;
-      } else {
-        message = smsService.templates.paymentFailed(member.full_name);
+      if (member) {
+        await notifyPaymentFailed(member, payment, isRepayment);
       }
-      await smsService.sendSMS(member.phone_number, message);
     }
+  } catch (err) {
+    // A genuine processing failure reached here - a DB error, the
+    // loan-not-found guard above, etc. Notification failures are isolated
+    // in notifyRepaymentSuccess/notifyDepositSuccess/notifyPaymentFailed
+    // above and never propagate to this point, so nothing here is a false
+    // alarm from an SMS outage.
+    //
+    // Revert the claim so a Safaricom retry of this same callback can
+    // actually reprocess it. Without this, the payment would stay stuck at
+    // 'processing' forever - claimForProcessing only claims 'pending'
+    // payments, so a retry would silently hit the "already claimed,
+    // ignoring" branch above and the callback would be lost for good.
+    console.error(`handleCallback processing failed for checkout ${checkoutRequestId}:`, err.message);
+    try {
+      await Payment.revertToPending(checkoutRequestId);
+    } catch (revertErr) {
+      console.error(`Failed to revert payment ${checkoutRequestId} to pending after processing error:`, revertErr.message);
+    }
+    throw err; // propagate so the webhook route returns 5xx and Safaricom retries
   }
 }
 

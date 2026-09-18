@@ -1,6 +1,6 @@
 const Member = require('../models/Member');
 const Loan = require('../models/Loan');
-const smsService = require('./smsService'); // <-- ADD THIS
+const smsService = require('./smsService');
 
 const MAX_ABSOLUTE_LIMIT = 20000;
 const MIN_LOAN_AMOUNT = 1000;
@@ -52,27 +52,51 @@ class LoanService {
   }
 
   static async apply(memberId, requestedAmount) {
+    // requestedAmount arrives as whatever the caller sent - a USSD digit
+    // string, JSON from a future web client, etc. Comparing a non-numeric
+    // value with < or > silently coerces to NaN, and EVERY comparison
+    // involving NaN evaluates to false - not an error, not a rejection,
+    // just false. That means a bad amount ("abc", null-as-string, etc.)
+    // would previously sail straight past both the MIN_LOAN_AMOUNT and
+    // creditLimit checks below without tripping either one. Normalizing
+    // and validating up front, before any business-rule check, closes
+    // that gap.
+    const amount = Number(requestedAmount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return { success: false, message: 'Invalid loan amount.' };
+    }
+
     const eligibility = await this.canApply(memberId);
     if (!eligibility.allowed) {
       return { success: false, message: eligibility.reason };
     }
 
-    if (requestedAmount < MIN_LOAN_AMOUNT) {
+    if (amount < MIN_LOAN_AMOUNT) {
       return { success: false, message: `Minimum loan is KES ${MIN_LOAN_AMOUNT}.` };
     }
-    if (requestedAmount > eligibility.creditLimit) {
+    if (amount > eligibility.creditLimit) {
       return {
         success: false,
-        message: `Your current limit is KES ${eligibility.creditLimit.toLocaleString()}. Requested KES ${requestedAmount.toLocaleString()}.`,
+        message: `Your current limit is KES ${eligibility.creditLimit.toLocaleString()}. Requested KES ${amount.toLocaleString()}.`,
       };
     }
 
     const loan = await Loan.create({
       member_id: memberId,
-      principal: requestedAmount,
+      principal: amount,
       interest_rate: INTEREST_RATE,
       tenure_months: TENURE_MONTHS,
     });
+
+    // canApply() already checked for an active loan, but that check and
+    // this insert aren't atomic - a second, near-simultaneous application
+    // could have created one in between. Loan.create() returns null in
+    // exactly that case (the database's partial unique index rejected the
+    // insert), so this isn't a bug, it's the rare race actually being
+    // caught rather than silently corrupting data.
+    if (!loan) {
+      return { success: false, message: 'You already have an active loan. Clear it before applying again.' };
+    }
 
     return { success: true, message: 'Loan application submitted successfully.', loan };
   }
@@ -81,7 +105,7 @@ class LoanService {
     // 1. Approve the loan (changes status to 'approved')
     const loan = await Loan.approve(loanId);
     if (!loan) {
-      return { success: false, message: 'Loan not found.' };
+      return { success: false, message: 'Loan not found or not in a pending state.' };
     }
 
     // 2. Get the member details
