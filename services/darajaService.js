@@ -59,12 +59,45 @@ function getTimestamp() {
 }
 
 /**
+ * Normalizes a Kenyan phone number to the 254XXXXXXXXX format Daraja
+ * requires (12 digits, country code, no leading + or 0).
+ *
+ * Member phone numbers are validated at registration to accept EITHER
+ * 07XXXXXXXX/01XXXXXXXX or 2547XXXXXXXX/254 1XXXXXXXX (see
+ * middleware/validate.js's isValidKenyanPhone) - nothing normalizes them
+ * to one consistent stored format. Previously this function only stripped
+ * non-digit characters, so a member stored as "0712345678" would be sent
+ * to Safaricom exactly as "0712345678" - 10 digits, wrong format - which
+ * Daraja does not accept as a valid MSISDN. That would very likely have
+ * caused STK pushes to fail for any member who registered with a plain
+ * 0-prefixed number, i.e. the way most people naturally type their own
+ * number.
+ *
+ * Throws if the input isn't a recognizable Kenyan number after cleaning,
+ * rather than silently sending something malformed to Safaricom.
+ */
+function normalizeToMsisdn(phoneNumber) {
+  const digitsOnly = String(phoneNumber).replace(/\D/g, '');
+
+  if (/^254(7|1)\d{8}$/.test(digitsOnly)) {
+    return digitsOnly; // already correct: 2547XXXXXXXX or 2541XXXXXXXX
+  }
+  if (/^0(7|1)\d{8}$/.test(digitsOnly)) {
+    return '254' + digitsOnly.slice(1); // 07XXXXXXXX -> 2547XXXXXXXX
+  }
+  if (/^(7|1)\d{8}$/.test(digitsOnly)) {
+    return '254' + digitsOnly; // 7XXXXXXXX -> 2547XXXXXXXX (bare, no leading 0/254)
+  }
+
+  throw new Error(`Cannot normalize phone number to a valid Daraja MSISDN: ${phoneNumber}`);
+}
+
+/**
  * Initiate STK push (M-Pesa payment request)
  */
 async function stkPush({ phoneNumber, amount, accountReference, description }) {
   try {
-    // Clean phone number (remove +, spaces, etc.)
-    const cleanPhone = String(phoneNumber).replace(/\D/g, '');
+    const cleanPhone = normalizeToMsisdn(phoneNumber);
 
     // Validate required environment variables
     const shortcode = process.env.DARAJA_SHORTCODE;
@@ -81,12 +114,16 @@ async function stkPush({ phoneNumber, amount, accountReference, description }) {
     // Generate password
     const password = Buffer.from(`${shortcode}${passkey}${timestamp}`).toString('base64');
 
+    // Daraja requires a whole-number amount - round defensively in case a
+    // caller ever passes a decimal (e.g. a member typing "500.50" on USSD).
+    const wholeAmount = Math.round(Number(amount));
+
     const payload = {
       BusinessShortCode: shortcode,
       Password: password,
       Timestamp: timestamp,
       TransactionType: 'CustomerPayBillOnline',
-      Amount: amount,
+      Amount: wholeAmount,
       PartyA: cleanPhone,
       PartyB: shortcode,
       PhoneNumber: cleanPhone,
