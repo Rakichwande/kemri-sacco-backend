@@ -2,7 +2,8 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const router = express.Router();
 const Admin = require('../models/Admin');
-const { authenticate, requireAdmin } = require('../middleware/auth');
+const { authenticate, requireAdmin, requirePermission } = require('../middleware/auth');
+const { ROLES, canAssignRole } = require('../middleware/permissions');
 const { JWT_SECRET } = require('../config/env');
 const AuditLog = require('../models/AuditLog');
 const StaffInvite = require('../models/StaffInvite');
@@ -38,7 +39,22 @@ function generateOtpCode() {
 }
 
 const JWT_EXPIRY = '8h';
-const VALID_ROLES = ['admin', 'staff'];
+
+// All role values this app currently recognizes. 'admin' (Super
+// Administrator) and 'staff' (legacy) are the original two; the rest are
+// the board-approved roles added on top of them. See
+// middleware/permissions.js for what each can actually do, and for
+// canAssignRole(), which restricts who is allowed to grant which of these
+// to someone else.
+const VALID_ROLES = [
+  ROLES.SUPER_ADMIN,      // 'admin'
+  ROLES.SACCO_ADMIN,      // 'sacco_admin'
+  ROLES.FINANCE_OFFICER,  // 'finance_officer'
+  ROLES.LOANS_OFFICER,    // 'loans_officer'
+  ROLES.MEMBER_SUPPORT,   // 'member_support'
+  ROLES.AUDITOR,          // 'auditor'
+  ROLES.STAFF_LEGACY,     // 'staff'
+];
 
 router.post('/login', loginLimiter, async (req, res) => {
   try {
@@ -278,7 +294,13 @@ router.post('/change-password', authenticate, async (req, res) => {
   }
 });
 
-router.post('/register', authenticate, requireAdmin, async (req, res) => {
+// Was requireAdmin (role === 'admin' only) - now requirePermission so a
+// SACCO Administrator can also create staff accounts, not just Super
+// Administrators. canAssignRole() below is what actually stops a SACCO
+// Administrator from creating another Super Administrator or SACCO
+// Administrator - staff:manage alone only gets you into this route, it
+// doesn't mean you can grant any role to anyone.
+router.post('/register', authenticate, requirePermission('staff:manage'), async (req, res) => {
   try {
     const { username, password, full_name, role, phone } = req.body;
 
@@ -287,6 +309,9 @@ router.post('/register', authenticate, requireAdmin, async (req, res) => {
     }
     if (!VALID_ROLES.includes(role)) {
       return res.status(400).json({ error: `role must be one of: ${VALID_ROLES.join(', ')}` });
+    }
+    if (!canAssignRole(req.user.role, role)) {
+      return res.status(403).json({ error: `Your role is not permitted to create an account with role "${role}".` });
     }
     if (password.length < 8) {
       return res.status(400).json({ error: 'Password must be at least 8 characters' });
@@ -318,7 +343,7 @@ router.post('/register', authenticate, requireAdmin, async (req, res) => {
 // --- Invite flow: admin sends an invite (email only + role), recipient
 // picks their own username/password when they accept it. ---
 
-router.post('/invites', authenticate, requireAdmin, async (req, res) => {
+router.post('/invites', authenticate, requirePermission('staff:manage'), async (req, res) => {
   try {
     const { email, role } = req.body;
     if (!email || !role) {
@@ -326,6 +351,9 @@ router.post('/invites', authenticate, requireAdmin, async (req, res) => {
     }
     if (!VALID_ROLES.includes(role)) {
       return res.status(400).json({ error: `role must be one of: ${VALID_ROLES.join(', ')}` });
+    }
+    if (!canAssignRole(req.user.role, role)) {
+      return res.status(403).json({ error: `Your role is not permitted to invite someone as "${role}".` });
     }
 
     const invite = await StaffInvite.create({ email, role, invitedBy: req.user.id });
@@ -423,7 +451,7 @@ router.post('/invites/:token/accept', async (req, res) => {
   }
 });
 
-router.get('/users', authenticate, requireAdmin, async (req, res) => {
+router.get('/users', authenticate, requirePermission('staff:manage'), async (req, res) => {
   try {
     const users = await Admin.findAll();
     res.json(users);
@@ -435,16 +463,31 @@ router.get('/users', authenticate, requireAdmin, async (req, res) => {
 
 // Change another account's role. Guards against removing the last admin -
 // otherwise a mistaken demotion could lock every admin out of the console
-// with no way to promote anyone back.
-router.patch('/users/:id/role', authenticate, requireAdmin, async (req, res) => {
+// with no way to promote anyone back. Also now checks canAssignRole(), so
+// a SACCO Administrator can move someone between the operational roles but
+// cannot promote anyone to Super Administrator or SACCO Administrator.
+router.patch('/users/:id/role', authenticate, requirePermission('staff:manage'), async (req, res) => {
   try {
     const { role } = req.body;
     if (!VALID_ROLES.includes(role)) {
       return res.status(400).json({ error: `role must be one of: ${VALID_ROLES.join(', ')}` });
     }
+    if (!canAssignRole(req.user.role, role)) {
+      return res.status(403).json({ error: `Your role is not permitted to assign "${role}".` });
+    }
 
     const target = await Admin.findById(req.params.id);
     if (!target) return res.status(404).json({ error: 'Account not found' });
+
+    // canAssignRole() above only checked the NEW role - without this check
+    // too, a SACCO Administrator could still demote or otherwise act on an
+    // EXISTING Super Administrator or SACCO Administrator account, even
+    // though they could never have created one. Both the target's current
+    // role and the role being assigned have to be within what this actor
+    // is allowed to touch.
+    if (!canAssignRole(req.user.role, target.role)) {
+      return res.status(403).json({ error: `Your role is not permitted to modify an account with role "${target.role}".` });
+    }
 
     if (target.role === 'admin' && role !== 'admin') {
       const allAdmins = (await Admin.findAll()).filter((a) => a.role === 'admin');
@@ -473,7 +516,7 @@ router.patch('/users/:id/role', authenticate, requireAdmin, async (req, res) => 
 
 // Remove a staff/admin account. Guards against removing yourself and against
 // removing the last admin, for the same reason as above.
-router.delete('/users/:id', authenticate, requireAdmin, async (req, res) => {
+router.delete('/users/:id', authenticate, requirePermission('staff:manage'), async (req, res) => {
   try {
     const targetId = Number(req.params.id);
     if (targetId === req.user.id) {
@@ -482,6 +525,14 @@ router.delete('/users/:id', authenticate, requireAdmin, async (req, res) => {
 
     const target = await Admin.findById(targetId);
     if (!target) return res.status(404).json({ error: 'Account not found' });
+
+    // Same reasoning as the role-change route above: prevents a lower-tier
+    // account (e.g. SACCO Administrator) from removing a Super
+    // Administrator or another SACCO Administrator, even though staff:manage
+    // alone would otherwise let them reach this route.
+    if (!canAssignRole(req.user.role, target.role)) {
+      return res.status(403).json({ error: `Your role is not permitted to remove an account with role "${target.role}".` });
+    }
 
     if (target.role === 'admin') {
       const allAdmins = (await Admin.findAll()).filter((a) => a.role === 'admin');
