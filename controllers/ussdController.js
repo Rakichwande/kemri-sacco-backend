@@ -21,10 +21,37 @@ function looksLikeFailure(responseText) {
   return FAILURE_PHRASES.some((phrase) => lower.includes(phrase));
 }
 
+// Per-USSD-session memory of "how many leading steps were spent on PIN
+// entry/setup", keyed by Africa's Talking's sessionId (constant for the
+// whole call, one HTTP request per screen). This exists because deciding
+// that purely from Member.hasPinSet() re-read fresh from the database on
+// every request breaks: the moment a first-time PIN is actually saved,
+// hasPinSet flips true, and the NEXT request then wrongly treats the
+// already-consumed PIN digits as a login attempt instead of recognizing
+// they were already spent - corrupting how much of the accumulated input
+// belongs to the action itself (loan amount, repayment amount).
+//
+// In-memory and safe ONLY because this app currently runs as a single
+// process (Render's WEB_CONCURRENCY=1). If this is ever scaled to more
+// than one instance, USSD screens for the same session could land on
+// different instances and this cache would miss - move it to a shared
+// store (Redis, or a DB table keyed by sessionId) before scaling up.
+const pinSessionState = new Map(); // sessionId -> { pinStepsConsumed, touchedAt }
+const PIN_SESSION_TTL_MS = 5 * 60 * 1000; // USSD sessions time out well before this
+
+function cleanupStalePinSessions() {
+  const cutoff = Date.now() - PIN_SESSION_TTL_MS;
+  for (const [sid, state] of pinSessionState) {
+    if (state.touchedAt < cutoff) pinSessionState.delete(sid);
+  }
+}
+
 async function handleUssd(req, res) {
   const { sessionId, phoneNumber, serviceCode, text } = req.body;
   const input = (text || '').split('*').filter(Boolean);
   const startedAt = Date.now();
+
+  cleanupStalePinSessions();
 
   let response;
 
@@ -40,19 +67,19 @@ async function handleUssd(req, res) {
           response = await handleRegister(phoneNumber, steps);
           break;
         case '2':
-          response = await handleBalance(phoneNumber, steps);
+          response = await handleBalance(phoneNumber, steps, sessionId);
           break;
         case '3':
           response = await handleDeposit(phoneNumber, steps);
           break;
         case '4':
-          response = await handleLoanApplication(phoneNumber, steps);
+          response = await handleLoanApplication(phoneNumber, steps, sessionId);
           break;
         case '5':
-          response = await handleRepayLoan(phoneNumber, steps);
+          response = await handleRepayLoan(phoneNumber, steps, sessionId);
           break;
         case '6':
-          response = await handleTransactions(phoneNumber, steps);
+          response = await handleTransactions(phoneNumber, steps, sessionId);
           break;
         case '7':
           response = await handleChangePin(phoneNumber, steps);
@@ -98,27 +125,17 @@ function mainMenu() {
 }
 
 // ============================================================
-// PIN AUTHENTICATION - shared by every menu option that exposes financial
-// information or commits to a financial action. The USSD session itself
-// (phoneNumber matching a member record) is NOT treated as sufficient
-// authentication - a phone can be lost, stolen, borrowed, or subject to
-// SIM-swap fraud. This is the actual "who is this" check.
-//
-// USSD has no server-side session state between requests - Africa's
-// Talking resends the full accumulated `text` every time, and this
-// controller re-parses it into `steps` on each call. That means a
-// multi-step PIN flow (enter PIN, or for first-time setup: enter new PIN,
-// then confirm it) has to be driven by how many steps have accumulated so
-// far, the same way every other multi-step menu here already works.
-//
-// Returns:
-//   { authenticated: true, remainingSteps }  - PIN check passed (or a PIN
-//     was just set for the first time); remainingSteps is what's left of
-//     `steps` for the calling handler's OWN step logic to consume, as if
-//     the PIN step(s) had never been there.
-//   { authenticated: false, response }  - not done yet (need more input)
-//     or failed; `response` is the CON/END text to return immediately.
-async function requirePin(member, steps) {
+// PIN AUTHENTICATION
+// ============================================================
+async function requirePin(member, steps, sessionId) {
+  // Already authenticated earlier in this exact USSD session - trust that,
+  // rather than re-deriving from hasPinSet() (which may have flipped since
+  // the PIN was set/verified a screen or two ago in this same dialog).
+  const cached = pinSessionState.get(sessionId);
+  if (cached) {
+    return { authenticated: true, remainingSteps: steps.slice(cached.pinStepsConsumed) };
+  }
+
   if (!Member.hasPinSet(member)) {
     // First-time setup: steps[0] = new PIN, steps[1] = confirmation.
     if (steps.length === 0) {
@@ -130,14 +147,27 @@ async function requirePin(member, steps) {
       }
       return { authenticated: false, response: 'CON Confirm your new PIN:' };
     }
-    if (steps.length === 2) {
-      if (steps[0] !== steps[1]) {
+    if (steps.length >= 2) {
+      const [newPin, confirmPin] = steps;
+      if (newPin !== confirmPin) {
         return { authenticated: false, response: 'END PINs did not match. Please dial again to try once more.' };
       }
-      await Member.setPin(member.id, steps[0]);
+      await Member.setPin(member.id, newPin);
+      pinSessionState.set(sessionId, { pinStepsConsumed: 2, touchedAt: Date.now() });
+
+      // First-time PIN confirmation SMS - separate from the "PIN changed"
+      // SMS sent by Change PIN, so a member has a clear record either way.
+      try {
+        await smsService.sendSMS(
+          member.phone_number,
+          'KEMRI SACCO: Your SACCO PIN has been set. Keep it secret - we will never ask for it by SMS or call.'
+        );
+      } catch (smsErr) {
+        console.error('PIN-setup confirmation SMS failed (PIN still set):', smsErr.message);
+      }
+
       return { authenticated: true, remainingSteps: steps.slice(2) };
     }
-    return { authenticated: false, response: 'END Invalid input. Please dial again.' };
   }
 
   // Existing PIN on file.
@@ -165,6 +195,7 @@ async function requirePin(member, steps) {
   }
 
   await Member.resetPinAttempts(member.id);
+  pinSessionState.set(sessionId, { pinStepsConsumed: 1, touchedAt: Date.now() });
   return { authenticated: true, remainingSteps: steps.slice(1) };
 }
 
@@ -215,13 +246,13 @@ async function handleRegister(phoneNumber, steps) {
 // ============================================================
 // 2. BALANCE (PIN required)
 // ============================================================
-async function handleBalance(phoneNumber, steps) {
+async function handleBalance(phoneNumber, steps, sessionId) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) {
     return 'END You are not registered. Dial and select option 1 to register first.';
   }
 
-  const pinCheck = await requirePin(member, steps);
+  const pinCheck = await requirePin(member, steps, sessionId);
   if (!pinCheck.authenticated) return pinCheck.response;
 
   const balance = await Payment.getMemberBalance(member.id);
@@ -240,13 +271,6 @@ async function handleBalance(phoneNumber, steps) {
 // ============================================================
 // 3. DEPOSIT
 // ============================================================
-// No SACCO PIN gate here by design: completing a deposit already requires
-// the member's real M-Pesa PIN on their own phone via the Daraja STK
-// prompt itself - a genuine, independent second factor. Adding the SACCO
-// PIN on top is reasonable future hardening but was left out of this pass
-// to keep the change reviewable; the un-gated menu options above (balance,
-// transactions) and the ones that commit to new debt (loan
-// application/repayment) had zero protection at all and were the priority.
 async function handleDeposit(phoneNumber, steps) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) {
@@ -278,13 +302,13 @@ async function handleDeposit(phoneNumber, steps) {
 // ============================================================
 // 4. LOAN APPLICATION (PIN required)
 // ============================================================
-async function handleLoanApplication(phoneNumber, steps) {
+async function handleLoanApplication(phoneNumber, steps, sessionId) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) {
     return 'END You are not registered. Dial and select option 1 to register first.';
   }
 
-  const pinCheck = await requirePin(member, steps);
+  const pinCheck = await requirePin(member, steps, sessionId);
   if (!pinCheck.authenticated) return pinCheck.response;
   const remaining = pinCheck.remainingSteps;
 
@@ -334,13 +358,13 @@ async function handleLoanApplication(phoneNumber, steps) {
 // ============================================================
 // 5. REPAY LOAN (PIN required)
 // ============================================================
-async function handleRepayLoan(phoneNumber, steps) {
+async function handleRepayLoan(phoneNumber, steps, sessionId) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) {
     return 'END You are not registered. Dial and select option 1 to register first.';
   }
 
-  const pinCheck = await requirePin(member, steps);
+  const pinCheck = await requirePin(member, steps, sessionId);
   if (!pinCheck.authenticated) return pinCheck.response;
   const remaining = pinCheck.remainingSteps;
 
@@ -379,13 +403,13 @@ async function handleRepayLoan(phoneNumber, steps) {
 // ============================================================
 // 6. TRANSACTIONS (PIN required)
 // ============================================================
-async function handleTransactions(phoneNumber, steps) {
+async function handleTransactions(phoneNumber, steps, sessionId) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) {
     return 'END You are not registered. Dial and select option 1 to register first.';
   }
 
-  const pinCheck = await requirePin(member, steps);
+  const pinCheck = await requirePin(member, steps, sessionId);
   if (!pinCheck.authenticated) return pinCheck.response;
 
   const transactions = await Payment.findRecentByMember(member.id, 5);
@@ -404,8 +428,6 @@ async function handleTransactions(phoneNumber, steps) {
 // ============================================================
 // 7. CHANGE PIN
 // ============================================================
-// Requires the CURRENT PIN before accepting a new one - never a silent
-// overwrite, same principle as the staff change-password endpoint.
 async function handleChangePin(phoneNumber, steps) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) {
@@ -435,10 +457,6 @@ async function handleChangePin(phoneNumber, steps) {
   }
 
   if (steps.length === 2) {
-    // steps[0] already verified above on the previous request - re-verify
-    // here too since USSD resends the full accumulated text each time and
-    // this is a fresh server-side evaluation of it, not a continuation of
-    // in-memory state.
     const valid = await Member.verifyPin(member, steps[0]);
     if (!valid) {
       return 'END Incorrect current PIN. Please dial again to retry.';
