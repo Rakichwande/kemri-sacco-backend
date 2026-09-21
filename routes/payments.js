@@ -18,8 +18,13 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 // these, they need member-session authentication (checking the caller
 // actually IS the member in question, not just "some member") plus a rate
 // limiter, before this goes anywhere near real production traffic.
-router.post('/initiate', validatePaymentInitiation, paymentController.initiatePayment);
-router.get('/status/:checkoutRequestId', paymentController.getPaymentStatus);
+// DISABLED as of 2026-09-20: confirmed exploitable in production - an
+// unauthenticated request successfully triggered a real STK push using
+// live Daraja credentials. Re-enable only once properly gated behind
+// member-session authentication + rate limiting, and only once confirmed
+// something legitimate actually needs them over HTTP.
+// router.post('/initiate', validatePaymentInitiation, paymentController.initiatePayment);
+// router.get('/status/:checkoutRequestId', paymentController.getPaymentStatus);
 
 router.get('/admin/list', authenticate, requirePermission('payments:read'), async (req, res) => {
   try {
