@@ -3,12 +3,25 @@ const router = express.Router();
 const paymentController = require('../controllers/paymentController');
 const Payment = require('../models/Payment');
 const { validatePaymentInitiation } = require('../middleware/validate');
-const { authenticate, requireAdmin } = require('../middleware/auth');
+const { authenticate, requirePermission } = require('../middleware/auth');
 
+// TODO (confirm before deploying): these two routes currently have NO
+// authentication and NO rate limiting - validatePaymentInitiation only
+// checks request shape (valid phone format, positive amount), not who's
+// calling. As written, anyone can trigger a real M-Pesa STK push to any
+// phone number by guessing/inventing a memberId, and anyone can look up
+// payment status/amount/receipt for any checkout_request_id. Neither
+// ussdController.js (which calls paymentService.initiatePayment directly,
+// in-process) nor the portal (registration-only as of this review) appear
+// to call these over HTTP - if that's confirmed, remove them the same way
+// the equivalent dead loan routes were removed. If something DOES call
+// these, they need member-session authentication (checking the caller
+// actually IS the member in question, not just "some member") plus a rate
+// limiter, before this goes anywhere near real production traffic.
 router.post('/initiate', validatePaymentInitiation, paymentController.initiatePayment);
 router.get('/status/:checkoutRequestId', paymentController.getPaymentStatus);
 
-router.get('/admin/list', authenticate, requireAdmin, async (req, res) => {
+router.get('/admin/list', authenticate, requirePermission('payments:read'), async (req, res) => {
   try {
     const { search, from, to, limit, offset } = req.query;
     const contributions = await Payment.findAllAdmin({
