@@ -1,5 +1,7 @@
 const pool = require('../config/database');
+const bcrypt = require('bcryptjs');
 const { isValidKenyanPhone, isValidIdNumber } = require('../middleware/validate');
+
 const createTableQuery = `
 CREATE TABLE IF NOT EXISTS members (
   id SERIAL PRIMARY KEY,
@@ -19,6 +21,14 @@ CREATE TABLE IF NOT EXISTS members (
 );
 `;
 
+// PIN brute-force protection: 5 wrong attempts locks PIN entry for 30
+// minutes. A 4-digit PIN only has 10,000 possible values, so without a
+// lockout, anyone holding a member's phone (lost, stolen, borrowed, or via
+// SIM-swap fraud) could just try PINs repeatedly across USSD sessions.
+const MAX_PIN_ATTEMPTS = 5;
+const PIN_LOCKOUT_MINUTES = 30;
+const PIN_HASH_ROUNDS = 10; // matches Admin.js's bcrypt cost, for consistency
+
 async function init() {
   await pool.query(createTableQuery);
   // Nullable - only ever set by bulk import, for members who already had a
@@ -26,6 +36,15 @@ async function init() {
   // created normally (self-registration or admin New Member) leave this
   // null and get the computed KEMRI-{year}-{id} reference instead.
   await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS imported_reference VARCHAR(30);`);
+
+  // PIN auth. pin_hash is nullable - existing members (and anyone created
+  // before this feature) have none yet and are prompted to set one on
+  // their next USSD session (see hasPinSet()/the USSD controller's PIN
+  // setup flow), rather than being locked out immediately. Never store the
+  // PIN itself - only a bcrypt hash of it.
+  await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS pin_hash VARCHAR(255);`);
+  await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS pin_failed_attempts INTEGER DEFAULT 0;`);
+  await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS pin_locked_until TIMESTAMP;`);
 }
 
 // Create a new member with default loan fields
@@ -58,6 +77,74 @@ async function create(member) {
 async function findByPhone(phone_number) {
   const result = await pool.query('SELECT * FROM members WHERE phone_number = $1', [phone_number]);
   return result.rows[0];
+}
+
+// --- PIN authentication ---
+
+function hasPinSet(member) {
+  return !!member.pin_hash;
+}
+
+// Sets (or changes) a member's PIN. Always call this rather than writing
+// pin_hash directly - never store the PIN itself. Resets any lockout, since
+// setting a fresh PIN is itself proof of legitimate access (either the
+// member just verified their old PIN to get here, or this is first-time
+// setup right after OTP/registration verification).
+async function setPin(memberId, plainPin) {
+  const hash = await bcrypt.hash(String(plainPin), PIN_HASH_ROUNDS);
+  const result = await pool.query(
+    `UPDATE members
+     SET pin_hash = $1, pin_failed_attempts = 0, pin_locked_until = NULL
+     WHERE id = $2
+     RETURNING id, full_name, phone_number`,
+    [hash, memberId]
+  );
+  return result.rows[0];
+}
+
+// Is this member currently locked out of PIN entry from too many failed
+// attempts? Locks expire on their own after PIN_LOCKOUT_MINUTES - no
+// separate unlock step needed.
+function isPinLocked(member) {
+  return !!member.pin_locked_until && new Date(member.pin_locked_until) > new Date();
+}
+
+// Verifies a submitted PIN against the stored hash. Returns true/false -
+// does NOT itself update attempt counters; call recordFailedPinAttempt()
+// or resetPinAttempts() based on the result, so the USSD controller stays
+// in control of exactly when each happens.
+async function verifyPin(member, plainPin) {
+  if (!member.pin_hash) return false;
+  return bcrypt.compare(String(plainPin), member.pin_hash);
+}
+
+// Call after a WRONG PIN attempt. Increments the counter and locks the
+// account once MAX_PIN_ATTEMPTS is reached. Returns the updated row so the
+// caller can tell the member how many attempts remain, or that they're now
+// locked out.
+async function recordFailedPinAttempt(memberId) {
+  const result = await pool.query(
+    `UPDATE members
+     SET pin_failed_attempts = pin_failed_attempts + 1,
+         pin_locked_until = CASE
+           WHEN pin_failed_attempts + 1 >= $2
+             THEN NOW() + ($3 || ' minutes')::INTERVAL
+           ELSE pin_locked_until
+         END
+     WHERE id = $1
+     RETURNING id, pin_failed_attempts, pin_locked_until`,
+    [memberId, MAX_PIN_ATTEMPTS, PIN_LOCKOUT_MINUTES]
+  );
+  return result.rows[0];
+}
+
+// Call after a CORRECT PIN attempt - clears the failed-attempt counter so
+// a member isn't a couple of typos away from lockout indefinitely.
+async function resetPinAttempts(memberId) {
+  await pool.query(
+    `UPDATE members SET pin_failed_attempts = 0, pin_locked_until = NULL WHERE id = $1`,
+    [memberId]
+  );
 }
 
 // Bulk import for pre-existing members (e.g. from a paper register or old
@@ -112,9 +199,6 @@ async function bulkImport(rows) {
 
   return results;
 }
-
-// Find by ID (used by loan module, and everywhere a member's reference
-// code needs to be shown)
 
 // Find by either phone or ID number (used for duplicate registration checks)
 async function findByPhoneOrId(phone_number, id_number) {
@@ -199,7 +283,12 @@ async function updateOutstandingBalance(memberId, amount) {
   return result.rows[0];
 }
 
-// Increment successful repayments and update credit limit (optional helper)
+// NOTE: appears to duplicate what Loan.js's applyRepayment() already does
+// directly against the members table (with the successful_repayments
+// off-by-one already fixed there). Worth confirming nothing still calls
+// this - if so it's dead code carrying the OLD, still-buggy version of
+// that same logic (successful_repayments >= 1 reads the pre-increment
+// value). Left as-is for now since it's outside today's PIN-auth scope.
 async function incrementRepayments(memberId) {
   const result = await pool.query(
     `UPDATE members 
@@ -228,4 +317,11 @@ module.exports = {
   incrementRepayments,
   REFERENCE_SQL,
   bulkImport,
+  // PIN authentication
+  hasPinSet,
+  setPin,
+  isPinLocked,
+  verifyPin,
+  recordFailedPinAttempt,
+  resetPinAttempts,
 };
