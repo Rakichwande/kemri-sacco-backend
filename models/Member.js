@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS members (
   age INT,
   employer VARCHAR(150),
   scheme VARCHAR(100) DEFAULT 'holiday_savings',
-  status VARCHAR(20) DEFAULT 'pending',
+  status VARCHAR(20) DEFAULT 'active',
   -- Loan-related fields
   credit_limit INTEGER DEFAULT 10000,
   total_outstanding_balance INTEGER DEFAULT 0,
