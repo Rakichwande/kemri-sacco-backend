@@ -101,19 +101,33 @@ async function sendSMS(phoneNumber, message) {
       message: message,
       from: process.env.AT_SENDER_ID || null,
     });
-    console.log('✅ SMS sent successfully to', cleanPhone, ':', result);
+
+    // IMPORTANT: Africa's Talking's SMS API can resolve this promise
+    // successfully (no exception) even when the message was NOT actually
+    // delivered - the real outcome is per-recipient, inside
+    // result.SMSMessageData.Recipients[].status (e.g. "Success",
+    // "InsufficientBalance", "UserInBlackList", "InvalidSenderId", etc).
+    // Previously this function logged "sent successfully" for ANY
+    // non-throwing response without checking that field at all, which
+    // means a real delivery failure - most commonly an empty/low SMS
+    // credit balance on the AT account - would have looked identical to a
+    // real success in every log line, with no way to tell them apart.
+    const recipient = result?.SMSMessageData?.Recipients?.[0];
+    if (recipient && recipient.status !== 'Success') {
+      console.error(
+        `❌ SMS to ${cleanPhone} was NOT delivered - Africa's Talking status: "${recipient.status}"`,
+        `(cost: ${recipient.cost || 'n/a'}). Full response:`, JSON.stringify(result)
+      );
+      throw new Error(`SMS delivery failed: ${recipient.status}`);
+    }
+
+    console.log(`✅ SMS delivered to ${cleanPhone} - status: ${recipient?.status || 'unknown'}`);
   } catch (err) {
     console.error('❌ SMS sending failed for', cleanPhone, ':', err.message);
-    // Optionally re-throw if you want the caller to handle the error
+    throw err; // let the caller's own try/catch decide whether this should block anything
   }
 }
 
-module.exports = { sendSMS, notifyStaff, templates };
-
-// Sends one message to every admin/staff account that has a phone number
-// set. Staff without a phone on file are silently skipped, not an error -
-// phone is optional on staff accounts. Each send is independent: one
-// failed/missing number never blocks the others.
 async function notifyStaff(message) {
   const Admin = require('../models/Admin'); // required here, not at top, to avoid a require cycle risk
   try {
@@ -124,3 +138,5 @@ async function notifyStaff(message) {
     console.error('notifyStaff failed to look up staff accounts:', err.message);
   }
 }
+
+module.exports = { sendSMS, notifyStaff, templates };

@@ -12,6 +12,7 @@ const emailService = require('../services/emailService');
 // the response text itself - there's no separate error flag in the Africa's
 // Talking response format (just CON/END + a message), so this is the most
 // honest signal available without changing the underlying menu logic.
+
 const FAILURE_PHRASES = [
   'invalid', 'wrong', 'failed', 'error', 'something went wrong', 'not found',
   'insufficient', 'incorrect', 'locked', 'did not match',
