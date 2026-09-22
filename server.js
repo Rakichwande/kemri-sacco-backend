@@ -9,6 +9,7 @@ const Member = require('./models/Member');
 const Payment = require('./models/Payment');
 const Loan = require('./models/Loan');
 const Repayment = require('./models/Repayment');
+const Withdrawal = require('./models/Withdrawal');
 // Add these lines
 const authRoutes = require('./routes/auth');
 const Admin = require('./models/Admin');
