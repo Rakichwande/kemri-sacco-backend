@@ -74,6 +74,12 @@ const templates = {
 
   staffDeposit: (name, amount) =>
     `KEMRI SACCO Admin: Deposit of ${formatKES(amount)} received from ${name}.`,
+
+  withdrawalRequested: (name, amount) =>
+    `KEMRI SACCO: Your withdrawal request of ${formatKES(amount)} has been received. Our team will process it and contact you once complete. This is not instant.`,
+
+  staffWithdrawalRequest: (name, amount) =>
+    `KEMRI SACCO Admin: Withdrawal request of ${formatKES(amount)} from ${name}. Review and process via the admin portal.`,
 };
 
 // Send SMS function with enhanced validation and logging

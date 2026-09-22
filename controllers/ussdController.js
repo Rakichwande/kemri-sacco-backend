@@ -1,6 +1,7 @@
 const Member = require('../models/Member');
 const Payment = require('../models/Payment');
 const Loan = require('../models/Loan');
+const Withdrawal = require('../models/Withdrawal');
 const paymentService = require('../services/paymentService');
 const LoanService = require('../services/loanService');
 const smsService = require('../services/smsService');
@@ -12,7 +13,6 @@ const emailService = require('../services/emailService');
 // the response text itself - there's no separate error flag in the Africa's
 // Talking response format (just CON/END + a message), so this is the most
 // honest signal available without changing the underlying menu logic.
-
 const FAILURE_PHRASES = [
   'invalid', 'wrong', 'failed', 'error', 'something went wrong', 'not found',
   'insufficient', 'incorrect', 'locked', 'did not match',
@@ -86,6 +86,9 @@ async function handleUssd(req, res) {
           response = await handleChangePin(phoneNumber, steps);
           break;
         case '8':
+          response = await handleWithdraw(phoneNumber, steps, sessionId);
+          break;
+        case '9':
           response = 'END Thank you for using KEMRI SACCO. Goodbye.';
           break;
         default:
@@ -121,7 +124,8 @@ function mainMenu() {
     '5. Repay Loan\n' +
     '6. Transactions\n' +
     '7. Change PIN\n' +
-    '8. Exit'
+    '8. Withdraw\n' +
+    '9. Exit'
   );
 }
 
@@ -484,6 +488,81 @@ async function handleChangePin(phoneNumber, steps) {
       console.error('PIN-change confirmation SMS failed (PIN still changed):', smsErr.message);
     }
     return 'END Your PIN has been changed successfully.';
+  }
+
+  return 'END Invalid input. Please dial again.';
+}
+
+// ============================================================
+// 8. WITHDRAW (PIN required)
+// ============================================================
+// IMPORTANT: this creates a withdrawal REQUEST, not an instant payout.
+// This system has no Safaricom B2C (Business-to-Customer) integration -
+// the same reason loan disbursement is a manual staff action today (see
+// services/loanService.js's approveLoan message: "Disbursement is manual
+// until M-Pesa B2C is approved by Safaricom"). A member's money does not
+// move the moment they complete this menu; a staff member sees the
+// request in the admin portal, sends the M-Pesa payment themselves, and
+// marks it processed. Once B2C is approved, this is the natural place to
+// wire in an automatic payout - the request/approval shape here doesn't
+// need to change, only what happens after the request is created.
+async function handleWithdraw(phoneNumber, steps, sessionId) {
+  const member = await Member.findByPhone(phoneNumber);
+  if (!member) {
+    return 'END You are not registered. Dial and select option 1 to register first.';
+  }
+
+  const pinCheck = await requirePin(member, steps, sessionId);
+  if (!pinCheck.authenticated) return pinCheck.response;
+  const remaining = pinCheck.remainingSteps;
+
+  const existingPending = await Withdrawal.getPendingForMember(member.id);
+  if (existingPending) {
+    return `END You already have a pending withdrawal request of KES ${Number(existingPending.amount).toLocaleString()}. Please wait for it to be processed.`;
+  }
+
+  const savingsBalance = await Payment.getMemberBalance(member.id);
+
+  if (remaining.length === 0) {
+    return `CON Available balance: KES ${savingsBalance.toLocaleString()}\nEnter amount to withdraw`;
+  }
+
+  if (remaining.length === 1) {
+    const amount = Number(remaining[0]);
+    if (!amount || amount <= 0) {
+      return 'END Invalid amount. Please dial again.';
+    }
+    if (amount > savingsBalance) {
+      return `END Insufficient balance. Your available balance is KES ${savingsBalance.toLocaleString()}.`;
+    }
+
+    // Guards against the rare case of two near-simultaneous requests both
+    // passing the getPendingForMember() check above before either has
+    // written its row - the database is the real source of truth here,
+    // this check is just a fast, friendly rejection for the common case.
+    const withdrawal = await Withdrawal.create({ member_id: member.id, amount });
+    if (!withdrawal) {
+      return 'END You already have a pending withdrawal request. Please wait for it to be processed.';
+    }
+
+    try {
+      await smsService.sendSMS(phoneNumber, smsService.templates.withdrawalRequested(member.full_name, amount));
+    } catch (smsErr) {
+      console.error('USSD withdrawal request SMS failed (request still recorded):', smsErr.message);
+    }
+
+    // SMS-only staff alert for now - notificationService.notifyStaff's
+    // emailContent parameter expects a template from emailService, which
+    // hasn't been reviewed yet in this pass. Add an email template there
+    // once that file's shape is confirmed, following the same pattern as
+    // the other staff notifications in this file.
+    try {
+      await smsService.notifyStaff(smsService.templates.staffWithdrawalRequest(member.full_name, amount));
+    } catch (staffSmsErr) {
+      console.error('Staff withdrawal-request SMS failed (request still recorded):', staffSmsErr.message);
+    }
+
+    return `END Withdrawal request of KES ${amount.toLocaleString()} received. We will process it and contact you once complete. This is not instant.`;
   }
 
   return 'END Invalid input. Please dial again.';
