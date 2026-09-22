@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const Report = require('../models/Report');
-const { authenticate, requireAdmin } = require('../middleware/auth');
+const { authenticate, requirePermission } = require('../middleware/auth');
 
 function validatePeriodParams(req, res) {
   const { periodType = 'month', year, month, quarter } = req.query;
@@ -20,7 +20,7 @@ function validatePeriodParams(req, res) {
   return { periodType, year, month, quarter };
 }
 
-router.get('/financial', authenticate, requireAdmin, async (req, res) => {
+router.get('/financial', authenticate, requirePermission('reports:read'), async (req, res) => {
   try {
     const params = validatePeriodParams(req, res);
     if (!params) return;
@@ -34,7 +34,7 @@ router.get('/financial', authenticate, requireAdmin, async (req, res) => {
 
 // Hand-built CSV - no library needed for something this simple, and it
 // avoids adding a new dependency just for one export button.
-router.get('/financial/export', authenticate, requireAdmin, async (req, res) => {
+router.get('/financial/export', authenticate, requirePermission('reports:read'), async (req, res) => {
   try {
     const params = validatePeriodParams(req, res);
     if (!params) return;

@@ -1,9 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const AuditLog = require('../models/AuditLog');
-const { authenticate, requireAdmin } = require('../middleware/auth');
+const { authenticate, requirePermission } = require('../middleware/auth');
 
-router.get('/', authenticate, requireAdmin, async (req, res) => {
+router.get('/', authenticate, requirePermission('audit:read'), async (req, res) => {
   try {
     const { search, category, limit, offset } = req.query;
     const entries = await AuditLog.list({
