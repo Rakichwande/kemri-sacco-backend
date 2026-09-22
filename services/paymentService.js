@@ -5,6 +5,7 @@ const Payment = require('../models/Payment');
 const Member = require('../models/Member');
 const Loan = require('../models/Loan');
 const Repayment = require('../models/Repayment');
+const Withdrawal = require('../models/Withdrawal');
 const notificationService = require('./notificationService');
 const emailService = require('./emailService');
 
@@ -46,6 +47,40 @@ async function initiatePayment({ memberId, phoneNumber, amount, loanId }) {
     console.error('❌ initiatePayment error:', error.response?.data || error.message);
     throw error;
   }
+}
+
+/**
+ * Create a withdrawal REQUEST - not an instant payout. This system has no
+ * Safaricom B2C integration (see models/Withdrawal.js), so a request just
+ * gets queued; a staff member processes it manually from the admin portal
+ * and sends the M-Pesa payment themselves, the same pattern already used
+ * for loan disbursement.
+ * @param {Object} params
+ * @param {number} params.memberId
+ * @param {number} params.amount
+ */
+async function requestWithdrawal({ memberId, amount }) {
+  const balance = await Payment.getMemberBalance(memberId);
+  if (amount > balance) {
+    return { success: false, message: 'Insufficient balance for this withdrawal.' };
+  }
+
+  const existing = await Withdrawal.getPendingForMember(memberId);
+  if (existing) {
+    return {
+      success: false,
+      message: `You already have a pending withdrawal of KES ${Number(existing.amount).toLocaleString()}.`,
+    };
+  }
+
+  const withdrawal = await Withdrawal.create({ member_id: memberId, amount });
+  if (!withdrawal) {
+    // Lost the race against the DB's unique index - another request from
+    // this member landed between our getPendingForMember check and create().
+    return { success: false, message: 'You already have a pending withdrawal request.' };
+  }
+
+  return { success: true, withdrawal };
 }
 
 /**
@@ -235,4 +270,4 @@ async function handleCallback(callbackBody) {
   }
 }
 
-module.exports = { initiatePayment, handleCallback };
+module.exports = { initiatePayment, handleCallback, requestWithdrawal };

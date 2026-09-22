@@ -91,6 +91,7 @@ async function start() {
     await Loan.init();
     await Payment.init();
     await Repayment.init();
+    await Withdrawal.init();
     await UssdSession.init();
     await StaffInvite.init();
     await Admin.init();
