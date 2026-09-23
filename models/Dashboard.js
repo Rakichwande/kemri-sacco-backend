@@ -21,6 +21,7 @@ async function getSummary() {
     monthlySeriesResult,
     recentPendingResult,
     repaymentsByMonthRows,
+    loansByMonthRows,
   ] = await Promise.all([
     db.query('SELECT COUNT(*)::int AS count FROM members'),
     db.query(`SELECT COALESCE(SUM(amount), 0)::bigint AS total FROM payments WHERE status = 'completed'`),
@@ -44,15 +45,26 @@ async function getSummary() {
       LIMIT 3
     `),
     Repayment.getMonthlyTotals(6),
+    db.query(`
+      SELECT date_trunc('month', disbursed_at) AS month, SUM(principal)::bigint AS total
+      FROM loans
+      WHERE disbursed_at IS NOT NULL
+        AND disbursed_at >= NOW() - INTERVAL '6 months'
+      GROUP BY month
+      ORDER BY month
+    `),
   ]);
 
-  // Fill in every one of the last 6 months for both series, even months with
-  // zero activity, so the chart doesn't silently skip a quiet month.
+  // Fill in every one of the last 6 months for all three series, even months
+  // with zero activity, so the chart doesn't silently skip a quiet month.
   const contributionsMap = new Map(
     monthlySeriesResult.rows.map((r) => [r.month.toISOString().slice(0, 7), Number(r.total)])
   );
   const repaymentsMap = new Map(
     repaymentsByMonthRows.map((r) => [r.month.toISOString().slice(0, 7), Number(r.total)])
+  );
+  const loansMap = new Map(
+    loansByMonthRows.map((r) => [r.month.toISOString().slice(0, 7), Number(r.total)])
   );
   const monthlySeries = [];
   const now = new Date();
@@ -62,6 +74,7 @@ async function getSummary() {
     monthlySeries.push({
       label: d.toLocaleDateString('en-GB', { month: 'short' }),
       contributions: contributionsMap.get(key) || 0,
+      loans: loansMap.get(key) || 0,
       repayments: repaymentsMap.get(key) || 0,
     });
   }
