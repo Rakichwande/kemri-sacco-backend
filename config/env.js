@@ -3,11 +3,12 @@
 // control (and therefore public, since this repo is public).
 //
 // AT_USSD_SHARED_SECRET is required here for the same reason: without it,
-// middleware/verifyUssdSource.js silently rejects every real Africa's
-// Talking request with 403, with no obvious signal at boot time that
-// anything is wrong - exactly what happened before this variable was added
-// here. Failing fast at startup surfaces that misconfiguration immediately
-// instead of as a wall of silent 403s in production traffic.
+// middleware/verifyUssdSource.js rejects every real Africa's Talking request
+// (returning a plain "END Service temporarily unavailable" to the member,
+// who has no way to tell that apart from a genuine outage). That is exactly
+// what happened before this variable was added here. Failing fast at
+// startup surfaces the misconfiguration immediately instead of as a wall
+// of silently-rejected USSD sessions in production.
 const REQUIRED = ['JWT_SECRET', 'DATABASE_URL', 'AT_USSD_SHARED_SECRET'];
 
 function loadEnv() {
@@ -34,11 +35,6 @@ function loadEnv() {
     JWT_SECRET: process.env.JWT_SECRET,
     DATABASE_URL: process.env.DATABASE_URL,
     AT_USSD_SHARED_SECRET: process.env.AT_USSD_SHARED_SECRET,
-    // Optional: populated once a confirmed IP list is obtained from Africa's
-    // Talking support (see middleware/verifyUssdSource.js). Not required to
-    // boot - the shared secret above is the primary defense; the IP check
-    // is additional hardening once a real list is available.
-    AT_USSD_ALLOWED_IPS: process.env.AT_USSD_ALLOWED_IPS || null,
   };
 }
 
