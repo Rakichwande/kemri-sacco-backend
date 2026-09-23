@@ -291,4 +291,6 @@ module.exports = {
   findRecentByMember,
   findAllAdmin,
   getStatementLines,
+  findByMpesaReceipt,   // ← ADDED
+  findById,             // ← ADDED
 };

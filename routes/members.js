@@ -4,6 +4,8 @@ const memberController = require('../controllers/memberController');
 const { validateMemberRegistration } = require('../middleware/validate');
 const { authenticate, requirePermission } = require('../middleware/auth');
 
+const Member = require('../models/Member');
+const Payment = require('../models/Payment');
 const Loan = require('../models/Loan');
 const Withdrawal = require('../models/Withdrawal');
 
