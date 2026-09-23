@@ -79,6 +79,9 @@ app.use('/api/repayments', require('./routes/repayments'));
 app.use('/api/reports', require('./routes/reports'));
 app.use('/api/system-health', require('./routes/systemHealth'));
 
+// ----- WITHDRAWAL ROUTES (NEW) -----
+app.use('/api/withdrawals', require('./routes/withdrawals'));
+
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 

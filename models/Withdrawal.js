@@ -83,6 +83,67 @@ async function findPending() {
   return result.rows;
 }
 
+// Admin - full history with optional status filter. Used by the
+// Withdrawal Queue page's "Processed" / "Rejected" / "All" tabs.
+async function findAll({ status, limit = 100, offset = 0 } = {}) {
+  const conditions = [];
+  const values = [];
+  let i = 1;
+
+  if (status) {
+    conditions.push(`w.status = $${i++}`);
+    values.push(status);
+  }
+
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  const limitParam = i++;
+  const offsetParam = i++;
+  values.push(limit, offset);
+
+  const result = await db.query(
+    `SELECT w.*, m.full_name, m.phone_number, m.id_number AS member_national_id,
+            a.full_name AS processed_by_name
+     FROM withdrawals w
+     JOIN members m ON w.member_id = m.id
+     LEFT JOIN admins a ON w.processed_by = a.id
+     ${where}
+     ORDER BY w.requested_at DESC
+     LIMIT $${limitParam} OFFSET $${offsetParam}`,
+    values
+  );
+  return result.rows;
+}
+
+// Admin - single withdrawal by id, with member and admin context. Used by
+// the process/reject handlers to verify state before transitioning.
+async function findById(id) {
+  const result = await db.query(
+    `SELECT w.*, m.full_name, m.phone_number,
+            a.full_name AS processed_by_name
+     FROM withdrawals w
+     JOIN members m ON w.member_id = m.id
+     LEFT JOIN admins a ON w.processed_by = a.id
+     WHERE w.id = $1`,
+    [id]
+  );
+  return result.rows[0];
+}
+
+// Admin dashboard stats - counts and totals per status.
+async function getSummary() {
+  const result = await db.query(
+    `SELECT
+       COUNT(*) FILTER (WHERE status = 'pending')   AS pending_count,
+       COALESCE(SUM(amount) FILTER (WHERE status = 'pending'), 0) AS pending_total,
+       COUNT(*) FILTER (WHERE status = 'processed' AND processed_at >= CURRENT_DATE) AS processed_today,
+       COALESCE(SUM(amount) FILTER (WHERE status = 'processed' AND processed_at >= CURRENT_DATE), 0) AS processed_today_total,
+       COUNT(*) FILTER (WHERE status = 'processed') AS processed_total_count,
+       COUNT(*) FILTER (WHERE status = 'rejected')  AS rejected_count
+     FROM withdrawals`
+  );
+  return result.rows[0];
+}
+
 // Only transitions FROM 'pending' - same double-processing guard as
 // Loan.approve()/markDisbursed(). Staff record the real M-Pesa receipt
 // once they've actually sent the payout themselves.
@@ -126,4 +187,15 @@ async function reject(id, { processed_by, notes } = {}) {
   return result.rows[0];
 }
 
-module.exports = { init, create, getPendingForMember, findPending, markProcessed, getStatementLines, reject };
+module.exports = {
+  init,
+  create,
+  getPendingForMember,
+  findPending,
+  findAll,
+  findById,
+  getSummary,
+  markProcessed,
+  getStatementLines,
+  reject,
+};

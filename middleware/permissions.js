@@ -29,6 +29,7 @@ const PERMISSIONS = {
     'members:read', 'members:write',
     'loans:read', 'loans:approve', 'loans:disburse',
     'payments:read', 'payments:write',
+    'withdrawals:read', 'withdrawals:write',
     'reports:read',
     'audit:read',
   ],
@@ -37,26 +38,31 @@ const PERMISSIONS = {
     'members:read', 'members:write',
     'loans:read', 'loans:approve', 'loans:disburse',
     'payments:read',
+    'withdrawals:read', 'withdrawals:write',
     'reports:read',
     'audit:read',
   ],
   [ROLES.FINANCE_OFFICER]: [
     'members:read',
     'payments:read', 'payments:write',
+    'withdrawals:read', 'withdrawals:write',
     'reports:read',
   ],
   [ROLES.LOANS_OFFICER]: [
     'members:read',
     'loans:read', 'loans:approve', 'loans:disburse',
+    'withdrawals:read',
   ],
   [ROLES.MEMBER_SUPPORT]: [
     'members:read', 'members:write',
+    'withdrawals:read',
   ],
   [ROLES.AUDITOR]: [
     // Explicitly read-only - no :write, :approve, or :disburse anywhere.
     'members:read',
     'loans:read',
     'payments:read',
+    'withdrawals:read',
     'reports:read',
     'audit:read',
   ],
@@ -66,6 +72,7 @@ const PERMISSIONS = {
     'members:read',
     'loans:read',
     'payments:read',
+    'withdrawals:read',
   ],
 };
 
