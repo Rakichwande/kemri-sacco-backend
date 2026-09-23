@@ -287,6 +287,25 @@ async function applyRepayment(loan_id, amount, externalClient = null) {
   }
 }
 
+// Disbursement lines for the member statement - only loans that actually
+// reached disbursement (excludes pending/approved/rejected, which never
+// released real money to the member).
+async function getStatementLines(member_id) {
+  const result = await db.query(
+    `SELECT
+       'disbursement' AS type,
+       disbursed_at AS date,
+       principal AS amount,
+       id::text AS reference,
+       status
+     FROM loans
+     WHERE member_id = $1 AND disbursed_at IS NOT NULL
+     ORDER BY disbursed_at ASC`,
+    [member_id]
+  );
+  return result.rows;
+}
+
 async function findAllForAdmin() {
   const result = await db.query(
     `SELECT l.*, m.full_name as member_name, m.phone_number, ${Member.REFERENCE_SQL} AS member_reference
@@ -323,4 +342,5 @@ module.exports = {
   applyRepayment,
   findAllForAdmin,
   findPending,
+  getStatementLines,
 };

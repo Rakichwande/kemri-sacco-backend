@@ -97,6 +97,24 @@ async function markProcessed(id, { mpesa_receipt, processed_by, notes } = {}) {
   return result.rows[0];
 }
 
+// Statement lines for withdrawals - only ones staff actually processed
+// (pending/rejected requests never moved real money).
+async function getStatementLines(member_id) {
+  const result = await db.query(
+    `SELECT
+       'withdrawal' AS type,
+       processed_at AS date,
+       amount,
+       mpesa_receipt AS reference,
+       status
+     FROM withdrawals
+     WHERE member_id = $1 AND status = 'processed'
+     ORDER BY processed_at ASC`,
+    [member_id]
+  );
+  return result.rows;
+}
+
 async function reject(id, { processed_by, notes } = {}) {
   const result = await db.query(
     `UPDATE withdrawals
@@ -108,4 +126,4 @@ async function reject(id, { processed_by, notes } = {}) {
   return result.rows[0];
 }
 
-module.exports = { init, create, getPendingForMember, findPending, markProcessed, reject };
+module.exports = { init, create, getPendingForMember, findPending, markProcessed, getStatementLines, reject };

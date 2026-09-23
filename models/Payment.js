@@ -163,6 +163,24 @@ async function updateStatus(checkout_request_id, status, mpesa_receipt = null, c
   return result.rows[0];
 }
 
+// Looks up a payment by its M-Pesa receipt number - used to find the
+// underlying payments row for a repayments row, since repayments has no
+// payment_id linking back to it (the two tables were written independently
+// by the same handleCallback flow, sharing only the mpesa_receipt value).
+async function findByMpesaReceipt(mpesa_receipt) {
+  const result = await pool.query(
+    `SELECT p.*, m.full_name AS member_name, m.phone_number AS member_phone,
+            ${Member.REFERENCE_SQL} AS member_reference
+     FROM payments p
+     LEFT JOIN members m ON p.member_id = m.id
+     WHERE p.mpesa_receipt = $1
+     ORDER BY p.created_at DESC
+     LIMIT 1`,
+    [mpesa_receipt]
+  );
+  return result.rows[0];
+}
+
 // Get member's total SAVINGS balance - completed contributions only.
 // loan_id IS NULL excludes loan repayments (see findAllAdmin below for the
 // same distinction on the admin side); without this guard, a member's
@@ -185,6 +203,26 @@ async function findRecentByMember(member_id, limit = 5) {
      ORDER BY created_at DESC 
      LIMIT $2`,
     [member_id, limit]
+  );
+  return result.rows;
+}
+
+// Statement lines for deposits and loan repayments - two queries in one
+// function since both live in the payments table, distinguished only by
+// loan_id. Used by the member statement view alongside loan disbursements
+// (models/Loan.js) and withdrawals (models/Withdrawal.js).
+async function getStatementLines(member_id) {
+  const result = await pool.query(
+    `SELECT
+       CASE WHEN loan_id IS NULL THEN 'deposit' ELSE 'repayment' END AS type,
+       created_at AS date,
+       amount,
+       mpesa_receipt AS reference,
+       status
+     FROM payments
+     WHERE member_id = $1 AND status = 'completed'
+     ORDER BY created_at ASC`,
+    [member_id]
   );
   return result.rows;
 }
@@ -226,6 +264,22 @@ async function findAllAdmin({ search, from, to, limit = 50, offset = 0 } = {}) {
   return result.rows;
 }
 
+// Single payment by its own id, joined with member info - for the
+// admin-facing receipt view (GET /api/payments/:id/receipt). Distinct
+// from findByCheckoutId, which is webhook-facing and keyed by Daraja's
+// checkout_request_id rather than our own primary key.
+async function findById(id) {
+  const result = await pool.query(
+    `SELECT p.*, m.full_name AS member_name, m.phone_number AS member_phone,
+            ${Member.REFERENCE_SQL} AS member_reference
+     FROM payments p
+     LEFT JOIN members m ON p.member_id = m.id
+     WHERE p.id = $1`,
+    [id]
+  );
+  return result.rows[0];
+}
+
 module.exports = {
   init,
   create,
@@ -236,4 +290,5 @@ module.exports = {
   getMemberBalance,
   findRecentByMember,
   findAllAdmin,
+  getStatementLines,
 };
