@@ -6,17 +6,6 @@ const Payment = require('../models/Payment');
 const { validatePaymentInitiation } = require('../middleware/validate');
 const { authenticate, requirePermission } = require('../middleware/auth');
 
-// This route has no login by design - a brand-new member completing their
-// first contribution right after registering has no account yet, so
-// staff-style JWT auth doesn't apply. It was previously disabled entirely
-// after an unauthenticated request was confirmed to trigger a real STK
-// push to an arbitrary phone number using live Daraja credentials. The
-// real fix (in controllers/paymentController.js) is that the phone number
-// now always comes from the member's own stored record, never from the
-// request body - the caller can no longer choose who receives the prompt,
-// only which existing member's own STK push to trigger. This rate limiter
-// is the second layer: even with that fixed, nothing should allow rapid
-// repeated triggering.
 const paymentInitiateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5,
@@ -27,7 +16,7 @@ const paymentInitiateLimiter = rateLimit({
 
 const paymentStatusLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 60, // status polling happens automatically every few seconds while waiting
+  max: 60,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many status checks. Please wait a moment.' },
@@ -48,6 +37,38 @@ router.get('/admin/list', authenticate, requirePermission('payments:read'), asyn
   } catch (err) {
     console.error('Contribution logs fetch error:', err);
     res.status(500).json({ error: 'Failed to fetch contributions' });
+  }
+});
+
+router.get('/:id/receipt', authenticate, requirePermission('payments:read'), async (req, res) => {
+  try {
+    const payment = await Payment.findById(req.params.id);
+    if (!payment) {
+      return res.status(404).json({ error: 'Payment not found' });
+    }
+    if (payment.status !== 'completed') {
+      return res.status(400).json({ error: 'Receipt is only available for completed payments.' });
+    }
+    res.json(payment);
+  } catch (err) {
+    console.error('Receipt fetch error:', err);
+    res.status(500).json({ error: 'Failed to fetch receipt' });
+  }
+});
+
+router.get('/receipt-by-receipt/:mpesaReceipt', authenticate, requirePermission('payments:read'), async (req, res) => {
+  try {
+    const payment = await Payment.findByMpesaReceipt(req.params.mpesaReceipt);
+    if (!payment) {
+      return res.status(404).json({ error: 'Payment not found for that M-Pesa receipt.' });
+    }
+    if (payment.status !== 'completed') {
+      return res.status(400).json({ error: 'Receipt is only available for completed payments.' });
+    }
+    res.json(payment);
+  } catch (err) {
+    console.error('Receipt-by-receipt fetch error:', err);
+    res.status(500).json({ error: 'Failed to fetch receipt' });
   }
 });
 
