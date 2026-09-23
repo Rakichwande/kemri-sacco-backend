@@ -8,80 +8,68 @@
 // behalf) and never carry a per-member token. What we need instead is
 // confirmation that the CALLER is genuinely Africa's Talking.
 //
-// Two independent checks, both required:
-//   1. Source IP is one of Africa's Talking's published outbound ranges.
-//   2. A shared secret, configured independently in the AT dashboard
-//      (as a custom header on the USSD callback) and in our own env vars,
-//      is present and matches.
+// WHY NOT IP WHITELISTING: an earlier version of this middleware also
+// checked the caller's source IP against AT_USSD_ALLOWED_IPS. That check
+// was removed because it cannot work correctly on Render. This app sits
+// behind Render's edge + internal load balancer, so req.ip resolves to a
+// private 10.x.x.x address (confirmed in production logs: 10.197.20.133,
+// 10.192.163.192, 10.195.91.69), never to AT's actual public egress IP.
+// A correctly-configured AT_USSD_ALLOWED_IPS list would therefore reject
+// 100% of legitimate traffic and take USSD offline for every member.
+// Express's `trust proxy` setting cannot fix this without knowing exactly
+// how many hops Render's chain has, which is not documented and could
+// change without notice.
 //
-// Neither check alone is sufficient long-term: IP ranges can change without
-// much notice, and a secret alone protects nothing if it ever leaks (a log
-// line, a committed .env, a misconfigured proxy). Together, both have to
-// hold for a request to be trusted as genuine USSD traffic.
-
-const { AT_USSD_SHARED_SECRET, AT_USSD_ALLOWED_IPS } = require('../config/env');
-
-// IMPORTANT: Africa's Talking's actual callback source IPs are NOT
-// hardcoded here. A web search while writing this middleware did not turn
-// up an authoritative, current list from AT's own docs - guessing at IP
-// addresses for a security control is worse than not having one, since a
-// wrong list either lets an attacker straight through or silently blocks
-// AT's real traffic and breaks USSD for every member.
+// WHAT WE USE INSTEAD: a shared secret. Africa's Talking's dashboard
+// "Callback URL" field is a plain URL with no way to attach a custom
+// header, so the secret is embedded in the URL's query string and arrives
+// on every real callback as req.query.key.
 //
-// Get the current list directly from Africa's Talking before deploying
-// this: ask their support (help.africastalking.com) or your account rep
-// for the callback/outbound IP ranges to whitelist for USSD, then set
-//   AT_USSD_ALLOWED_IPS=1.2.3.4,5.6.7.8
-// in your env vars. Until that's set, the IP check below is skipped
-// (logged loudly) and the shared secret becomes your only real defense -
-// which is why the secret is treated as required, not optional.
+// The secret is treated as the sole authentication for this endpoint.
+// Because query-string secrets end up in HTTP access logs (Render's, AT's,
+// any intermediate proxy), it MUST be:
+//   - long: at least 32 characters, base64-encoded random bytes, not a
+//     human-memorable phrase
+//   - rotated periodically (quarterly is a reasonable cadence)
+//   - treated as semi-public: the real defense against abuse is monitoring
+//     for unexpected call volume, not the secrecy of the key itself
+//
+// Set AT_USSD_SHARED_SECRET in Render's environment (see config/env.js,
+// which fails fast at boot if it's missing or weak) and register the
+// callback URL in the AT dashboard as:
+//   https://kemri-sacco-backend.onrender.com/ussd?key=<AT_USSD_SHARED_SECRET>
 
-function getAllowedIps() {
-  if (!AT_USSD_ALLOWED_IPS) return null;
-  return AT_USSD_ALLOWED_IPS.split(',').map((ip) => ip.trim()).filter(Boolean);
-}
+const crypto = require('crypto');
+const { AT_USSD_SHARED_SECRET } = require('../config/env');
 
-function getClientIp(req) {
-  // If you're behind a proxy/load balancer (Render, most PaaS hosts are),
-  // req.ip alone may report the proxy's IP, not the real caller. Express's
-  // `trust proxy` setting (set in server.js) makes req.ip resolve correctly
-  // from X-Forwarded-For - make sure that's configured, or this check will
-  // always fail (or always pass, if misconfigured the other way).
-  return req.ip;
+// Constant-time comparison so a response-time difference can't leak the
+// secret byte-by-byte. The practical risk over a public internet link is
+// very low, but this is a two-line change and it's the right habit for
+// comparing secrets anywhere in the codebase.
+function secretsMatch(a, b) {
+  if (!a || !b) return false;
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
 }
 
 function verifyUssdSource(req, res, next) {
-  const clientIp = getClientIp(req);
-  const allowedIps = getAllowedIps();
-
-  if (allowedIps) {
-    if (!allowedIps.includes(clientIp)) {
-      console.warn(`USSD route: rejected request from unrecognized IP: ${clientIp}`);
-      return res.status(403).json({ error: 'Forbidden' });
-    }
-  } else {
-    // No IP list configured yet - don't block on it, but make this loud
-    // and impossible to miss in logs/monitoring until AT_USSD_ALLOWED_IPS
-    // is set from a confirmed list.
-    console.warn(
-      `USSD route: AT_USSD_ALLOWED_IPS is not configured - skipping IP check ` +
-      `for request from ${clientIp}. Get the real IP list from Africa's Talking ` +
-      `support and set this env var before relying on this middleware.`
-    );
-  }
-
-  // Africa's Talking's dashboard "Callback URL" field is a plain URL with
-  // no way to attach a custom header from their side - so the secret can't
-  // be sent as a header the way it could with a webhook provider that lets
-  // you configure one. What AT WILL do is call exactly the URL you
-  // register, including its query string, every time. So the secret is
-  // embedded there instead: register the callback URL in AT's dashboard as
-  //   https://your-backend.example.com/api/ussd?key=<AT_USSD_SHARED_SECRET>
-  // and it arrives on every real callback as req.query.key.
   const providedSecret = req.query.key;
-  if (!AT_USSD_SHARED_SECRET || providedSecret !== AT_USSD_SHARED_SECRET) {
-    console.warn(`USSD route: rejected request with missing/invalid shared secret from IP: ${clientIp}`);
-    return res.status(403).json({ error: 'Forbidden' });
+
+  if (!secretsMatch(providedSecret, AT_USSD_SHARED_SECRET)) {
+    console.warn(
+      `USSD route: rejected request with missing or invalid shared secret from ${req.ip}.`
+    );
+    // Return a valid USSD response in the format AT expects (plain text,
+    // "END ..."), not a JSON 403. AT shows a generic "Service unavailable"
+    // to the member when it gets anything other than a well-formed USSD
+    // body, which looks identical to a real outage. Returning 200 with a
+    // proper END message gives the member a clear, actionable response.
+    // (HTTP status is intentionally 200 — AT's retry behavior on 4xx/5xx
+    // is inconsistent and can amplify a misconfiguration into a loop.)
+    res.set('Content-Type', 'text/plain');
+    return res.status(200).send('END Service temporarily unavailable. Please try again shortly.');
   }
 
   next();
