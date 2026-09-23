@@ -44,7 +44,7 @@ async function getSummary() {
       ORDER BY l.applied_at DESC
       LIMIT 3
     `),
-    Repayment.getMonthlyTotals(6),
+    Repayment.getMonthlyTotals(6), // returns rows array directly
     db.query(`
       SELECT date_trunc('month', disbursed_at) AS month, SUM(principal)::bigint AS total
       FROM loans
@@ -52,7 +52,7 @@ async function getSummary() {
         AND disbursed_at >= NOW() - INTERVAL '6 months'
       GROUP BY month
       ORDER BY month
-    `),
+    `).then((r) => r.rows), // <-- unwrap to the rows array so .map() works below
   ]);
 
   // Fill in every one of the last 6 months for all three series, even months
