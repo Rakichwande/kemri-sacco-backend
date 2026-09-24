@@ -9,12 +9,20 @@ const AuditLog = require('../models/AuditLog');
 const StaffInvite = require('../models/StaffInvite');
 const emailService = require('../services/emailService');
 const crypto = require('crypto');
-const { loginLimiter, otpLimiter, emailActionLimiter } = require('../middleware/rateLimit');
+const {
+  loginLimiter,
+  otpLimiter,
+  emailActionLimiter,
+  emailPerAddressLimiter,
+  passwordChangeLimiter,
+  resetPasswordLimiter,
+} = require('../middleware/rateLimit');
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://kemri-sacco-portal.onrender.com';
 const OTP_EXPIRY_MINUTES = 10;
 const OTP_MAX_ATTEMPTS = 5;
 const RESET_EXPIRY_MINUTES = 60;
+const JWT_EXPIRY = '8h';
 
 function issueSessionToken(admin) {
   const token = jwt.sign(
@@ -37,8 +45,6 @@ function issueSessionToken(admin) {
 function generateOtpCode() {
   return String(crypto.randomInt(100000, 999999)); // 6 digits
 }
-
-const JWT_EXPIRY = '8h';
 
 // All role values this app currently recognizes. 'admin' (Super
 // Administrator) and 'staff' (legacy) are the original two; the rest are
@@ -146,7 +152,7 @@ router.post('/verify-otp', otpLimiter, async (req, res) => {
   }
 });
 
-router.post('/resend-otp', emailActionLimiter, async (req, res) => {
+router.post('/resend-otp', emailActionLimiter, emailPerAddressLimiter, async (req, res) => {
   try {
     const { otpToken } = req.body;
     let payload;
@@ -177,7 +183,7 @@ router.post('/resend-otp', emailActionLimiter, async (req, res) => {
 // Deliberately responds the same way whether or not the account/email
 // exists - standard practice, avoids letting someone probe which
 // usernames or emails are registered.
-router.post('/forgot-password', emailActionLimiter, async (req, res) => {
+router.post('/forgot-password', emailActionLimiter, emailPerAddressLimiter, async (req, res) => {
   const genericResponse = { message: 'If an account with that username or email exists and has an email on file, a reset link has been sent.' };
   try {
     const { identifier } = req.body;
@@ -217,7 +223,7 @@ router.get('/reset-password/:token', async (req, res) => {
   }
 });
 
-router.post('/reset-password/:token', async (req, res) => {
+router.post('/reset-password/:token', resetPasswordLimiter, async (req, res) => {
   try {
     const admin = await Admin.findByResetToken(req.params.token);
     if (!admin) return res.status(404).json({ error: 'This reset link is invalid or has already been used.' });
@@ -261,8 +267,10 @@ router.patch('/me/notifications', authenticate, async (req, res) => {
 });
 
 // Any logged-in user can change their OWN password. Requires proving the
-// current password first - never a silent overwrite.
-router.post('/change-password', authenticate, async (req, res) => {
+// current password first - never a silent overwrite. Rate-limited so a
+// hijacked session can't brute-force the current password through this
+// endpoint.
+router.post('/change-password', authenticate, passwordChangeLimiter, async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
 
