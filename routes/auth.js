@@ -131,7 +131,11 @@ router.post('/verify-otp', otpLimiter, async (req, res) => {
       return res.status(401).json({ error: 'Invalid verification session.' });
     }
 
-    const admin = await Admin.findById(payload.id);
+    // findByIdWithAuthFields returns the full row (including otp_code,
+    // otp_expires_at, otp_attempts). The narrower findById() omits those on
+    // purpose for routes that return admin data to the browser - see
+    // models/Admin.js.
+    const admin = await Admin.findByIdWithAuthFields(payload.id);
     if (!admin || !admin.otp_code) {
       return res.status(401).json({ error: 'No pending verification. Please log in again.' });
     }
@@ -150,8 +154,6 @@ router.post('/verify-otp', otpLimiter, async (req, res) => {
     }
 
     await Admin.clearOtp(admin.id);
-    // Admin.findById omits password_hash and a few other columns, so fetch
-    // the row with must_change_password. findById includes it, so we're fine.
     res.json(issueSessionToken(admin));
   } catch (err) {
     console.error('OTP verification error:', err);
@@ -168,7 +170,9 @@ router.post('/resend-otp', emailActionLimiter, emailPerAddressLimiter, async (re
     } catch (err) {
       return res.status(401).json({ error: 'This verification session has expired. Please log in again.' });
     }
-    const admin = await Admin.findById(payload.id);
+    // Same reasoning as verify-otp above - we need the full row to read
+    // admin.email safely and to be consistent with the findById narrowing.
+    const admin = await Admin.findByIdWithAuthFields(payload.id);
     if (!admin || !admin.email) {
       return res.status(401).json({ error: 'No pending verification. Please log in again.' });
     }
@@ -253,6 +257,8 @@ router.post('/reset-password/:token', resetPasswordLimiter, async (req, res) => 
 
 router.get('/me', authenticate, async (req, res) => {
   try {
+    // Narrow findById is intentional here - this data is returned to the
+    // browser, so it must not include otp_code or reset_token.
     const admin = await Admin.findById(req.user.id);
     if (!admin) return res.status(404).json({ error: 'Account not found' });
     res.json({ user: admin });
@@ -537,6 +543,9 @@ router.patch('/users/:id/role', authenticate, requirePermission('staff:manage'),
       return res.status(403).json({ error: `Your role is not permitted to assign "${role}".` });
     }
 
+    // Narrow findById is intentional here - we only need id/role/username
+    // for the guardrails, and this endpoint returns the updated account to
+    // the browser.
     const target = await Admin.findById(req.params.id);
     if (!target) return res.status(404).json({ error: 'Account not found' });
 
@@ -576,6 +585,8 @@ router.delete('/users/:id', authenticate, requirePermission('staff:manage'), asy
       return res.status(400).json({ error: 'You cannot remove your own account.' });
     }
 
+    // Narrow findById is intentional here - same reasoning as the role
+    // change endpoint above.
     const target = await Admin.findById(targetId);
     if (!target) return res.status(404).json({ error: 'Account not found' });
 

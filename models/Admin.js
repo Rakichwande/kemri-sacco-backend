@@ -178,6 +178,16 @@ async function findById(id) {
   return result.rows[0];
 }
 
+// Full row, including the OTP and reset-token columns. Used by the routes
+// that need to inspect or validate auth-flow state (verify-otp, resend-otp).
+// The narrower findById() above deliberately excludes sensitive fields for
+// endpoints like /me that return admin data to the browser - this method is
+// intentionally separate rather than widening findById.
+async function findByIdWithAuthFields(id) {
+  const result = await db.query('SELECT * FROM admins WHERE id = $1', [id]);
+  return result.rows[0];
+}
+
 async function verifyPassword(admin, password) {
   return await bcrypt.compare(password, admin.password_hash);
 }
@@ -252,6 +262,7 @@ module.exports = {
   findByUsername,
   findById,
   findByIdWithHash,
+  findByIdWithAuthFields,
   verifyPassword,
   create,
   findAll,
