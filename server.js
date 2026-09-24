@@ -94,27 +94,15 @@ app.use('/api/withdrawals', require('./routes/withdrawals'));
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
-// ============================================================
-// TEMPORARY diagnostic route - REMOVE after verifying req.ip
-// behaves correctly behind Render's proxy chain.
-//
-// Purpose: confirm whether `trust proxy: 1` above is enough for Express to
-// resolve the real client IP from X-Forwarded-For, or whether all requests
-// share one proxy IP (which would make the rate limiters useless). Protected
-// by ADMIN_API_KEY so it can't be hit by anyone who finds the URL.
-// ============================================================
-app.get('/debug/ip', (req, res) => {
-  const providedKey = req.headers['x-admin-key'];
-  if (providedKey !== process.env.ADMIN_API_KEY) {
-    return res.status(404).json({ error: 'Not found' });
-  }
-  res.json({
-    reqIp: req.ip,
-    socketRemoteAddress: req.socket?.remoteAddress,
-    xForwardedFor: req.headers['x-forwarded-for'],
-    trustProxySetting: app.get('trust proxy'),
-  });
-});
+// Render's edge sits behind Cloudflare plus an internal LB plus a local
+// proxy - four hops total (confirmed via /debug/ip: socket ::1, XFF =
+// "client, cloudflare, render-lb"). The original `1` walked back only one
+// hop and resolved req.ip to 10.192.163.192 for every client, which made
+// every rate limiter a global (not per-client) counter. `true` takes the
+// leftmost XFF value as the real client, and is safe here because the
+// container is not directly reachable - all inbound traffic goes through
+// Render's edge.
+app.set('trust proxy', true);
 
 // Error handler (should be last)
 app.use(errorHandler);
