@@ -82,23 +82,35 @@ const templates = {
     `KEMRI SACCO Admin: Withdrawal request of ${formatKES(amount)} from ${name}. Awaiting processing.`,
 };
 
-// Send SMS function with enhanced validation and logging
+// Send SMS function.
+//
+// NEVER THROWS. Always resolves to { sent: boolean, reason?: string }.
+//
+// This is deliberate: SMS delivery failures are almost always per-recipient
+// (the member's SIM is DND-listed, the number is wrong, the phone is off) or
+// account-level (Africa's Talking balance is low) - neither is a systemic
+// failure that should take the whole server down. Previously this function
+// threw on any non-Success recipient status, and a fire-and-forget caller
+// (notificationService.notifyStaff, or any await-less call) turning that
+// throw into an unhandled rejection killed the process - for every other
+// member too. Callers should be able to treat a delivery failure as a
+// loggable event, not a fatal error. Same return shape as emailService's
+// sendEmail(), so the two notification channels behave consistently.
 async function sendSMS(phoneNumber, message) {
   if (!phoneNumber) {
     console.warn('SMS not sent: phoneNumber is empty');
-    return;
+    return { sent: false, reason: 'No phone number provided' };
   }
 
   const cleanPhone = normalizePhone(phoneNumber);
   if (!cleanPhone) {
     console.warn('SMS not sent: invalid phone number after normalization:', phoneNumber);
-    return;
+    return { sent: false, reason: 'Invalid phone number' };
   }
 
-  // Optionally, you can enforce that cleanPhone starts with '254' and length >= 10
   if (!cleanPhone.startsWith('+254') || cleanPhone.length < 10) {
     console.warn('SMS not sent: normalized number does not look like a Kenyan number:', cleanPhone);
-    return;
+    return { sent: false, reason: 'Normalized number is not a Kenyan number' };
   }
 
   try {
@@ -108,29 +120,28 @@ async function sendSMS(phoneNumber, message) {
       from: process.env.AT_SENDER_ID || null,
     });
 
-    // IMPORTANT: Africa's Talking's SMS API can resolve this promise
-    // successfully (no exception) even when the message was NOT actually
-    // delivered - the real outcome is per-recipient, inside
+    // Africa's Talking's SMS API can resolve this promise successfully (no
+    // exception) even when the message was NOT actually delivered - the
+    // real outcome is per-recipient, inside
     // result.SMSMessageData.Recipients[].status (e.g. "Success",
-    // "InsufficientBalance", "UserInBlackList", "InvalidSenderId", etc).
-    // Previously this function logged "sent successfully" for ANY
-    // non-throwing response without checking that field at all, which
-    // means a real delivery failure - most commonly an empty/low SMS
-    // credit balance on the AT account - would have looked identical to a
-    // real success in every log line, with no way to tell them apart.
+    // "InsufficientBalance", "UserInBlacklist", "InvalidSenderId", etc).
     const recipient = result?.SMSMessageData?.Recipients?.[0];
     if (recipient && recipient.status !== 'Success') {
       console.error(
         `❌ SMS to ${cleanPhone} was NOT delivered - Africa's Talking status: "${recipient.status}"`,
         `(cost: ${recipient.cost || 'n/a'}). Full response:`, JSON.stringify(result)
       );
-      throw new Error(`SMS delivery failed: ${recipient.status}`);
+      return { sent: false, reason: recipient.status };
     }
 
     console.log(`✅ SMS delivered to ${cleanPhone} - status: ${recipient?.status || 'unknown'}`);
+    return { sent: true };
   } catch (err) {
+    // Network/API-level failure (Africa's Talking unreachable, timeout,
+    // auth error, etc). Logged but still returned, never thrown - see the
+    // function-level comment for the reasoning.
     console.error('❌ SMS sending failed for', cleanPhone, ':', err.message);
-    throw err; // let the caller's own try/catch decide whether this should block anything
+    return { sent: false, reason: err.message };
   }
 }
 
@@ -139,7 +150,16 @@ async function notifyStaff(message) {
   try {
     const staff = await Admin.findAll();
     const withPhone = staff.filter((s) => s.phone);
-    await Promise.all(withPhone.map((s) => sendSMS(s.phone, message)));
+    // Promise.allSettled, not Promise.all: one staff member's phone being
+    // unreachable must not prevent the others from receiving the
+    // notification, and must not cause a rejection to bubble up.
+    const results = await Promise.allSettled(
+      withPhone.map((s) => sendSMS(s.phone, message))
+    );
+    const failed = results.filter((r) => r.status === 'rejected').length;
+    if (failed > 0) {
+      console.warn(`notifyStaff: ${failed} of ${withPhone.length} staff SMS deliveries failed.`);
+    }
   } catch (err) {
     console.error('notifyStaff failed to look up staff accounts:', err.message);
   }
