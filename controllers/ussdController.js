@@ -223,12 +223,37 @@ async function handleRegister(phoneNumber, steps) {
       return 'END Invalid ID number. Please dial again and enter 6-10 digits.';
     }
 
-    const member = await Member.create({
-      full_name,
-      id_number,
-      phone_number: phoneNumber,
-      scheme: 'holiday_savings',
-    });
+    let member;
+    try {
+      member = await Member.create({
+        full_name,
+        id_number,
+        phone_number: phoneNumber,
+        scheme: 'holiday_savings',
+      });
+    } catch (err) {
+      // Members.created() can throw 23505 for two unique constraints:
+      //   - members_phone_number_key (someone registered the same phone
+      //     under a different name) - rare because we check findByPhone()
+      //     above, but a race is possible
+      //   - members_id_number_key (this is the common one) - someone with
+      //     a different phone is trying to register with an ID that
+      //     already belongs to another member
+      // The outer handleUssd catch would turn both into the generic
+      // "Something went wrong" - technically safe but useless to the
+      // member, who has no idea what to do next. Surface the actual
+      // reason so they know the ID is taken.
+      if (err.code === '23505' && err.constraint === 'members_id_number_key') {
+        return 'END This ID number is already registered with KEMRI SACCO. If this is your ID, contact the office to link your new phone number.';
+      }
+      if (err.code === '23505' && err.constraint === 'members_phone_number_key') {
+        return 'END This phone number is already registered with KEMRI SACCO.';
+      }
+      // Anything else (DB down, sequence missing, etc) still goes through
+      // the outer catch as before - this handler only specialises the two
+      // known-and-actionable cases.
+      throw err;
+    }
 
     // Send registration SMS using the template
     try {
