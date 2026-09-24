@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS members (
   id SERIAL PRIMARY KEY,
   full_name VARCHAR(150) NOT NULL,
   id_number VARCHAR(20) UNIQUE NOT NULL,
-  phone_number VARCHAR(15) UNIQUE NOT NULL,
+  phone_number VARCHAR(15) UNIQUE,
   nationality VARCHAR(50),
   age INT,
   employer VARCHAR(150),
@@ -29,6 +29,33 @@ const MAX_PIN_ATTEMPTS = 5;
 const PIN_LOCKOUT_MINUTES = 30;
 const PIN_HASH_ROUNDS = 10; // matches Admin.js's bcrypt cost, for consistency
 
+// Normalizes any Kenyan phone input to the canonical +2547XXXXXXXX form.
+// Accepts: 0722321019, 722321019, 254722321019, +254722321019, and any
+// variant with spaces/dashes. Returns null if the input isn't a plausible
+// Kenyan mobile number after normalization.
+//
+// This exists because different data sources use different conventions:
+// USSD (Africa's Talking) sends +254..., the admin Settings form lets
+// staff type 07..., and the CEO's member spreadsheet has 7... (Excel
+// stripped the leading zero when the cell was treated as a number).
+// Storing one canonical form means a member registered via one path can
+// still be found by lookup from another.
+function normalizePhone(input) {
+  if (input === null || input === undefined) return null;
+  let digits = String(input).replace(/\D/g, '');
+  if (!digits) return null;
+
+  // Strip leading country code and reduce to a 9-digit local part
+  if (digits.startsWith('254')) digits = digits.slice(3);
+  if (digits.startsWith('0')) digits = digits.slice(1);
+
+  // At this point a valid Kenyan mobile should be 9 digits, starting 7 or 1
+  if (digits.length !== 9) return null;
+  if (!digits.startsWith('7') && !digits.startsWith('1')) return null;
+
+  return `+254${digits}`;
+}
+
 async function init() {
   await pool.query(createTableQuery);
   // Nullable - only ever set by bulk import, for members who already had a
@@ -45,6 +72,14 @@ async function init() {
   await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS pin_hash VARCHAR(255);`);
   await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS pin_failed_attempts INTEGER DEFAULT 0;`);
   await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS pin_locked_until TIMESTAMP;`);
+
+  // Allow importing members from a legacy register who have no phone number
+  // on file (the CEO's spreadsheet has several rows with a blank phone
+  // cell). Postgres treats NULL as "not present" in UNIQUE columns, so
+  // multiple NULL phones coexist fine alongside the existing UNIQUE
+  // constraint. Their USSD/SMS will simply not work until they add a phone
+  // via the admin portal.
+  await pool.query(`ALTER TABLE members ALTER COLUMN phone_number DROP NOT NULL;`);
 }
 
 // Create a new member with default loan fields
@@ -58,7 +93,7 @@ async function create(member) {
     [
       full_name,
       id_number,
-      phone_number,
+      phone_number, // may be null - see init()'s DROP NOT NULL
       nationality || null,
       age || null,
       employer || null,
@@ -73,9 +108,24 @@ async function create(member) {
   return result.rows[0];
 }
 
-// Find by phone number (used in USSD and other places)
+// Find by phone number (used in USSD and other places). Tries several
+// storage formats so a member registered under one convention is still
+// found when the lookup comes in under another (see normalizePhone).
 async function findByPhone(phone_number) {
-  const result = await pool.query('SELECT * FROM members WHERE phone_number = $1', [phone_number]);
+  if (!phone_number) return null;
+  const normalized = normalizePhone(phone_number);
+  if (!normalized) {
+    // Not a plausible Kenyan number - return nothing rather than throwing,
+    // since callers like the USSD flow pass in whatever AT sends.
+    return null;
+  }
+  const local = normalized.slice(4); // strip '+254'
+  const variants = [normalized, `0${local}`, `254${local}`, local];
+
+  const result = await pool.query(
+    'SELECT * FROM members WHERE phone_number = ANY($1::text[]) LIMIT 1',
+    [variants]
+  );
   return result.rows[0];
 }
 
@@ -147,53 +197,115 @@ async function resetPinAttempts(memberId) {
   );
 }
 
+// Title-case a name that was pasted from an all-caps spreadsheet. Preserves
+// initials (e.g. "JUSTUS W. KINYUNGU" -> "Justus W. Kinyungu"). Falls back
+// to the original if the input doesn't look like an all-caps name.
+function toTitleCase(name) {
+  if (!name) return name;
+  const trimmed = String(name).trim();
+  // Only rewrite if the string is mostly uppercase - a name that's already
+  // mixed-case (e.g. "McDonald") shouldn't be mangled.
+  const upperCount = (trimmed.match(/[A-Z]/g) || []).length;
+  const letterCount = (trimmed.match(/[A-Za-z]/g) || []).length;
+  if (letterCount === 0 || upperCount / letterCount < 0.8) return trimmed;
+
+  return trimmed
+    .split(/\s+/)
+    .map((word) => {
+      // Preserve single-letter initials with the trailing period
+      if (word.length <= 2 && /^[A-Z]\.?$/.test(word)) return word.toUpperCase();
+      return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+    })
+    .join(' ');
+}
+
 // Bulk import for pre-existing members (e.g. from a paper register or old
 // system). Deliberately does NOT touch savings/loan balances - those must
 // come from real transaction records (payments/repayments), not a lump-sum
 // figure with no transaction trail behind it, or every financial report
 // built on summing real transactions would stop reconciling.
+//
+// Accepts either key style for the same field (national_id / id_number,
+// phone / phone_number), so a client can send whichever shape it prefers
+// without the backend having to care.
+//
+// Each row may optionally include a `sourceRow` (the physical row number
+// in the source file) - if present, that's what appears in error reports,
+// so "row 5" in the report corresponds to row 5 in the CEO's spreadsheet.
+// If absent, we fall back to positional numbering within the array.
 async function bulkImport(rows) {
   const results = { created: 0, skipped: [] };
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    const rowNum = i + 2; // +1 for header row, +1 for 1-indexing
+    // Prefer the source file's own row number when the caller provides one
+    // (the file's real layout often has a title row before the header, so
+    // positional numbering inside the parsed array is misleading).
+    const rowNum = Number.isFinite(row.sourceRow) ? row.sourceRow : i + 2;
 
-    const full_name = row.full_name?.trim();
-    const id_number = row.national_id?.trim();
-    const phone_number = row.phone?.trim();
+    const rawName = row.full_name || row.fullName || row.NAME;
+    const rawId = row.national_id || row.id_number || row.National_Id || row.ID;
+    const rawPhone = row.phone || row.phone_number || row.PHONE;
 
-    if (!full_name || !id_number || !phone_number) {
-      results.skipped.push({ row: rowNum, reason: 'Missing full_name, national_id, or phone' });
+    const full_name = toTitleCase(rawName);
+    const id_number = rawId != null ? String(rawId).trim() : null;
+    const employer = (row.employer || row.Employer || '').trim() || null;
+    const reference = (row.reference_number || row.PNO || row.P_NO || row['P/NO'] || '').trim() || null;
+    const joinDate = (row.join_date || row.joinDate || '').trim() || null;
+
+    if (!full_name || !id_number) {
+      results.skipped.push({ row: rowNum, reason: 'Missing full_name or national_id' });
       continue;
     }
     if (!isValidIdNumber(id_number)) {
       results.skipped.push({ row: rowNum, reason: 'national_id must be 6-10 digits' });
       continue;
     }
-    if (!isValidKenyanPhone(phone_number)) {
-      results.skipped.push({ row: rowNum, reason: 'phone must be a valid Kenyan number (e.g. 0712345678)' });
-      continue;
+
+    // Phone is optional now. If the cell is present but malformed (e.g.
+    // contains letters), that's an error - but a blank cell just means the
+    // member didn't have a phone on file, which is a legitimate state for
+    // pre-existing members from a legacy register.
+    let phone_number = null;
+    const phoneRaw = rawPhone != null ? String(rawPhone).trim() : '';
+    if (phoneRaw) {
+      const normalized = normalizePhone(phoneRaw);
+      if (!normalized) {
+        results.skipped.push({
+          row: rowNum,
+          reason: `phone "${phoneRaw}" is not a valid Kenyan number`,
+        });
+        continue;
+      }
+      phone_number = normalized;
     }
 
     try {
       const existing = await findByPhoneOrId(phone_number, id_number);
       if (existing) {
-        results.skipped.push({ row: rowNum, reason: `Already exists (${existing.full_name})` });
+        results.skipped.push({
+          row: rowNum,
+          reason: `Already exists as "${existing.full_name}" (matched on ${
+            existing.id_number === id_number ? 'national ID' : 'phone number'
+          })`,
+        });
         continue;
       }
 
       await create({
         full_name,
         id_number,
-        phone_number,
-        employer: row.employer?.trim() || null,
-        imported_reference: row.reference_number?.trim() || null,
-        created_at: row.join_date?.trim() || null, // e.g. '2022-03-15' - Postgres parses this fine
+        phone_number, // may be null
+        employer,
+        imported_reference: reference,
+        created_at: joinDate,
       });
       results.created++;
     } catch (err) {
-      results.skipped.push({ row: rowNum, reason: err.code === '23505' ? 'Duplicate ID or phone' : 'Save failed' });
+      results.skipped.push({
+        row: rowNum,
+        reason: err.code === '23505' ? 'Duplicate ID or phone' : (err.message || 'Save failed'),
+      });
     }
   }
 
@@ -202,9 +314,19 @@ async function bulkImport(rows) {
 
 // Find by either phone or ID number (used for duplicate registration checks)
 async function findByPhoneOrId(phone_number, id_number) {
+  // phone_number may be null (see bulkImport). In that case, only the ID is
+  // checked - passing null for a NULL comparison would silently match
+  // nothing anyway, but building the query this way is clearer.
+  if (phone_number) {
+    const result = await pool.query(
+      'SELECT * FROM members WHERE phone_number = $1 OR id_number = $2 LIMIT 1',
+      [phone_number, id_number]
+    );
+    return result.rows[0];
+  }
   const result = await pool.query(
-    'SELECT * FROM members WHERE phone_number = $1 OR id_number = $2',
-    [phone_number, id_number]
+    'SELECT * FROM members WHERE id_number = $1 LIMIT 1',
+    [id_number]
   );
   return result.rows[0];
 }
@@ -288,7 +410,7 @@ async function updateOutstandingBalance(memberId, amount) {
 // off-by-one already fixed there). Worth confirming nothing still calls
 // this - if so it's dead code carrying the OLD, still-buggy version of
 // that same logic (successful_repayments >= 1 reads the pre-increment
-// value). Left as-is for now since it's outside today's PIN-auth scope.
+// value). Left as-is for now since it's outside today's scope.
 async function incrementRepayments(memberId) {
   const result = await pool.query(
     `UPDATE members 
@@ -317,6 +439,8 @@ module.exports = {
   incrementRepayments,
   REFERENCE_SQL,
   bulkImport,
+  normalizePhone,
+  toTitleCase,
   // PIN authentication
   hasPinSet,
   setPin,
