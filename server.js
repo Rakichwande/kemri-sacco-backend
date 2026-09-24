@@ -29,17 +29,17 @@ const StaffInvite = require('./models/StaffInvite');
 // IMPORTANT: Define `app` BEFORE using it!
 // ============================================================
 const app = express();
-app.set('trust proxy', true); // Render's edge sits behind Cloudflare plus an
-                              // internal LB plus a local proxy - four hops total
-                              // (confirmed via /debug/ip: socket ::1, XFF =
-                              // "client, cloudflare, render-lb"). The original
-                              // `1` walked back only one hop and resolved req.ip
-                              // to 10.192.163.192 for every client, which made
-                              // every rate limiter a global (not per-client)
-                              // counter. `true` takes the leftmost XFF value as
-                              // the real client, and is safe here because the
-                              // container is not directly reachable - all
-                              // inbound traffic goes through Render's edge.
+
+// Render's edge sits behind Cloudflare plus an internal LB plus a local
+// proxy - four hops total (confirmed via /debug/ip: socket ::1, XFF =
+// "client, cloudflare, render-lb"). The original `1` walked back only one
+// hop and resolved req.ip to 10.192.163.192 for every client, which made
+// every rate limiter a global (not per-client) counter. `true` takes the
+// leftmost XFF value as the real client, and is safe here because the
+// container is not directly reachable - all inbound traffic goes through
+// Render's edge.
+app.set('trust proxy', true);
+
 const PORT = process.env.PORT || 3000;
 
 // Middleware
@@ -93,16 +93,6 @@ app.use('/api/withdrawals', require('./routes/withdrawals'));
 
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
-
-// Render's edge sits behind Cloudflare plus an internal LB plus a local
-// proxy - four hops total (confirmed via /debug/ip: socket ::1, XFF =
-// "client, cloudflare, render-lb"). The original `1` walked back only one
-// hop and resolved req.ip to 10.192.163.192 for every client, which made
-// every rate limiter a global (not per-client) counter. `true` takes the
-// leftmost XFF value as the real client, and is safe here because the
-// container is not directly reachable - all inbound traffic goes through
-// Render's edge.
-app.set('trust proxy', true);
 
 // Error handler (should be last)
 app.use(errorHandler);
