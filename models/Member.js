@@ -58,10 +58,14 @@ function normalizePhone(input) {
 
 async function init() {
   await pool.query(createTableQuery);
-  // Nullable - only ever set by bulk import, for members who already had a
-  // real SACCO membership number before this system existed. Members
-  // created normally (self-registration or admin New Member) leave this
-  // null and get the computed KEMRI-{year}-{id} reference instead.
+
+  // imported_reference holds the SACCO member number for EVERY member. It
+  // was originally named for the import use case only (values pasted in
+  // from a legacy register), but it now serves both that purpose AND the
+  // issuance of fresh numbers to new members via the shared sequence
+  // below. The name is kept for backward compatibility; the UNIQUE
+  // constraint on this column guarantees no two members can share a
+  // reference, however it was assigned.
   await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS imported_reference VARCHAR(30);`);
 
   // PIN auth. pin_hash is nullable - existing members (and anyone created
@@ -80,15 +84,65 @@ async function init() {
   // constraint. Their USSD/SMS will simply not work until they add a phone
   // via the admin portal.
   await pool.query(`ALTER TABLE members ALTER COLUMN phone_number DROP NOT NULL;`);
+
+  // Monotonic member reference counter. Every new member created via
+  // Member.create() draws its imported_reference from this sequence, so
+  // references continue the SACCO's existing numbering (starting from the
+  // highest imported P/NO) instead of starting a competing format.
+  //
+  // Sequence gaps are expected and fine (e.g. if an insert rolls back
+  // after calling nextval). References being contiguous is not required;
+  // references being unique and growing is.
+  await pool.query(`CREATE SEQUENCE IF NOT EXISTS sacco_member_reference_seq;`);
+
+  // Align the sequence with the highest existing reference on every boot.
+  // Idempotent: if the sequence is already ahead of every stored value,
+  // this is a no-op. If a later import ever inserts numbers above the
+  // sequence's current position (e.g. the CEO sends a batch of members
+  // with higher legacy numbers), this realigns on the next restart so
+  // fresh nextval() calls can't collide with values that already exist.
+  //
+  // Skipped entirely if no numeric references are stored yet (fresh DB) -
+  // in that case the sequence keeps its default starting position.
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF (SELECT COUNT(*) FROM members WHERE imported_reference ~ '^[0-9]+$') > 0 THEN
+        PERFORM setval(
+          'sacco_member_reference_seq',
+          GREATEST(
+            (SELECT last_value FROM sacco_member_reference_seq),
+            (SELECT MAX(imported_reference::int) FROM members WHERE imported_reference ~ '^[0-9]+$')
+          )
+        );
+      END IF;
+    END $$;
+  `);
 }
 
-// Create a new member with default loan fields
+// Create a new member with default loan fields.
+//
+// imported_reference is assigned here for EVERY new member:
+//   - If the caller passes one explicitly (used by bulkImport to preserve a
+//     legacy P/NO from the SACCO's register), that value wins.
+//   - Otherwise, nextval() pulls the next available number from the shared
+//     sequence, so freshly-registered members continue the same numbering
+//     the SACCO has been using for years, not a separate KEMRI-YYYY-XXXX
+//     scheme.
+//
+// nextval() is called inside the INSERT's VALUES clause, so the number is
+// allocated atomically with the row. Two simultaneous registrations cannot
+// receive the same reference.
 async function create(member) {
   const { full_name, id_number, phone_number, nationality, age, employer, scheme, imported_reference, created_at } = member;
   const result = await pool.query(
     `INSERT INTO members 
-      (full_name, id_number, phone_number, nationality, age, employer, scheme, credit_limit, total_outstanding_balance, successful_repayments, imported_reference, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, COALESCE($12, NOW())) 
+      (full_name, id_number, phone_number, nationality, age, employer, scheme,
+       credit_limit, total_outstanding_balance, successful_repayments,
+       imported_reference, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+             COALESCE($11, nextval('sacco_member_reference_seq')::text),
+             COALESCE($12, NOW())) 
      RETURNING *`,
     [
       full_name,
@@ -101,7 +155,7 @@ async function create(member) {
       10000, // default credit_limit for new members
       0,     // total_outstanding_balance
       0,     // successful_repayments
-      imported_reference || null,
+      imported_reference || null, // null -> sequence provides the next number
       created_at || null, // null -> defaults to NOW() via COALESCE above
     ]
   );
@@ -304,7 +358,7 @@ async function bulkImport(rows) {
     } catch (err) {
       results.skipped.push({
         row: rowNum,
-        reason: err.code === '23505' ? 'Duplicate ID or phone' : (err.message || 'Save failed'),
+        reason: err.code === '23505' ? 'Duplicate ID, phone, or reference number' : (err.message || 'Save failed'),
       });
     }
   }
@@ -338,10 +392,11 @@ async function findAll() {
 }
 
 // The reference-code expression, reused everywhere a member reference needs
-// to be shown. Prefers a real imported reference (from a bulk import of
-// pre-existing members) when one exists; otherwise falls back to the
-// computed KEMRI-{year}-{id} scheme, which needs no migration and can never
-// drift out of sync for members created normally.
+// to be shown. imported_reference is populated for every member - imported
+// members get their legacy P/NO, new members get the next sequence value.
+// The COALESCE fallback only ever fires for a hypothetical pre-migration
+// row that somehow has no reference; it's kept as a defence so a display
+// query can never return NULL or break the UI.
 const REFERENCE_SQL = `COALESCE(m.imported_reference, 'KEMRI-' || EXTRACT(YEAR FROM m.created_at)::text || '-' || LPAD(m.id::text, 4, '0'))`;
 
 async function findById(id) {
