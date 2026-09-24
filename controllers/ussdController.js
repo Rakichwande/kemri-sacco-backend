@@ -232,26 +232,15 @@ async function handleRegister(phoneNumber, steps) {
         scheme: 'holiday_savings',
       });
     } catch (err) {
-      // Members.created() can throw 23505 for two unique constraints:
-      //   - members_phone_number_key (someone registered the same phone
-      //     under a different name) - rare because we check findByPhone()
-      //     above, but a race is possible
-      //   - members_id_number_key (this is the common one) - someone with
-      //     a different phone is trying to register with an ID that
-      //     already belongs to another member
-      // The outer handleUssd catch would turn both into the generic
-      // "Something went wrong" - technically safe but useless to the
-      // member, who has no idea what to do next. Surface the actual
-      // reason so they know the ID is taken.
+      // members can collide on id_number (common) or phone_number (rare
+      // race). Surface the specific reason rather than letting the outer
+      // catch return a generic "Something went wrong".
       if (err.code === '23505' && err.constraint === 'members_id_number_key') {
         return 'END This ID number is already registered with KEMRI SACCO. If this is your ID, contact the office to link your new phone number.';
       }
       if (err.code === '23505' && err.constraint === 'members_phone_number_key') {
         return 'END This phone number is already registered with KEMRI SACCO.';
       }
-      // Anything else (DB down, sequence missing, etc) still goes through
-      // the outer catch as before - this handler only specialises the two
-      // known-and-actionable cases.
       throw err;
     }
 
@@ -266,11 +255,8 @@ async function handleRegister(phoneNumber, steps) {
       emailContent: emailService.staffTemplates.newMember(full_name),
     });
 
-    // Member.create() now draws the reference from the shared
+    // Member.create() draws the reference from the shared
     // sacco_member_reference_seq sequence, so the row already has it.
-    // Previously this line computed KEMRI-{year}-{id} which meant a
-    // just-registered member saw a different format than imported members -
-    // two competing schemes for the same concept.
     const memberRef = member.imported_reference;
 
     return `END Thank you, ${full_name}. Your registration is received. Ref: ${memberRef}. Visit our portal to complete your application.\nYou'll set a SACCO PIN the first time you check your balance or apply for a loan.`;
@@ -348,7 +334,22 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
   if (!pinCheck.authenticated) return pinCheck.response;
   const remaining = pinCheck.remainingSteps;
 
-  if (remaining.length === 0) return 'CON Enter loan amount (KES)';
+  // Check eligibility BEFORE asking for an amount.
+  //
+  // Previously the flow always asked for an amount first and only rejected
+  // the member after they had typed one in - which cost them an extra USSD
+  // screen (real money on production) and read as if the loan might have
+  // gone through, since the rejection message quoted an amount at all. If
+  // the member has an active loan, a pending/approved application, or is
+  // otherwise ineligible, we tell them immediately and end the session.
+  const eligibility = await LoanService.canApply(member.id);
+  if (!eligibility.allowed) {
+    return `END ${eligibility.reason}`;
+  }
+
+  if (remaining.length === 0) {
+    return `CON Enter loan amount (KES)\nLimit: KES ${eligibility.creditLimit.toLocaleString()}`;
+  }
 
   if (remaining.length === 1) {
     const amount = Number(remaining[0]);
@@ -377,7 +378,7 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
       `Over ${loan.tenure_months} months, ~KES ${Number(loan.monthly_installment).toLocaleString()}/month\n` +
       `Ref: ${ref}. Awaiting SACCO review.`;
 
-    // Send SMS using the new loan application template
+    // Send SMS using the loan application template
     try {
       await smsService.sendSMS(
         phoneNumber,
@@ -412,10 +413,7 @@ async function handleRepayLoan(phoneNumber, steps, sessionId) {
 
   // Only a DISBURSED loan is repayable — see getRepayableLoan()'s comment
   // in models/Loan.js. A pending or approved loan exists but no money has
-  // moved to the member yet, so there is nothing to repay. This is the
-  // actual bug fix: previously getActiveLoan() included 'pending', so a
-  // member who had just applied for a loan saw the repay menu and could
-  // send real money before staff had even approved the application.
+  // moved to the member yet, so there is nothing to repay.
   const repayableLoan = await Loan.getRepayableLoan(member.id);
 
   if (!repayableLoan) {

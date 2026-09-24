@@ -29,6 +29,17 @@ class LoanService {
   // it first." message was used for all three, which was nonsensical for
   // the first two — it told members to repay a loan that hadn't been
   // funded, and there was no action they could take to unblock themselves.
+  //
+  // IMPORTANT: for pending/approved loans the message references the
+  // PRINCIPAL (what the member applied for), not outstanding_balance.
+  // When a loan is created, outstanding_balance is set to total_repayment
+  // (principal + interest) because that is the amount that will eventually
+  // need to be repaid — but quoting it to the member at the pending stage
+  // reads as if a larger loan than they asked for was created without
+  // their consent. Principal is the number they will recognise from their
+  // own application. For a DISBURSED loan, outstanding_balance IS the
+  // correct figure (interest is now legitimately owed), and that case is
+  // unchanged below.
   static async canApply(memberId) {
     const member = await Member.findById(memberId);
     if (!member) {
@@ -37,16 +48,18 @@ class LoanService {
 
     const activeLoan = await Loan.getActiveLoan(memberId);
     if (activeLoan) {
-      const amountText = Number(activeLoan.outstanding_balance).toLocaleString();
+      const principalText = Number(activeLoan.principal).toLocaleString();
       let reason;
 
       if (activeLoan.status === 'pending') {
-        reason = `Your loan application of KES ${amountText} is awaiting review. You'll receive an SMS once it is approved.`;
+        reason = `Your loan application for KES ${principalText} is awaiting review. You'll receive an SMS once it is approved.`;
       } else if (activeLoan.status === 'approved') {
-        reason = `Your loan of KES ${amountText} has been approved and is awaiting disbursement. You'll receive an SMS once funds are sent.`;
+        reason = `Your loan of KES ${principalText} has been approved and is awaiting disbursement. You'll receive an SMS once funds are sent.`;
       } else {
-        // disbursed — the one case where "clear it first" is actually correct
-        reason = `You have an outstanding loan of KES ${amountText}. Clear it before applying for another.`;
+        // disbursed — here outstanding_balance is the right concept, since
+        // interest is now part of what they legitimately owe
+        const outstandingText = Number(activeLoan.outstanding_balance).toLocaleString();
+        reason = `You have an outstanding loan of KES ${outstandingText}. Clear it before applying for another.`;
       }
 
       return { allowed: false, reason, activeLoan };
