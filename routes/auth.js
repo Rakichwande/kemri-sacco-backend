@@ -26,7 +26,18 @@ const JWT_EXPIRY = '8h';
 
 function issueSessionToken(admin) {
   const token = jwt.sign(
-    { id: admin.id, username: admin.username, role: admin.role },
+    {
+      id: admin.id,
+      username: admin.username,
+      role: admin.role,
+      // Encoded in the JWT so authenticate() can enforce it without a DB
+      // lookup on every request. After a successful password change the
+      // client is expected to log in again, which issues a fresh token
+      // with this flag cleared. Until then, any token minted before the
+      // change still carries must_change_password: true and continues to
+      // be restricted to the /change-password and /me routes.
+      must_change_password: !!admin.must_change_password,
+    },
     JWT_SECRET,
     { expiresIn: JWT_EXPIRY }
   );
@@ -53,18 +64,18 @@ function generateOtpCode() {
 // canAssignRole(), which restricts who is allowed to grant which of these
 // to someone else.
 const VALID_ROLES = [
-  ROLES.SUPER_ADMIN,      // 'admin'
-  ROLES.SACCO_ADMIN,      // 'sacco_admin'
-  ROLES.FINANCE_OFFICER,  // 'finance_officer'
-  ROLES.LOANS_OFFICER,    // 'loans_officer'
-  ROLES.MEMBER_SUPPORT,   // 'member_support'
-  ROLES.AUDITOR,          // 'auditor'
-  ROLES.STAFF_LEGACY,     // 'staff'
+  ROLES.SUPER_ADMIN,
+  ROLES.SACCO_ADMIN,
+  ROLES.FINANCE_OFFICER,
+  ROLES.LOANS_OFFICER,
+  ROLES.MEMBER_SUPPORT,
+  ROLES.AUDITOR,
+  ROLES.STAFF_LEGACY,
 ];
 
 router.post('/login', loginLimiter, async (req, res) => {
   try {
-    const { username, password } = req.body; // `username` field accepts username OR email
+    const { username, password } = req.body;
     if (!username || !password) {
       return res.status(400).json({ error: 'Username and password required' });
     }
@@ -77,10 +88,6 @@ router.post('/login', loginLimiter, async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    // OTP only kicks in when the account has opted into email notifications,
-    // has a real email on file, AND email sending is actually configured.
-    // Any one of those missing falls back to normal password-only login -
-    // this can never lock an account out over something outside its control.
     const otpEligible = admin.notify_email && admin.email && emailService.isConfigured();
 
     if (!otpEligible) {
@@ -94,8 +101,6 @@ router.post('/login', loginLimiter, async (req, res) => {
     const { subject, html, text } = emailService.otpEmailContent(code);
     await emailService.sendEmail({ to: admin.email, subject, html, text });
 
-    // Short-lived token identifying WHICH login attempt this OTP belongs to -
-    // not a session token, can't be used to access anything until verified.
     const otpToken = jwt.sign({ id: admin.id, purpose: 'otp' }, JWT_SECRET, { expiresIn: '15m' });
 
     res.json({
@@ -145,6 +150,8 @@ router.post('/verify-otp', otpLimiter, async (req, res) => {
     }
 
     await Admin.clearOtp(admin.id);
+    // Admin.findById omits password_hash and a few other columns, so fetch
+    // the row with must_change_password. findById includes it, so we're fine.
     res.json(issueSessionToken(admin));
   } catch (err) {
     console.error('OTP verification error:', err);
@@ -180,9 +187,6 @@ router.post('/resend-otp', emailActionLimiter, emailPerAddressLimiter, async (re
   }
 });
 
-// Deliberately responds the same way whether or not the account/email
-// exists - standard practice, avoids letting someone probe which
-// usernames or emails are registered.
 router.post('/forgot-password', emailActionLimiter, emailPerAddressLimiter, async (req, res) => {
   const genericResponse = { message: 'If an account with that username or email exists and has an email on file, a reset link has been sent.' };
   try {
@@ -193,6 +197,7 @@ router.post('/forgot-password', emailActionLimiter, emailPerAddressLimiter, asyn
     if (admin && admin.email && emailService.isConfigured()) {
       const token = crypto.randomBytes(24).toString('base64url');
       const expiresAt = new Date(Date.now() + RESET_EXPIRY_MINUTES * 60 * 1000);
+      // Stores the hash. The raw `token` is only used in the link below.
       await Admin.setResetToken(admin.id, token, expiresAt);
 
       const resetLink = `${FRONTEND_URL}/reset-password/${token}`;
@@ -205,17 +210,17 @@ router.post('/forgot-password', emailActionLimiter, emailPerAddressLimiter, asyn
     res.json(genericResponse);
   } catch (err) {
     console.error('Forgot password error:', err);
-    res.json(genericResponse); // still generic, even on an internal error
+    res.json(genericResponse);
   }
 });
 
+// Precheck the link before showing the reset form. Kept as its own route
+// because it's a read-only "is this still valid?" check the frontend needs
+// when the user lands on the page.
 router.get('/reset-password/:token', async (req, res) => {
   try {
     const admin = await Admin.findByResetToken(req.params.token);
     if (!admin) return res.status(404).json({ error: 'This reset link is invalid or has already been used.' });
-    if (new Date(admin.reset_token_expires_at) < new Date()) {
-      return res.status(400).json({ error: 'This reset link has expired.' });
-    }
     res.json({ valid: true, username: admin.username });
   } catch (err) {
     console.error('Reset token check error:', err);
@@ -223,18 +228,22 @@ router.get('/reset-password/:token', async (req, res) => {
   }
 });
 
+// Completion - atomic. resetPasswordWithToken hashes the incoming token,
+// matches it against the stored hash, verifies it hasn't expired, and
+// updates the password in a single UPDATE. Two concurrent requests with the
+// same token cannot both succeed.
 router.post('/reset-password/:token', resetPasswordLimiter, async (req, res) => {
   try {
-    const admin = await Admin.findByResetToken(req.params.token);
-    if (!admin) return res.status(404).json({ error: 'This reset link is invalid or has already been used.' });
-    if (new Date(admin.reset_token_expires_at) < new Date()) {
-      return res.status(400).json({ error: 'This reset link has expired.' });
-    }
     const { newPassword } = req.body;
     if (!newPassword || newPassword.length < 8) {
       return res.status(400).json({ error: 'Password must be at least 8 characters' });
     }
-    await Admin.resetPasswordWithToken(admin.id, newPassword);
+
+    const updated = await Admin.resetPasswordWithToken(req.params.token, newPassword);
+    if (!updated) {
+      return res.status(404).json({ error: 'This reset link is invalid or has already been used.' });
+    }
+
     res.json({ message: 'Password updated. You can now log in.' });
   } catch (err) {
     console.error('Reset password error:', err);
@@ -253,8 +262,6 @@ router.get('/me', authenticate, async (req, res) => {
   }
 });
 
-// Self-service - any logged-in staff/admin can update their own notification
-// preferences and contact details, without needing another admin to do it.
 router.patch('/me/notifications', authenticate, async (req, res) => {
   try {
     const { notify_sms, notify_email, phone, email, full_name } = req.body;
@@ -266,10 +273,10 @@ router.patch('/me/notifications', authenticate, async (req, res) => {
   }
 });
 
-// Any logged-in user can change their OWN password. Requires proving the
-// current password first - never a silent overwrite. Rate-limited so a
-// hijacked session can't brute-force the current password through this
-// endpoint.
+// Note: this route is exempt from the must_change_password block in
+// middleware/auth.js. After a successful change, the client is expected to
+// log in again - the current JWT still carries must_change_password: true
+// (it was encoded at issue time) and would continue to be restricted.
 router.post('/change-password', authenticate, passwordChangeLimiter, async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
@@ -295,19 +302,13 @@ router.post('/change-password', authenticate, passwordChangeLimiter, async (req,
     }
 
     await Admin.updatePassword(admin.id, newPassword);
-    res.json({ message: 'Password updated successfully' });
+    res.json({ message: 'Password updated successfully. Please log in again.' });
   } catch (err) {
     console.error('Password change error:', err);
     res.status(500).json({ error: 'Failed to update password' });
   }
 });
 
-// Was requireAdmin (role === 'admin' only) - now requirePermission so a
-// SACCO Administrator can also create staff accounts, not just Super
-// Administrators. canAssignRole() below is what actually stops a SACCO
-// Administrator from creating another Super Administrator or SACCO
-// Administrator - staff:manage alone only gets you into this route, it
-// doesn't mean you can grant any role to anyone.
 router.post('/register', authenticate, requirePermission('staff:manage'), async (req, res) => {
   try {
     const { username, password, full_name, role, phone } = req.body;
@@ -348,9 +349,6 @@ router.post('/register', authenticate, requirePermission('staff:manage'), async 
   }
 });
 
-// --- Invite flow: admin sends an invite (email only + role), recipient
-// picks their own username/password when they accept it. ---
-
 router.post('/invites', authenticate, requirePermission('staff:manage'), async (req, res) => {
   try {
     const { email, role } = req.body;
@@ -365,7 +363,15 @@ router.post('/invites', authenticate, requirePermission('staff:manage'), async (
     }
 
     const invite = await StaffInvite.create({ email, role, invitedBy: req.user.id });
-    const inviteLink = `${FRONTEND_URL}/accept-invite/${invite.token}`;
+    if (!invite) {
+      return res.status(409).json({
+        error: 'This email already has a pending invite. Revoke it first, or ask the recipient to check their inbox.',
+      });
+    }
+
+    // IMPORTANT: use invite.rawToken, not invite.token. token is the SHA-256
+    // hash stored in the DB; rawToken is the only place the plaintext exists.
+    const inviteLink = `${FRONTEND_URL}/accept-invite/${invite.rawToken}`;
 
     const { subject, html, text } = emailService.inviteEmailContent({
       inviteLink, role, inviterName: req.user.username,
@@ -395,8 +401,6 @@ router.post('/invites', authenticate, requirePermission('staff:manage'), async (
   }
 });
 
-// Public - lets the accept-invite page show who invited them / what role,
-// before asking them to set a password.
 router.get('/invites/:token', async (req, res) => {
   try {
     const invite = await StaffInvite.findByToken(req.params.token);
@@ -410,7 +414,11 @@ router.get('/invites/:token', async (req, res) => {
   }
 });
 
-// Public - the recipient completes their own account setup
+// Accept flow is atomic: claimForAcceptance reserves the invite BEFORE any
+// account is created. If account creation then fails, revertToPending
+// releases the claim so the invite can be retried. Two concurrent requests
+// with the same token cannot both create an account - the second loses the
+// claim and sees 400.
 router.post('/invites/:token/accept', async (req, res) => {
   try {
     const invite = await StaffInvite.findByToken(req.params.token);
@@ -431,31 +439,68 @@ router.post('/invites/:token/accept', async (req, res) => {
       return res.status(409).json({ error: 'This username is already taken' });
     }
 
-    const newAccount = await Admin.create({
-      username, password, full_name, role: invite.role, phone,
-      email: invite.email, // captured automatically from the invite, not re-typed
-      notify_sms, notify_email,
-    });
-    // The account they just set a real password for doesn't need the
-    // must-change-password flag that bootstrap/admin-created accounts get.
-    await Admin.updatePassword(newAccount.id, password);
-    await StaffInvite.markAccepted(invite.id);
+    // Reserve the invite first. This is the ONLY reliable guard against two
+    // concurrent accept requests - the pre-checks above (read + status
+    // compare) are TOCTOU-racy on their own.
+    const claimed = await StaffInvite.claimForAcceptance(invite.id);
+    if (!claimed) {
+      return res.status(400).json({ error: 'This invite has already been used' });
+    }
 
-    await AuditLog.log({
-      actorId: newAccount.id,
-      actorUsername: newAccount.username,
-      action: 'Accepted staff invite',
-      category: 'staff_management',
-      targetType: 'admin',
-      targetId: newAccount.id,
-      targetLabel: full_name,
-      details: `Accepted invite as "${username}" (${invite.role}), invited to ${invite.email}.`,
-    });
+    try {
+      const newAccount = await Admin.create({
+        username, password, full_name, role: invite.role, phone,
+        email: invite.email,
+        notify_sms, notify_email,
+      });
+      await Admin.updatePassword(newAccount.id, password);
 
-    res.status(201).json({ message: 'Account created. You can now log in.' });
+      await AuditLog.log({
+        actorId: newAccount.id,
+        actorUsername: newAccount.username,
+        action: 'Accepted staff invite',
+        category: 'staff_management',
+        targetType: 'admin',
+        targetId: newAccount.id,
+        targetLabel: full_name,
+        details: `Accepted invite as "${username}" (${invite.role}), invited to ${invite.email}.`,
+      });
+
+      res.status(201).json({ message: 'Account created. You can now log in.' });
+    } catch (err) {
+      // Release the claim so the invite can be retried (e.g. transient DB
+      // error, or the username-taken race above got past the pre-check).
+      await StaffInvite.revertToPending(invite.id);
+      throw err;
+    }
   } catch (err) {
     console.error('Invite accept error:', err);
     res.status(500).json({ error: 'Failed to accept invite' });
+  }
+});
+
+// Admin cancellation of a pending invite. Uses the same
+// requirePermission('staff:manage') gate as invite creation.
+router.delete('/invites/:id', authenticate, requirePermission('staff:manage'), async (req, res) => {
+  try {
+    const invite = await StaffInvite.revoke(req.params.id);
+    if (!invite) {
+      return res.status(404).json({ error: 'Invite not found, or was already accepted/revoked.' });
+    }
+    await AuditLog.log({
+      actorId: req.user.id,
+      actorUsername: req.user.username,
+      action: 'Revoked staff invite',
+      category: 'staff_management',
+      targetType: 'invite',
+      targetId: invite.id,
+      targetLabel: invite.email,
+      details: `Revoked pending invite for ${invite.email}.`,
+    });
+    res.json({ message: 'Invite revoked.' });
+  } catch (err) {
+    console.error('Invite revoke error:', err);
+    res.status(500).json({ error: 'Failed to revoke invite' });
   }
 });
 
@@ -469,11 +514,6 @@ router.get('/users', authenticate, requirePermission('staff:manage'), async (req
   }
 });
 
-// Change another account's role. Guards against removing the last admin -
-// otherwise a mistaken demotion could lock every admin out of the console
-// with no way to promote anyone back. Also now checks canAssignRole(), so
-// a SACCO Administrator can move someone between the operational roles but
-// cannot promote anyone to Super Administrator or SACCO Administrator.
 router.patch('/users/:id/role', authenticate, requirePermission('staff:manage'), async (req, res) => {
   try {
     const { role } = req.body;
@@ -487,12 +527,6 @@ router.patch('/users/:id/role', authenticate, requirePermission('staff:manage'),
     const target = await Admin.findById(req.params.id);
     if (!target) return res.status(404).json({ error: 'Account not found' });
 
-    // canAssignRole() above only checked the NEW role - without this check
-    // too, a SACCO Administrator could still demote or otherwise act on an
-    // EXISTING Super Administrator or SACCO Administrator account, even
-    // though they could never have created one. Both the target's current
-    // role and the role being assigned have to be within what this actor
-    // is allowed to touch.
     if (!canAssignRole(req.user.role, target.role)) {
       return res.status(403).json({ error: `Your role is not permitted to modify an account with role "${target.role}".` });
     }
@@ -522,8 +556,6 @@ router.patch('/users/:id/role', authenticate, requirePermission('staff:manage'),
   }
 });
 
-// Remove a staff/admin account. Guards against removing yourself and against
-// removing the last admin, for the same reason as above.
 router.delete('/users/:id', authenticate, requirePermission('staff:manage'), async (req, res) => {
   try {
     const targetId = Number(req.params.id);
@@ -534,10 +566,6 @@ router.delete('/users/:id', authenticate, requirePermission('staff:manage'), asy
     const target = await Admin.findById(targetId);
     if (!target) return res.status(404).json({ error: 'Account not found' });
 
-    // Same reasoning as the role-change route above: prevents a lower-tier
-    // account (e.g. SACCO Administrator) from removing a Super
-    // Administrator or another SACCO Administrator, even though staff:manage
-    // alone would otherwise let them reach this route.
     if (!canAssignRole(req.user.role, target.role)) {
       return res.status(403).json({ error: `Your role is not permitted to remove an account with role "${target.role}".` });
     }

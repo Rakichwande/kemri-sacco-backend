@@ -34,6 +34,14 @@ ALTER TABLE admins ADD COLUMN IF NOT EXISTS reset_token VARCHAR(64);
 ALTER TABLE admins ADD COLUMN IF NOT EXISTS reset_token_expires_at TIMESTAMP;
 `;
 
+// SHA-256 hash of a reset token before it touches the database. Same
+// reasoning as passwords: if the DB is ever leaked, a stored hash can't be
+// turned back into a working reset link. The plaintext token is only ever
+// known to whoever receives the reset email - it never lives in the DB.
+function hashToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
 function generateRandomPassword() {
   // 24 random bytes -> 32-char base64url string. Not memorable by design:
   // it only ever needs to be typed once, immediately followed by a change.
@@ -117,26 +125,49 @@ async function incrementOtpAttempts(id) {
   return result.rows[0]?.otp_attempts;
 }
 
+// Stores a hash of the reset token, never the token itself. The caller
+// receives the raw token separately and puts it in the reset email - after
+// this function returns, the plaintext token exists only in that email.
 async function setResetToken(id, token, expiresAt) {
   await db.query(
     'UPDATE admins SET reset_token = $1, reset_token_expires_at = $2 WHERE id = $3',
-    [token, expiresAt, id]
+    [hashToken(token), expiresAt, id]
   );
 }
 
+// Looks up by hashing the input first - the caller passes the raw token
+// from the reset link, and this compares its hash against the stored hash.
 async function findByResetToken(token) {
-  const result = await db.query('SELECT * FROM admins WHERE reset_token = $1', [token]);
+  const result = await db.query(
+    'SELECT * FROM admins WHERE reset_token = $1 AND reset_token_expires_at > NOW()',
+    [hashToken(token)]
+  );
   return result.rows[0];
 }
 
-async function resetPasswordWithToken(id, newPassword) {
+// Atomically consumes a reset token AND updates the password in one
+// statement. The WHERE reset_token = $2 AND reset_token_expires_at > NOW()
+// guard means two concurrent requests with the same token cannot both
+// succeed - the second gets 0 rows back and knows the token was already
+// used (or expired). This replaces the previous two-step pattern
+// (findByResetToken in the route, then resetPasswordWithToken by id),
+// which had a race window between the check and the update.
+//
+// Returns the updated admin's { id, username }, or null if the token was
+// invalid, expired, or already consumed.
+async function resetPasswordWithToken(token, newPassword) {
   const hash = await bcrypt.hash(newPassword, 10);
-  await db.query(
-    `UPDATE admins SET password_hash = $1, must_change_password = false,
-       reset_token = NULL, reset_token_expires_at = NULL
-     WHERE id = $2`,
-    [hash, id]
+  const result = await db.query(
+    `UPDATE admins
+     SET password_hash = $1,
+         must_change_password = false,
+         reset_token = NULL,
+         reset_token_expires_at = NULL
+     WHERE reset_token = $2 AND reset_token_expires_at > NOW()
+     RETURNING id, username`,
+    [hash, hashToken(token)]
   );
+  return result.rows[0] || null;
 }
 
 async function findById(id) {
