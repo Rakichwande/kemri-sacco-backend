@@ -241,7 +241,13 @@ async function handleRegister(phoneNumber, steps) {
       emailContent: emailService.staffTemplates.newMember(full_name),
     });
 
-    const memberRef = `KEMRI-${new Date(member.created_at).getFullYear()}-${String(member.id).padStart(4, '0')}`;
+    // Member.create() now draws the reference from the shared
+    // sacco_member_reference_seq sequence, so the row already has it.
+    // Previously this line computed KEMRI-{year}-{id} which meant a
+    // just-registered member saw a different format than imported members -
+    // two competing schemes for the same concept.
+    const memberRef = member.imported_reference;
+
     return `END Thank you, ${full_name}. Your registration is received. Ref: ${memberRef}. Visit our portal to complete your application.\nYou'll set a SACCO PIN the first time you check your balance or apply for a loan.`;
   }
 
@@ -332,7 +338,13 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
     }
 
     const { loan } = result;
-    const ref = `KEMRI-${new Date(loan.applied_at).getFullYear()}-${String(loan.member_id).padStart(4, '0')}`;
+    // Loan reference uses the LOAN's own id, not the member's - the old
+    // format (KEMRI-{year}-{member_id}) meant a member taking out a
+    // second loan saw the same reference string as their first, and staff
+    // couldn't tell the two apart. LN-##### is also visually distinct from
+    // member references so there's no ambiguity when reading them side by
+    // side in the admin console.
+    const ref = `LN-${String(loan.id).padStart(5, '0')}`;
 
     const summary =
       `Loan application received: KES ${Number(loan.principal).toLocaleString()}\n` +

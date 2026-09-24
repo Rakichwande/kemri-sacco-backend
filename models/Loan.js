@@ -49,6 +49,14 @@ ON loans (member_id)
 WHERE status IN ('pending', 'approved', 'disbursed');
 `;
 
+// Loan reference for display. Uses the loan's OWN id (unique per loan),
+// not the member's id - the old format used member_id, which meant a
+// member taking out a second loan would receive the same reference string
+// as their first, and staff couldn't tell the two apart. Format is
+// LN-##### — distinct from member references, so a staff member reading
+// "LN-00007" vs "21438" knows immediately which record they're looking at.
+const REFERENCE_SQL = `'LN-' || LPAD(l.id::text, 5, '0')`;
+
 async function init() {
   await db.query(createLoansTableQuery);
   await db.query(addRejectedAtColumnQuery);
@@ -87,9 +95,10 @@ async function create({ member_id, principal, interest_rate, tenure_months }) {
 
 async function getActiveLoan(member_id) {
   const result = await db.query(
-    `SELECT * FROM loans 
-     WHERE member_id = $1 AND status IN ('pending', 'approved', 'disbursed') 
-     ORDER BY applied_at DESC LIMIT 1`,
+    `SELECT l.*, ${REFERENCE_SQL} AS reference
+     FROM loans l
+     WHERE l.member_id = $1 AND l.status IN ('pending', 'approved', 'disbursed') 
+     ORDER BY l.applied_at DESC LIMIT 1`,
     [member_id]
   );
   return result.rows[0];
@@ -105,9 +114,10 @@ async function countRepaidByMember(member_id) {
 
 async function getHistory(member_id, limit = 10) {
   const result = await db.query(
-    `SELECT * FROM loans 
-     WHERE member_id = $1 
-     ORDER BY applied_at DESC 
+    `SELECT l.*, ${REFERENCE_SQL} AS reference
+     FROM loans l
+     WHERE l.member_id = $1 
+     ORDER BY l.applied_at DESC 
      LIMIT $2`,
     [member_id, limit]
   );
@@ -115,7 +125,12 @@ async function getHistory(member_id, limit = 10) {
 }
 
 async function findById(id) {
-  const result = await db.query('SELECT * FROM loans WHERE id = $1', [id]);
+  const result = await db.query(
+    `SELECT l.*, ${REFERENCE_SQL} AS reference
+     FROM loans l
+     WHERE l.id = $1`,
+    [id]
+  );
   return result.rows[0];
 }
 
@@ -166,7 +181,11 @@ async function approve(loan_id) {
     );
 
     await client.query('COMMIT');
-    return updateRes.rows[0];
+
+    // Add the display reference so the caller (and API consumer) can use it
+    // without having to construct LN-##### themselves.
+    const updated = updateRes.rows[0];
+    return { ...updated, reference: `LN-${String(updated.id).padStart(5, '0')}` };
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -278,7 +297,11 @@ async function applyRepayment(loan_id, amount, externalClient = null) {
     }
 
     if (ownsTransaction) await client.query('COMMIT');
-    return updateRes.rows[0];
+
+    // Include the display reference in the returned row, same convention as
+    // findById()/getActiveLoan().
+    const updated = updateRes.rows[0];
+    return { ...updated, reference: `LN-${String(updated.id).padStart(5, '0')}` };
   } catch (err) {
     if (ownsTransaction) await client.query('ROLLBACK');
     throw err;
@@ -308,7 +331,12 @@ async function getStatementLines(member_id) {
 
 async function findAllForAdmin() {
   const result = await db.query(
-    `SELECT l.*, m.full_name as member_name, m.phone_number, ${Member.REFERENCE_SQL} AS member_reference
+    `SELECT 
+       l.*, 
+       ${REFERENCE_SQL} AS reference,
+       m.full_name as member_name, 
+       m.phone_number, 
+       ${Member.REFERENCE_SQL} AS member_reference
      FROM loans l
      LEFT JOIN members m ON l.member_id = m.id
      WHERE l.status IN ('pending', 'approved', 'disbursed', 'repaid', 'rejected')
@@ -320,7 +348,12 @@ async function findAllForAdmin() {
 
 async function findPending() {
   const result = await db.query(
-    `SELECT l.*, m.full_name as member_name, m.phone_number, ${Member.REFERENCE_SQL} AS member_reference
+    `SELECT 
+       l.*, 
+       ${REFERENCE_SQL} AS reference,
+       m.full_name as member_name, 
+       m.phone_number, 
+       ${Member.REFERENCE_SQL} AS member_reference
      FROM loans l
      LEFT JOIN members m ON l.member_id = m.id
      WHERE l.status = 'pending'
@@ -343,4 +376,5 @@ module.exports = {
   findAllForAdmin,
   findPending,
   getStatementLines,
+  REFERENCE_SQL,
 };
