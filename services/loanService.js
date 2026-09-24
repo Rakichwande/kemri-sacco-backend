@@ -157,9 +157,25 @@ class LoanService {
     return { success: true, loan, message: 'Loan rejected.' };
   }
 
+  // Only a DISBURSED loan is repayable. Using getActiveLoan here would let
+  // a member whose loan is still pending or approved trigger a real
+  // repayment via the /api/loans/repay endpoint before any money has moved
+  // to them. getRepayableLoan() filters to status='disbursed' only.
+  //
+  // When there's no disbursed loan but there IS one in flight, surface a
+  // specific, actionable message instead of the previous blunt "no active
+  // loan" - the member knows their application is being processed and
+  // won't assume they need to reapply.
   static async repayLoan(memberId) {
-    const activeLoan = await Loan.getActiveLoan(memberId);
+    const activeLoan = await Loan.getRepayableLoan(memberId);
     if (!activeLoan) {
+      const inFlight = await Loan.getActiveLoan(memberId);
+      if (inFlight && inFlight.status === 'pending') {
+        return { success: false, message: 'Your loan application is still awaiting approval.' };
+      }
+      if (inFlight && inFlight.status === 'approved') {
+        return { success: false, message: 'Your loan has been approved and is awaiting disbursement.' };
+      }
       return { success: false, message: 'No active loan found.' };
     }
 

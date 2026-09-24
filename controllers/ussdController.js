@@ -385,13 +385,30 @@ async function handleRepayLoan(phoneNumber, steps, sessionId) {
   if (!pinCheck.authenticated) return pinCheck.response;
   const remaining = pinCheck.remainingSteps;
 
-  const activeLoan = await Loan.getActiveLoan(member.id);
-  if (!activeLoan) {
+  // Only a DISBURSED loan is repayable — see getRepayableLoan()'s comment
+  // in models/Loan.js. A pending or approved loan exists but no money has
+  // moved to the member yet, so there is nothing to repay. This is the
+  // actual bug fix: previously getActiveLoan() included 'pending', so a
+  // member who had just applied for a loan saw the repay menu and could
+  // send real money before staff had even approved the application.
+  const repayableLoan = await Loan.getRepayableLoan(member.id);
+
+  if (!repayableLoan) {
+    // Distinguish the two non-repayable states so the member gets a clear,
+    // actionable message rather than the previous misleading "no
+    // outstanding loan" when they actually have an application in flight.
+    const inFlightLoan = await Loan.getActiveLoan(member.id);
+    if (inFlightLoan && inFlightLoan.status === 'pending') {
+      return 'END Your loan application is still awaiting approval. You will receive an SMS once it is reviewed.';
+    }
+    if (inFlightLoan && inFlightLoan.status === 'approved') {
+      return 'END Your loan has been approved and is awaiting disbursement. You will receive an SMS once funds are sent.';
+    }
     return 'END You have no outstanding loan to repay.';
   }
 
   if (remaining.length === 0) {
-    return `CON Outstanding balance: KES ${Number(activeLoan.outstanding_balance).toLocaleString()}\nEnter amount to repay`;
+    return `CON Outstanding balance: KES ${Number(repayableLoan.outstanding_balance).toLocaleString()}\nEnter amount to repay`;
   }
 
   if (remaining.length === 1) {
@@ -405,7 +422,7 @@ async function handleRepayLoan(phoneNumber, steps, sessionId) {
         memberId: member.id,
         phoneNumber,
         amount,
-        loanId: activeLoan.id,
+        loanId: repayableLoan.id,
       });
       return 'END An M-Pesa prompt has been sent to your phone. Enter your PIN to complete the repayment.';
     } catch (err) {

@@ -124,6 +124,24 @@ async function getHistory(member_id, limit = 10) {
   return result.rows;
 }
 
+// Only returns a loan the member can actually repay today — i.e. one that
+// has been DISBURSED (money physically sent to them). A pending or approved
+// loan exists in the system but hasn't moved any money to the member yet,
+// so there's nothing to repay. Kept separate from getActiveLoan() because
+// "active" (blocks new applications) and "repayable" (money is out) are
+// different concepts — a member who has just applied must not be able to
+// send a repayment for funds they haven't received.
+async function getRepayableLoan(member_id) {
+  const result = await db.query(
+    `SELECT l.*, ${REFERENCE_SQL} AS reference
+     FROM loans l
+     WHERE l.member_id = $1 AND l.status = 'disbursed'
+     ORDER BY l.disbursed_at DESC LIMIT 1`,
+    [member_id]
+  );
+  return result.rows[0];
+}
+
 async function findById(id) {
   const result = await db.query(
     `SELECT l.*, ${REFERENCE_SQL} AS reference
@@ -377,4 +395,5 @@ module.exports = {
   findPending,
   getStatementLines,
   REFERENCE_SQL,
+  getRepayableLoan,
 };
