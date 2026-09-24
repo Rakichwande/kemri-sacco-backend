@@ -155,17 +155,22 @@ async function findById(id) {
 // Only a pending loan can be approved. The WHERE status = 'pending' guard
 // (combined with FOR UPDATE) makes this safe against a double-click or a
 // retried request: a second attempt on an already-approved loan finds zero
-// matching rows, rolls back, and returns null instead of re-adding
-// total_repayment onto the member's outstanding balance a second time.
-// Returns null if the loan doesn't exist or isn't pending, so the caller
-// can distinguish that from a successful approval (same convention as
-// reject() below).
+// matching rows, rolls back, and returns null.
+//
+// IMPORTANT: approval does NOT touch the member's outstanding balance.
+// That reflects money the member actually owes, and at approval time no
+// money has moved yet - approving is a staff decision, not a cash event.
+// The balance increment happens in markDisbursed() below, at the moment
+// funds are physically sent. Before this change the balance was bumped
+// here, which produced the misleading "you have an active loan of KES X,
+// clear it first" message for members whose loan was still PENDING or
+// APPROVED — impossible to act on because there was nothing to repay.
 async function approve(loan_id) {
   const client = await db.pool.connect();
   try {
     await client.query('BEGIN');
 
-    // 1. Get loan details with FOR UPDATE, only if still pending
+    // Get loan details with FOR UPDATE, only if still pending
     const loanRes = await client.query(
       "SELECT * FROM loans WHERE id = $1 AND status = 'pending' FOR UPDATE",
       [loan_id]
@@ -174,9 +179,7 @@ async function approve(loan_id) {
       await client.query('ROLLBACK');
       return null;
     }
-    const loan = loanRes.rows[0];
 
-    // 2. Update loan status
     const updateRes = await client.query(
       `UPDATE loans 
        SET status = 'approved', approved_at = NOW() 
@@ -185,23 +188,7 @@ async function approve(loan_id) {
       [loan_id]
     );
 
-    // 3. Update member's outstanding balance. total_outstanding_balance is
-    // an INTEGER column, but loan.total_repayment comes back from Postgres
-    // as a decimal string (e.g. "6800.00", since it's NUMERIC(10,2)) -
-    // passing that directly makes Postgres reject it outright for an
-    // integer column. Round to the nearest whole KES, matching the
-    // column's actual precision.
-    await client.query(
-      `UPDATE members 
-       SET total_outstanding_balance = total_outstanding_balance + $1 
-       WHERE id = $2`,
-      [Math.round(Number(loan.total_repayment)), loan.member_id]
-    );
-
     await client.query('COMMIT');
-
-    // Add the display reference so the caller (and API consumer) can use it
-    // without having to construct LN-##### themselves.
     const updated = updateRes.rows[0];
     return { ...updated, reference: `LN-${String(updated.id).padStart(5, '0')}` };
   } catch (err) {
@@ -230,23 +217,62 @@ async function reject(loan_id, adminNotes = '') {
   return result.rows[0];
 }
 
-// Only an approved loan can be marked disbursed - guards against disbursing
-// a loan that's still pending, was rejected, or has already been disbursed
-// (which would otherwise just append a second "Manually disbursed" note
-// with no other consequence, but is still a state that shouldn't be
-// reachable). Returns undefined if the loan doesn't exist or isn't
-// currently approved.
+// Only an approved loan can be marked disbursed. This is the moment money
+// physically leaves the SACCO: the loan's status transition AND the
+// member's outstanding-balance increment are committed together in one
+// transaction, so a crash between them can't leave the status saying
+// "disbursed" while the member's balance still reads zero (or vice versa).
+//
+// This is also where the member's running `total_outstanding_balance` is
+// incremented — see approve() above for why that doesn't happen at
+// approval time. Before this change, markDisbursed just flipped the status
+// and the balance increment lived in approve(), which meant a member's
+// outstanding balance reflected a loan they hadn't received yet.
 async function markDisbursed(loan_id, mpesa_receipt = null) {
-  const result = await db.query(
-    `UPDATE loans 
-     SET status = 'disbursed', 
-         disbursed_at = NOW(),
-         admin_notes = COALESCE(admin_notes, '') || ' | Manually disbursed. Receipt: ' || $2
-     WHERE id = $1 AND status = 'approved'
-     RETURNING *`,
-    [loan_id, mpesa_receipt || 'N/A']
-  );
-  return result.rows[0];
+  const client = await db.pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Fetch with lock, only if still approved
+    const loanRes = await client.query(
+      "SELECT * FROM loans WHERE id = $1 AND status = 'approved' FOR UPDATE",
+      [loan_id]
+    );
+    if (loanRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return undefined;
+    }
+    const loan = loanRes.rows[0];
+
+    const updateRes = await client.query(
+      `UPDATE loans 
+       SET status = 'disbursed', 
+           disbursed_at = NOW(),
+           admin_notes = COALESCE(admin_notes, '') || ' | Manually disbursed. Receipt: ' || $2
+       WHERE id = $1 
+       RETURNING *`,
+      [loan_id, mpesa_receipt || 'N/A']
+    );
+
+    // NOW the member owes the money - increment their running outstanding
+    // total. total_outstanding_balance is INTEGER, and total_repayment is
+    // NUMERIC(10,2) — round to the nearest whole KES, matching the column's
+    // actual precision.
+    await client.query(
+      `UPDATE members 
+       SET total_outstanding_balance = total_outstanding_balance + $1 
+       WHERE id = $2`,
+      [Math.round(Number(loan.total_repayment)), loan.member_id]
+    );
+
+    await client.query('COMMIT');
+    return updateRes.rows[0];
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 // Applies a repayment to a loan. Normally manages its own transaction

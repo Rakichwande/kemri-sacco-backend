@@ -15,6 +15,20 @@ class LoanService {
     return MAX_ABSOLUTE_LIMIT;
   }
 
+  // Returns { allowed, reason, creditLimit?, member?, activeLoan? }.
+  //
+  // getActiveLoan() matches any loan in pending / approved / disbursed, so
+  // each of those states blocks a new application — but for a different
+  // reason, and the member deserves to know WHICH reason applies to them:
+  //
+  //   pending   — we haven't reviewed it yet; nothing to repay
+  //   approved  — we've said yes but no money has been sent yet
+  //   disbursed — money is in their hands, they owe it
+  //
+  // Before this change the same "You have an active loan of KES X. Clear
+  // it first." message was used for all three, which was nonsensical for
+  // the first two — it told members to repay a loan that hadn't been
+  // funded, and there was no action they could take to unblock themselves.
   static async canApply(memberId) {
     const member = await Member.findById(memberId);
     if (!member) {
@@ -23,11 +37,19 @@ class LoanService {
 
     const activeLoan = await Loan.getActiveLoan(memberId);
     if (activeLoan) {
-      return {
-        allowed: false,
-        reason: `You have an active loan of KES ${Number(activeLoan.outstanding_balance).toLocaleString()}. Clear it first.`,
-        activeLoan,
-      };
+      const amountText = Number(activeLoan.outstanding_balance).toLocaleString();
+      let reason;
+
+      if (activeLoan.status === 'pending') {
+        reason = `Your loan application of KES ${amountText} is awaiting review. You'll receive an SMS once it is approved.`;
+      } else if (activeLoan.status === 'approved') {
+        reason = `Your loan of KES ${amountText} has been approved and is awaiting disbursement. You'll receive an SMS once funds are sent.`;
+      } else {
+        // disbursed — the one case where "clear it first" is actually correct
+        reason = `You have an outstanding loan of KES ${amountText}. Clear it before applying for another.`;
+      }
+
+      return { allowed: false, reason, activeLoan };
     }
 
     const successfulRepayments = await Loan.countRepaidByMember(memberId);
