@@ -401,6 +401,19 @@ router.post('/invites', authenticate, requirePermission('staff:manage'), async (
   }
 });
 
+// Admin-facing: list currently pending invites so they can be reviewed or
+// revoked. Must be declared BEFORE /invites/:token, otherwise Express would
+// match "pending" as a token value.
+router.get('/invites/pending', authenticate, requirePermission('staff:manage'), async (req, res) => {
+  try {
+    const invites = await StaffInvite.findPendingForAdmin();
+    res.json(invites);
+  } catch (err) {
+    console.error('Pending invites fetch error:', err);
+    res.status(500).json({ error: 'Failed to load pending invites' });
+  }
+});
+
 router.get('/invites/:token', async (req, res) => {
   try {
     const invite = await StaffInvite.findByToken(req.params.token);

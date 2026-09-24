@@ -68,6 +68,29 @@ async function create({ email, role, invitedBy }) {
   }
 }
 
+// Admin-facing list of currently pending, unexpired invites. Deliberately
+// excludes the `token` column - the frontend has no use for the hash, and
+// shipping it to the browser is a needless disclosure. Includes the
+// inviter's name so admins can see who sent each invite.
+async function findPendingForAdmin() {
+  const result = await db.query(
+    `SELECT 
+       si.id,
+       si.email,
+       si.role,
+       si.status,
+       si.expires_at,
+       si.created_at,
+       a.username AS invited_by_username,
+       a.full_name AS invited_by_name
+     FROM staff_invites si
+     LEFT JOIN admins a ON si.invited_by = a.id
+     WHERE si.status = 'pending' AND si.expires_at > NOW()
+     ORDER BY si.created_at DESC`
+  );
+  return result.rows;
+}
+
 // Callers pass the RAW token from the invite link. This hashes it before
 // comparing - the DB never sees the plaintext.
 async function findByToken(rawToken) {
@@ -149,4 +172,5 @@ module.exports = {
   revoke,
   markAccepted,
   findPending,
+  findPendingForAdmin,
 };
