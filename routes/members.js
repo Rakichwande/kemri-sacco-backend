@@ -70,4 +70,16 @@ router.get('/:id', authenticate, requirePermission('members:read'), memberContro
 router.get('/', authenticate, requirePermission('members:read'), memberController.listMembers);
 router.patch('/:id', authenticate, requirePermission('members:write'), memberController.updateMember);
 
+// Board/staff status grant/revoke. Deliberately gated on its OWN permission
+// (members:set_board_status), not the broader members:write — this is the
+// one member field that changes loan policy for that person (auto-approved
+// vs. normal review), so it must be grantable only to roles trusted with
+// that decision (Super Administrator, SACCO Administrator), independent of
+// who can generally edit member records.
+//
+// The general PATCH /:id above cannot reach is_board_staff: the controller's
+// EDITABLE_FIELDS whitelist excludes it, and Member.update() throws if it's
+// ever passed there anyway. This route is the only entry point.
+router.patch('/:id/board-staff', authenticate, requirePermission('members:set_board_status'), memberController.setBoardStaff);
+
 module.exports = router;

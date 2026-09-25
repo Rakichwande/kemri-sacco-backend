@@ -22,11 +22,26 @@ const ROLES = {
   STAFF_LEGACY: 'staff',            // Pre-existing generic staff role, kept working as-is
 };
 
+// Permission naming: <resource>:<action>. Reads and writes are the bulk of
+// it, but two member permissions are deliberately NOT part of the generic
+// members:write grant, because they carry more consequence than "edit a
+// profile field" and must be grantable independently:
+//
+//   members:set_board_status — flips a member into the board/staff category,
+//     which auto-approves their future loan applications under SACCO policy
+//     (25 Sept 2026). A data-entry role with members:write should not be
+//     able to grant that.
+//
+//   members:delete — permanently removes a member record (only when they
+//     have no transaction history; see the delete spec). Destructive and
+//     irreversible, so again kept off the general write grant.
+//
+// Both are granted to Super Administrator and SACCO Administrator only.
 const PERMISSIONS = {
   [ROLES.SUPER_ADMIN]: [
     'system:configure',
     'staff:manage',
-    'members:read', 'members:write',
+    'members:read', 'members:write', 'members:set_board_status', 'members:delete',
     'loans:read', 'loans:approve', 'loans:disburse',
     'payments:read', 'payments:write',
     'withdrawals:read', 'withdrawals:write',
@@ -35,7 +50,7 @@ const PERMISSIONS = {
   ],
   [ROLES.SACCO_ADMIN]: [
     'staff:manage',
-    'members:read', 'members:write',
+    'members:read', 'members:write', 'members:set_board_status', 'members:delete',
     'loans:read', 'loans:approve', 'loans:disburse',
     'payments:read',
     'withdrawals:read', 'withdrawals:write',

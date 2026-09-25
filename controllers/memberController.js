@@ -110,6 +110,13 @@ async function listMembers(req, res) {
 // total_outstanding_balance and successful_repayments - those are either
 // registration-fixed identity fields or values the loan/payment flows own
 // and must stay in sync with actual transactions, not a manual edit.
+//
+// is_board_staff is ALSO deliberately excluded here, for a stricter reason:
+// it grants auto-approved loans. That write path is the separate
+// setBoardStaff() endpoint below, gated by its own permission. Member.update()
+// enforces this at the model layer too, so even a future controller that
+// forgets to keep the whitelist clean cannot grant the privilege through the
+// general edit route.
 const EDITABLE_FIELDS = ['full_name', 'nationality', 'age', 'employer', 'scheme', 'status'];
 
 async function updateMember(req, res) {
@@ -151,6 +158,66 @@ async function updateMember(req, res) {
   }
 }
 
+// Grant or revoke board/staff status. Board/staff members are auto-approved
+// for loans under the SACCO policy agreed 25 Sept 2026; everyone else follows
+// the normal staff-review path. This is the ONLY endpoint that may write
+// is_board_staff — the general edit route excludes it, and Member.update()
+// throws if it's ever passed there anyway.
+//
+// Requires the members:set_board_status permission (Super Administrator and
+// SACCO Administrator only), enforced by middleware on the route, not here.
+//
+// Body: { is_board_staff: true | false }. The typeof check is strict on
+// purpose: Member.setBoardStaffStatus() coerces with !! internally, so a
+// stray "false" string coming through as truthy would silently grant the
+// privilege. Rejecting anything that isn't a real boolean closes that.
+//
+// A no-op request (flag already in the target state) is short-circuited:
+// the write is skipped and no audit entry is written, so repeated clicks
+// or a duplicated request don't fill the trail with non-changes.
+async function setBoardStaff(req, res) {
+  try {
+    const { is_board_staff } = req.body;
+    if (typeof is_board_staff !== 'boolean') {
+      return res.status(400).json({ error: 'is_board_staff must be true or false' });
+    }
+
+    const existing = await Member.findById(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Member not found' });
+
+    if (existing.is_board_staff === is_board_staff) {
+      return res.json({
+        ...existing,
+        unchanged: true,
+        message: `Already ${is_board_staff ? 'board/staff' : 'not board/staff'} — no change made.`,
+      });
+    }
+
+    const updated = await Member.setBoardStaffStatus(req.params.id, is_board_staff);
+    if (!updated) {
+      // The row vanished between the read above and the write. Rare, but a
+      // concurrent delete would land here, and a 404 is the honest answer.
+      return res.status(404).json({ error: 'Member not found' });
+    }
+
+    await AuditLog.log({
+      actorId: req.user.id,
+      actorUsername: req.user.username,
+      action: is_board_staff ? 'Granted board/staff status' : 'Revoked board/staff status',
+      category: 'member_edit',
+      targetType: 'member',
+      targetId: req.params.id,
+      targetLabel: updated.full_name,
+      details: `is_board_staff: ${existing.is_board_staff} → ${updated.is_board_staff} (ref ${updated.imported_reference || '—'})`,
+    });
+
+    res.json(updated);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to update board/staff status' });
+  }
+}
+
 // Bulk import of pre-existing members. One summary audit entry, not one per
 // row - a 2,000-row import writing 2,000 audit rows would drown the trail.
 async function importMembers(req, res) {
@@ -183,4 +250,12 @@ async function importMembers(req, res) {
   }
 }
 
-module.exports = { registerMember: registerMemberHandler, adminCreateMember, getMember, listMembers, updateMember, importMembers };
+module.exports = {
+  registerMember: registerMemberHandler,
+  adminCreateMember,
+  getMember,
+  listMembers,
+  updateMember,
+  setBoardStaff,
+  importMembers,
+};

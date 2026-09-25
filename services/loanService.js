@@ -40,6 +40,12 @@ class LoanService {
   // own application. For a DISBURSED loan, outstanding_balance IS the
   // correct figure (interest is now legitimately owed), and that case is
   // unchanged below.
+  //
+  // NOTE for board/staff: this function does NOT consider is_board_staff.
+  // An active loan in any state still blocks a new application, board
+  // member or not. The auto-approval branch only affects what happens
+  // AFTER canApply() says yes — it does not exempt anyone from the
+  // one-active-loan rule, and it does not change their credit limit.
   static async canApply(memberId) {
     const member = await Member.findById(memberId);
     if (!member) {
@@ -86,6 +92,34 @@ class LoanService {
     };
   }
 
+  // Apply for a loan.
+  //
+  // BOARD/STAFF AUTO-APPROVAL (SACCO policy, 25 Sept 2026):
+  // Members flagged is_board_staff on their member record are approved at
+  // the point of application — no staff review step. Everyone else
+  // follows the unchanged apply → staff-review path.
+  //
+  // The auto-approval is deliberately implemented by creating the loan
+  // as 'pending' and then immediately calling approveLoan() — the same
+  // method a staff member's click would call — rather than by passing
+  // status='approved' to Loan.create(). Two reasons:
+  //
+  //   1. Every side effect of approval (balance increment, approval SMS,
+  //      any audit entry, any status history) happens in exactly one
+  //      place. If a future change adds or removes a step from the
+  //      approval path, board/staff loans inherit it automatically — no
+  //      chance of the two paths drifting apart over time.
+  //
+  //   2. The 'pending' window is measured in milliseconds and is entirely
+  //      within a single request handler; no other process can interleave
+  //      and observe the intermediate state. The member's USSD session
+  //      is still open when we return the result, so they see only the
+  //      final approved state.
+  //
+  // The is_board_staff flag is read from the member object canApply()
+  // already loaded — no extra query. Anything other than exactly true
+  // (null, undefined, false) is treated as NOT board/staff: fail-safe
+  // in the direction of the manual review path.
   static async apply(memberId, requestedAmount) {
     // requestedAmount arrives as whatever the caller sent - a USSD digit
     // string, JSON from a future web client, etc. Comparing a non-numeric
@@ -116,7 +150,13 @@ class LoanService {
       };
     }
 
-    const loan = await Loan.create({
+    // Board/staff decision, read from the member record canApply() already
+    // loaded. Strict === true so any unexpected value (null, "1", truthy
+    // string) falls back to the safe manual-review path rather than
+    // granting auto-approval.
+    const autoApprove = eligibility.member.is_board_staff === true;
+
+    let loan = await Loan.create({
       member_id: memberId,
       principal: amount,
       interest_rate: INTEREST_RATE,
@@ -133,7 +173,41 @@ class LoanService {
       return { success: false, message: 'You already have an active loan. Clear it before applying again.' };
     }
 
-    return { success: true, message: 'Loan application submitted successfully.', loan };
+    if (!autoApprove) {
+      return { success: true, message: 'Loan application submitted successfully.', loan };
+    }
+
+    // --- Board/staff: immediately approve via the same path staff use ---
+    const approval = await this.approveLoan(
+      loan.id,
+      'Auto-approved: board/staff (SACCO policy, 25 Sept 2026)'
+    );
+
+    if (!approval.success) {
+      // Should not happen — we just created the loan as 'pending', and
+      // approveLoan() only fails when the loan isn't pending or isn't
+      // found. If it ever does, the loan exists and is intact; the
+      // correct outcome is to hand it to staff for manual review rather
+      // than report a failure that would prompt a duplicate application.
+      // The loan stays pending, the queue picks it up, and the member is
+      // told to expect a review — same as any other member.
+      console.error(
+        `Auto-approval failed for board/staff member ${memberId} on loan ${loan.id}: ${approval.message}`
+      );
+      return {
+        success: true,
+        message: 'Loan application submitted successfully.',
+        loan,
+        autoApprovalFailed: true,
+      };
+    }
+
+    return {
+      success: true,
+      message: 'Loan automatically approved. Disbursement is manual until M-Pesa B2C is approved by Safaricom.',
+      loan: approval.loan,
+      autoApproved: true,
+    };
   }
 
   static async approveLoan(loanId, adminNotes = '') {

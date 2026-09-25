@@ -17,6 +17,12 @@ CREATE TABLE IF NOT EXISTS members (
   credit_limit INTEGER DEFAULT 10000,
   total_outstanding_balance INTEGER DEFAULT 0,
   successful_repayments INTEGER DEFAULT 0,
+  -- Board/Staff flag. TRUE for the 17 board and staff members who are
+  -- auto-approved for loans under SACCO policy agreed 25 Sept 2026.
+  -- Defaults to FALSE for everyone else — including any member who
+  -- self-registers via USSD or the portal. Promotion to TRUE happens only
+  -- through setBoardStaffStatus(), never through create() or update().
+  is_board_staff BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMP DEFAULT NOW()
 );
 `;
@@ -85,6 +91,19 @@ async function init() {
   // via the admin portal.
   await pool.query(`ALTER TABLE members ALTER COLUMN phone_number DROP NOT NULL;`);
 
+  // Board/Staff flag. Added via ALTER (rather than only in the CREATE
+  // TABLE above) so existing databases pick it up on the next boot without
+  // a manual migration. Existing members all default to FALSE on add; the
+  // current 17 board/staff are backfilled separately (one-off UPDATE, or
+  // setBoardStaffByReferences() from an admin script).
+  await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS is_board_staff BOOLEAN NOT NULL DEFAULT FALSE;`);
+
+  // Partial index. Only the handful of TRUE rows are indexed, so lookups
+  // like "is this member board/staff?" stay constant-time as the member
+  // table grows to thousands, without bloating the index for the 99% of
+  // rows that are FALSE.
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_members_board_staff ON members (id) WHERE is_board_staff;`);
+
   // Monotonic member reference counter. Every new member created via
   // Member.create() draws its imported_reference from this sequence, so
   // references continue the SACCO's existing numbering (starting from the
@@ -133,6 +152,14 @@ async function init() {
 // nextval() is called inside the INSERT's VALUES clause, so the number is
 // allocated atomically with the row. Two simultaneous registrations cannot
 // receive the same reference.
+//
+// SECURITY BOUNDARY: this function deliberately does NOT accept
+// is_board_staff. Every member created here — via USSD self-registration,
+// the web portal, the admin console, or bulk import — lands as FALSE
+// (the database default). Promotion to board/staff happens only through
+// setBoardStaffStatus(), called from a route gated by
+// members:set_board_status, so the auto-approved-loan privilege can never
+// be granted by accident through any other code path.
 async function create(member) {
   const { full_name, id_number, phone_number, nationality, age, employer, scheme, imported_reference, created_at } = member;
   const result = await pool.query(
@@ -287,6 +314,11 @@ function toTitleCase(name) {
 // in the source file) - if present, that's what appears in error reports,
 // so "row 5" in the report corresponds to row 5 in the CEO's spreadsheet.
 // If absent, we fall back to positional numbering within the array.
+//
+// NOTE: imported members land as is_board_staff = FALSE, same as everyone
+// else. Promotion of the 17 board/staff is a separate one-off step (see
+// setBoardStaffByReferences), deliberately kept out of the importer so a
+// routine member upload can never grant auto-approved-loan privileges.
 async function bulkImport(rows) {
   const results = { created: 0, skipped: [] };
 
@@ -409,6 +441,10 @@ async function findById(id) {
 
 // One query, all members, with computed savings balance and current loan
 // status - for the Member Directory page. Avoids an N+1 query per member.
+//
+// SELECT m.* means is_board_staff flows through to the API automatically -
+// no change needed here when the flag is added. The frontend uses it to
+// render the "Board/Staff" badge in the Member Directory.
 async function findAllForDirectory() {
   const result = await pool.query(`
     SELECT
@@ -437,7 +473,18 @@ async function findAllForDirectory() {
 // Admin edit of member profile fields. `updates` is a plain object whose keys
 // are already whitelisted by the controller - this function trusts its caller
 // on that, but still builds the query parametrically rather than interpolating.
+//
+// The one exception to that trust: is_board_staff is rejected outright here,
+// even if a controller passes it. That field grants auto-approved loans, so
+// it's the one column that must not be reachable from the general edit path.
+// All changes go through setBoardStaffStatus(), which is called from a route
+// gated by members:set_board_status, so the privilege cannot be granted by
+// a controller that forgot to exclude the field from its whitelist.
 async function update(id, updates) {
+  if ('is_board_staff' in updates) {
+    throw new Error('is_board_staff must be changed via setBoardStaffStatus(), not update()');
+  }
+
   const keys = Object.keys(updates);
   const setClause = keys.map((key, i) => `${key} = $${i + 2}`).join(', ');
   const values = keys.map((key) => updates[key]);
@@ -448,37 +495,66 @@ async function update(id, updates) {
   return result.rows[0];
 }
 
-// Update the member's total outstanding balance (add amount)
-async function updateOutstandingBalance(memberId, amount) {
+// --- Board/Staff flag ---
+
+// Promote (or demote) a single member to board/staff. This is the ONLY
+// write path for is_board_staff - call it from a route gated by
+// members:set_board_status (Super Administrator and SACCO Administrator
+// only). Returns the updated member row so the caller can write an audit
+// entry with the before/after state, and so the UI can update immediately.
+//
+// A demotion (setBoardStaffStatus(id, false)) is deliberately allowed:
+// board composition changes, and the alternative - leaving the flag stuck
+// on - would silently keep auto-approval for someone who no longer holds
+// the privilege.
+async function setBoardStaffStatus(memberId, isBoardStaff) {
   const result = await pool.query(
-    `UPDATE members 
-     SET total_outstanding_balance = total_outstanding_balance + $1 
-     WHERE id = $2 
-     RETURNING *`,
-    [amount, memberId]
+    `UPDATE members
+     SET is_board_staff = $1
+     WHERE id = $2
+     RETURNING id, full_name, imported_reference, is_board_staff`,
+    [!!isBoardStaff, memberId]
   );
-  return result.rows[0];
+  return result.rows[0] || null;
 }
 
-// NOTE: appears to duplicate what Loan.js's applyRepayment() already does
-// directly against the members table (with the successful_repayments
-// off-by-one already fixed there). Worth confirming nothing still calls
-// this - if so it's dead code carrying the OLD, still-buggy version of
-// that same logic (successful_repayments >= 1 reads the pre-increment
-// value). Left as-is for now since it's outside today's scope.
-async function incrementRepayments(memberId) {
+// Batch variant, used for the one-off backfill of the current 17 board
+// and staff members and for any future bulk correction. Matches on
+// imported_reference (the SACCO's own member number), because that is the
+// identifier the SACCO's register uses - the internal `id` is not
+// meaningful to the board and would be error-prone in a hand-typed list.
+//
+// Returns the rows that were actually updated, so the caller can confirm
+// the expected count (e.g. "17 of 17 matched") and spot any reference in
+// the list that did not correspond to a live member. References that do
+// not match are silently absent from the result rather than throwing -
+// the caller decides whether a mismatch is fatal.
+async function setBoardStaffByReferences(references, isBoardStaff = true) {
+  if (!Array.isArray(references) || references.length === 0) return [];
   const result = await pool.query(
-    `UPDATE members 
-     SET successful_repayments = successful_repayments + 1,
-         credit_limit = CASE 
-           WHEN successful_repayments >= 1 THEN 20000 
-           ELSE 10000 
-         END
-     WHERE id = $1 
-     RETURNING *`,
+    `UPDATE members
+     SET is_board_staff = $1
+     WHERE imported_reference = ANY($2::text[])
+     RETURNING id, full_name, imported_reference, is_board_staff`,
+    [!!isBoardStaff, references.map(String)]
+  );
+  return result.rows;
+}
+
+// Lookup used by loanService.apply() to decide auto-approval. Reads only
+// the flag column, so it stays cheap even if apply() is already holding a
+// full member row and only needs to re-check this one field.
+//
+// Note: loanService.apply() currently reads the flag from the member row
+// that canApply() already loaded, rather than calling this. This function
+// exists for any future caller that needs the answer without loading the
+// whole member.
+async function isBoardStaff(memberId) {
+  const result = await pool.query(
+    'SELECT is_board_staff FROM members WHERE id = $1',
     [memberId]
   );
-  return result.rows[0];
+  return result.rows[0]?.is_board_staff === true;
 }
 
 module.exports = {
@@ -490,8 +566,6 @@ module.exports = {
   findAll,
   findAllForDirectory,
   update,
-  updateOutstandingBalance,
-  incrementRepayments,
   REFERENCE_SQL,
   bulkImport,
   normalizePhone,
@@ -503,4 +577,8 @@ module.exports = {
   verifyPin,
   recordFailedPinAttempt,
   resetPinAttempts,
+  // Board/Staff flag
+  setBoardStaffStatus,
+  setBoardStaffByReferences,
+  isBoardStaff,
 };
