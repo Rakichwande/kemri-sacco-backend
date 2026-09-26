@@ -75,6 +75,13 @@ const staffTemplates = {
     staffEventEmail('New member registered', `${name} has just registered as a SACCO member.`),
   loanApplication: (name, amount, ref) =>
     staffEventEmail('Loan application received', `${name} applied for a loan of KES ${Number(amount).toLocaleString()}. Reference: ${ref}. Awaiting review.`),
+  // Companion to staffLoanApplication above, for the board/staff auto-approval
+  // path. The wording deliberately differs: no review is pending, only
+  // disbursement — so it must not read as an item for the approval queue.
+  // Staff who see this in their inbox should go to the Disbursement Log,
+  // not the Approval Queue.
+  loanAutoApproved: (name, amount, ref) =>
+    staffEventEmail('Board/Staff loan auto-approved', `${name} applied for a loan of KES ${Number(amount).toLocaleString()}. Reference: ${ref}. Auto-approved — ready for disbursement.`),
   repayment: (name, amount) =>
     staffEventEmail('Loan repayment received', `A repayment of KES ${Number(amount).toLocaleString()} was received from ${name}.`),
   deposit: (name, amount) =>

@@ -1,6 +1,8 @@
 const Member = require('../models/Member');
 const Loan = require('../models/Loan');
 const smsService = require('./smsService');
+const notificationService = require('./notificationService');
+const emailService = require('./emailService');
 
 const MAX_ABSOLUTE_LIMIT = 20000;
 const MIN_LOAN_AMOUNT = 1000;
@@ -104,17 +106,27 @@ class LoanService {
   // method a staff member's click would call — rather than by passing
   // status='approved' to Loan.create(). Two reasons:
   //
-  //   1. Every side effect of approval (balance increment, approval SMS,
-  //      any audit entry, any status history) happens in exactly one
-  //      place. If a future change adds or removes a step from the
-  //      approval path, board/staff loans inherit it automatically — no
-  //      chance of the two paths drifting apart over time.
+  //   1. Every side effect of approval (approval SMS, audit trail) happens
+  //      in exactly one place. If a future change adds or removes a step
+  //      from the approval path, board/staff loans inherit it
+  //      automatically — no chance of the two paths drifting apart.
   //
   //   2. The 'pending' window is measured in milliseconds and is entirely
   //      within a single request handler; no other process can interleave
-  //      and observe the intermediate state. The member's USSD session
-  //      is still open when we return the result, so they see only the
-  //      final approved state.
+  //      and observe the intermediate state. The member's USSD session is
+  //      still open when we return the result, so they see only the final
+  //      approved state.
+  //
+  // MESSAGING: all member SMS and staff notifications for a loan
+  // application are sent from here, not from the caller. The reason is
+  // that this function is the only place that knows whether the loan was
+  // auto-approved or is going to manual review — so it is the only place
+  // that can send exactly one, consistent message. Before this change,
+  // the USSD controller sent the member "your application was received,
+  // we'll notify you" and the service sent "your loan is approved" — two
+  // contradicting SMS arriving a second apart for every board/staff loan.
+  // A future web-based or admin-console loan form now inherits the
+  // correct messaging automatically, without duplicating it.
   //
   // The is_board_staff flag is read from the member object canApply()
   // already loaded — no extra query. Anything other than exactly true
@@ -173,11 +185,22 @@ class LoanService {
       return { success: false, message: 'You already have an active loan. Clear it before applying again.' };
     }
 
+    const ref = `LN-${String(loan.id).padStart(5, '0')}`;
+    const member = eligibility.member;
+
+    // --- Regular member: manual review path ---
     if (!autoApprove) {
-      return { success: true, message: 'Loan application submitted successfully.', loan };
+      await this._notifyApplicationReceived(member, loan, ref);
+      return {
+        success: true,
+        message: 'Loan application submitted successfully.',
+        loan,
+        autoApproved: false,
+      };
     }
 
-    // --- Board/staff: immediately approve via the same path staff use ---
+    // --- Board/staff: auto-approval path ---
+    // approveLoan() sends the loanApproved SMS to the member.
     const approval = await this.approveLoan(
       loan.id,
       'Auto-approved: board/staff (SACCO policy, 25 Sept 2026)'
@@ -189,11 +212,14 @@ class LoanService {
       // found. If it ever does, the loan exists and is intact; the
       // correct outcome is to hand it to staff for manual review rather
       // than report a failure that would prompt a duplicate application.
-      // The loan stays pending, the queue picks it up, and the member is
-      // told to expect a review — same as any other member.
+      // Falling back to the regular-member messaging means the member
+      // gets an honest "we'll notify you once reviewed" SMS and the loan
+      // appears in the staff queue, rather than leaving them with an
+      // unexplained silence.
       console.error(
         `Auto-approval failed for board/staff member ${memberId} on loan ${loan.id}: ${approval.message}`
       );
+      await this._notifyApplicationReceived(member, loan, ref);
       return {
         success: true,
         message: 'Loan application submitted successfully.',
@@ -201,6 +227,12 @@ class LoanService {
         autoApprovalFailed: true,
       };
     }
+
+    // Auto-approved — staff notification is separate from the approval
+    // notification. Staff need to know a loan is ready for disbursement;
+    // they do NOT need to review it. Different template from the regular
+    // path, to reflect that.
+    await this._notifyAutoApprovedStaff(member, loan, ref);
 
     return {
       success: true,
@@ -210,6 +242,67 @@ class LoanService {
     };
   }
 
+  // Notify the member their application was received (manual-review path),
+  // and alert staff that a new application needs review. Private helper
+  // because the auto-approval fallback branch in apply() needs to send
+  // exactly the same messages when approveLoan() unexpectedly fails — the
+  // member experience for "your application is with us" should not depend
+  // on which internal code path produced it.
+  //
+  // Wrapped in try/catch per call: an SMS delivery failure is a loggable
+  // event, not a reason to fail the whole application. sendSMS already
+  // never throws (see its own comment), but the additional catch here
+  // means an unexpected throw from a template function or notification
+  // service still can't abort the caller.
+  static async _notifyApplicationReceived(member, loan, ref) {
+    try {
+      await smsService.sendSMS(
+        member.phone_number,
+        smsService.templates.loanApplicationReceived(member.full_name, loan.principal, ref)
+      );
+    } catch (smsErr) {
+      console.error('Loan application SMS failed (application still recorded):', smsErr.message);
+    }
+
+    try {
+      await notificationService.notifyStaff({
+        smsText: smsService.templates.staffLoanApplication(member.full_name, loan.principal, ref),
+        emailContent: emailService.staffTemplates.loanApplication(member.full_name, loan.principal, ref),
+      });
+    } catch (notifyErr) {
+      console.error('Staff notification for loan application failed:', notifyErr.message);
+    }
+  }
+
+  // Notify staff that a board/staff loan was auto-approved and is ready
+  // for disbursement. Sends both SMS and email, matching the regular path
+  // — staff inboxes should not be the place where board/staff and
+  // regular-member loan events look different. The wording in both
+  // templates emphasises "ready for disbursement" so it is not mistaken
+  // for an item needing review.
+  //
+  // All staff are notified, including the applicant if they are staff. The
+  // notification is a record of a SACCO event, not a curated audience —
+  // filtering the applicant out would complicate the notify service for
+  // no real gain, and the applicant already receives their own separate
+  // member-facing confirmation SMS.
+  static async _notifyAutoApprovedStaff(member, loan, ref) {
+    try {
+      await notificationService.notifyStaff({
+        smsText: smsService.templates.staffLoanAutoApproved(member.full_name, loan.principal, ref),
+        emailContent: emailService.staffTemplates.loanAutoApproved(member.full_name, loan.principal, ref),
+      });
+    } catch (notifyErr) {
+      console.error('Staff notification for auto-approved loan failed:', notifyErr.message);
+    }
+  }
+
+  // Approve a pending loan. Called both by staff (manual approval via the
+  // admin console) and by apply() for board/staff auto-approval.
+  //
+  // Sends the loanApproved SMS to the member. Deliberately does NOT notify
+  // staff — the two callers do that themselves, with different messages
+  // (a manual approval notification doesn't make sense; staff just did it).
   static async approveLoan(loanId, adminNotes = '') {
     // 1. Approve the loan (changes status to 'approved')
     const loan = await Loan.approve(loanId);

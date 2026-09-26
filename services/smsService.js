@@ -69,6 +69,15 @@ const templates = {
   staffLoanApplication: (name, amount, ref) =>
     `KEMRI SACCO Admin: Loan application ${formatKES(amount)} from ${name}. Ref: ${ref}. Awaiting review.`,
 
+  // Sent when a board/staff member's loan auto-approves at apply time.
+  // Different from staffLoanApplication above, which is for the regular
+  // manual-review path — the wording reflects that no review is needed,
+  // only disbursement. Without this, staff would receive "Awaiting review"
+  // for a loan that has already been approved, which invites them to go
+  // looking for something in the queue that isn't there.
+  staffLoanAutoApproved: (name, amount, ref) =>
+    `KEMRI SACCO Admin: Board/Staff loan ${formatKES(amount)} from ${name} (Ref: ${ref}) auto-approved. Ready for disbursement.`,
+
   staffRepayment: (name, amount) =>
     `KEMRI SACCO Admin: Repayment of ${formatKES(amount)} received from ${name}.`,
 

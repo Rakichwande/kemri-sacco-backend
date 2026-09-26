@@ -364,33 +364,32 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
     }
 
     const { loan } = result;
-    // Loan reference uses the LOAN's own id, not the member's - the old
-    // format (KEMRI-{year}-{member_id}) meant a member taking out a
-    // second loan saw the same reference string as their first, and staff
-    // couldn't tell the two apart. LN-##### is also visually distinct from
-    // member references so there's no ambiguity when reading them side by
-    // side in the admin console.
     const ref = `LN-${String(loan.id).padStart(5, '0')}`;
 
+    // Two different narratives, chosen by what apply() decided. The
+    // board/staff path auto-approves at apply time; everyone else goes to
+    // staff review. The opening and closing lines must match reality or
+    // the member sees one thing on screen and another in the SMS they
+    // receive a second later.
+    //
+    // When auto-approval fell back to the manual path (autoApprovalFailed),
+    // autoApproved is undefined, so the summary correctly reads as the
+    // regular "awaiting review" message - matching the pending state the
+    // loan is actually in, and the "we'll review" SMS the member receives.
+    const opening = result.autoApproved ? 'Loan approved' : 'Loan application received';
+    const closing = result.autoApproved ? 'Disbursement shortly.' : 'Awaiting SACCO review.';
+
     const summary =
-      `Loan application received: KES ${Number(loan.principal).toLocaleString()}\n` +
+      `${opening}: KES ${Number(loan.principal).toLocaleString()}\n` +
       `Total repayable (incl. interest): KES ${Number(loan.total_repayment).toLocaleString()}\n` +
       `Over ${loan.tenure_months} months, ~KES ${Number(loan.monthly_installment).toLocaleString()}/month\n` +
-      `Ref: ${ref}. Awaiting SACCO review.`;
+      `Ref: ${ref}. ${closing}`;
 
-    // Send SMS using the loan application template
-    try {
-      await smsService.sendSMS(
-        phoneNumber,
-        smsService.templates.loanApplicationReceived(member.full_name, loan.principal, ref)
-      );
-    } catch (smsErr) {
-      console.error('USSD loan application SMS failed (application still recorded):', smsErr.message);
-    }
-    notificationService.notifyStaff({
-      smsText: smsService.templates.staffLoanApplication(member.full_name, loan.principal, ref),
-      emailContent: emailService.staffTemplates.loanApplication(member.full_name, loan.principal, ref),
-    });
+    // Member SMS and staff notification are sent by LoanService.apply()
+    // itself — it knows which path was taken, so it can send exactly one
+    // consistent message (loanApproved for board/staff, or
+    // loanApplicationReceived for everyone else) rather than sending both
+    // from two different layers. See the messaging comment on apply().
 
     return `END ${summary}`;
   }
