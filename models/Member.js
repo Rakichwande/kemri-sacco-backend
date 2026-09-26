@@ -557,6 +557,110 @@ async function isBoardStaff(memberId) {
   return result.rows[0]?.is_board_staff === true;
 }
 
+// --- Member deletion ---
+
+// Permanently delete a member record. Refuses if the member has ANY
+// transaction history - deposits, loans, repayments, or withdrawals are
+// financial records that must be retained for audit and reconciliation.
+//
+// Return values:
+//   { deleted: true, member }            — deletion succeeded
+//   { deleted: false, code: 'HAS_HISTORY', message, counts }
+//                                        — blocked; member record intact
+//   null                                 — member does not exist
+//
+// Design notes:
+//
+//   • The history check and the DELETE run inside one transaction, with
+//     the member row locked FOR UPDATE. Without the lock, a payment could
+//     land between "check finds zero" and "DELETE runs", orphaning the
+//     payment via a cascade. The lock makes that impossible.
+//
+//   • References are NEVER reused. Deleting a member does not roll back
+//     sacco_member_reference_seq — the sequence continues, so the next
+//     new member never inherits a deleted member's number. This mirrors
+//     the SACCO's paper register: a retired number stays retired.
+//
+//   • A foreign-key violation (code 23503) that slips past the pre-check
+//     — e.g. a table we don't count here, like ussd_sessions, holding a
+//     RESTRICT reference to this member — is converted to the same
+//     "HAS_HISTORY" response rather than surfacing as a 500. The member
+//     record is intact either way; the caller gets a usable message.
+//
+// The config module exports both a `.query()` proxy and the underlying pg
+// Pool as `.pool`, so getting a dedicated client for the transaction means
+// `pool.pool.connect()` — the name collides because Member.js imports the
+// module as `pool`. Loan.js reads more naturally (`db.pool.connect()`)
+// because it aliases the module as `db`. Same mechanism.
+async function remove(memberId) {
+  const client = await pool.pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Lock the member row so a concurrent payment insert cannot slip
+    // between the history check and the delete.
+    const memberRes = await client.query(
+      'SELECT id, full_name, imported_reference FROM members WHERE id = $1 FOR UPDATE',
+      [memberId]
+    );
+    if (memberRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    const member = memberRes.rows[0];
+
+    // One round-trip, four counts. Covers every table that carries member
+    // financial history. If the total is non-zero, deletion is blocked.
+    const histRes = await client.query(
+      `SELECT
+         (SELECT COUNT(*) FROM payments    WHERE member_id = $1) AS payments,
+         (SELECT COUNT(*) FROM loans       WHERE member_id = $1) AS loans,
+         (SELECT COUNT(*) FROM repayments  WHERE member_id = $1) AS repayments,
+         (SELECT COUNT(*) FROM withdrawals WHERE member_id = $1) AS withdrawals`,
+      [memberId]
+    );
+
+    const counts = histRes.rows[0];
+    const total = Object.values(counts).reduce((sum, n) => sum + Number(n), 0);
+
+    if (total > 0) {
+      await client.query('ROLLBACK');
+      const parts = Object.entries(counts)
+        .filter(([, n]) => Number(n) > 0)
+        .map(([table, n]) => `${n} ${table}`)
+        .join(', ');
+      return {
+        deleted: false,
+        code: 'HAS_HISTORY',
+        message: `This member has transaction history (${parts}) and cannot be deleted. Their record must be retained for audit and financial accuracy.`,
+        counts,
+      };
+    }
+
+    await client.query('DELETE FROM members WHERE id = $1', [memberId]);
+    await client.query('COMMIT');
+
+    return { deleted: true, member };
+  } catch (err) {
+    await client.query('ROLLBACK');
+
+    // FK violation from a table we didn't count above (e.g. audit_log,
+    // ussd_sessions). Treat as "has related records" — same outcome,
+    // cleaner message, no 500.
+    if (err.code === '23503') {
+      return {
+        deleted: false,
+        code: 'HAS_HISTORY',
+        message: 'This member has related records and cannot be deleted.',
+      };
+    }
+
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 module.exports = {
   init,
   create,
@@ -581,4 +685,6 @@ module.exports = {
   setBoardStaffStatus,
   setBoardStaffByReferences,
   isBoardStaff,
+  // Deletion
+  remove,
 };

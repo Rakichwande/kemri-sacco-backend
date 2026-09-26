@@ -218,6 +218,78 @@ async function setBoardStaff(req, res) {
   }
 }
 
+// Permanently delete a member. Only reachable through a route gated by
+// members:delete (Super Administrator and SACCO Administrator only) — the
+// general edit route cannot reach this, and Member.remove() enforces the
+// history check regardless of caller.
+//
+// Response codes, all deliberate:
+//   200 — deleted
+//   404 — member not found (or already deleted)
+//   409 — blocked: member has transaction history; body carries a
+//         breakdown of what blocked it so the UI can show a specific message
+//   500 — unexpected error
+//
+// EVERY outcome is audit-logged, including blocked attempts. A refused
+// deletion is as worth recording as a successful one — it is evidence the
+// safety check ran, and it lets an auditor later answer "who tried to
+// delete this member and when?" without needing the original request logs.
+async function deleteMember(req, res) {
+  try {
+    const result = await Member.remove(req.params.id);
+
+    if (!result) {
+      return res.status(404).json({ error: 'Member not found' });
+    }
+
+    if (!result.deleted) {
+      // Blocked: the member has financial history. Log the attempt with
+      // the counts so the trail shows exactly why it was refused.
+      await AuditLog.log({
+        actorId: req.user.id,
+        actorUsername: req.user.username,
+        action: 'Blocked member deletion (has history)',
+        category: 'member_edit',
+        targetType: 'member',
+        targetId: req.params.id,
+        targetLabel: result.member?.full_name || '(unknown)',
+        details: result.counts
+          ? `Refused: ${JSON.stringify(result.counts)}`
+          : `Refused: ${result.message}`,
+      });
+
+      return res.status(409).json({
+        error: result.message,
+        code: result.code,
+        counts: result.counts || null,
+      });
+    }
+
+    await AuditLog.log({
+      actorId: req.user.id,
+      actorUsername: req.user.username,
+      action: 'Deleted member',
+      category: 'member_edit',
+      targetType: 'member',
+      targetId: req.params.id,
+      targetLabel: `${result.member.full_name} (ref ${result.member.imported_reference || '—'})`,
+      details: 'Permanent deletion — no transaction history on record',
+    });
+
+    res.json({
+      message: 'Member deleted.',
+      member: {
+        id: result.member.id,
+        full_name: result.member.full_name,
+        reference: result.member.imported_reference,
+      },
+    });
+  } catch (err) {
+    console.error('Member deletion error:', err);
+    res.status(500).json({ error: 'Failed to delete member' });
+  }
+}
+
 // Bulk import of pre-existing members. One summary audit entry, not one per
 // row - a 2,000-row import writing 2,000 audit rows would drown the trail.
 async function importMembers(req, res) {
@@ -257,5 +329,6 @@ module.exports = {
   listMembers,
   updateMember,
   setBoardStaff,
+  deleteMember,
   importMembers,
 };

@@ -82,4 +82,15 @@ router.patch('/:id', authenticate, requirePermission('members:write'), memberCon
 // ever passed there anyway. This route is the only entry point.
 router.patch('/:id/board-staff', authenticate, requirePermission('members:set_board_status'), memberController.setBoardStaff);
 
+// Member deletion. Destructive and irreversible — gated on its OWN
+// permission (members:delete), separate from members:write so a role that
+// can edit profiles cannot also permanently delete records. Granted only
+// to Super Administrator and SACCO Administrator.
+//
+// The controller refuses with 409 if the member has any transaction
+// history (deposits, loans, repayments, withdrawals). That is a legitimate
+// business outcome, not an error: the frontend shows the specific reason
+// and leaves the member record intact. See Member.remove() for the check.
+router.delete('/:id', authenticate, requirePermission('members:delete'), memberController.deleteMember);
+
 module.exports = router;
