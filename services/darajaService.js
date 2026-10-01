@@ -145,4 +145,4 @@ async function stkPush({ phoneNumber, amount, accountReference, description }) {
   }
 }
 
-module.exports = { getAccessToken, stkPush };
+module.exports = { getAccessToken, stkPush, normalizeToMsisdn };
