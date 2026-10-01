@@ -30,7 +30,33 @@ const { authenticate, requirePermission } = require('../middleware/auth');
 // can still read loan records elsewhere, just not act on them).
 router.post('/approve/:loanId', authenticate, requirePermission('loans:approve'), loanController.approveLoan);
 router.post('/reject/:loanId', authenticate, requirePermission('loans:approve'), loanController.rejectLoan);
+
+// Manual disbursement: staff sends the money themselves (M-Pesa app, bank,
+// whatever), then records the receipt here to close the loan out and send
+// the member SMS. This is the fallback path and stays in place permanently
+// — B2C can fail, be unavailable, or be rejected by Safaricom for that
+// particular transaction, and staff still need a way to complete the
+// disbursement.
 router.post('/disburse/:loanId', authenticate, requirePermission('loans:disburse'), loanController.markDisbursed);
+
+// Automatic disbursement via Safaricom's M-Pesa B2C API. Distinct from
+// /disburse/:loanId above because it is a genuinely different action:
+//
+//   - /disburse/:loanId        staff already sent the money → record it
+//   - /auto-disburse/:loanId   backend asks Safaricom to send the money
+//
+// Separate paths rather than one endpoint that internally chooses,
+// because the two flows have different post-conditions: manual is a
+// completed action, B2C is an in-flight one. The loan moves to
+// 'disbursing' (not 'disbursed') on an accepted request, and only
+// Safaricom's result callback resolves it.
+//
+// The response is asynchronous: a 200 means "Safaricom accepted the
+// request", not "the member has the money". See
+// DisbursementService.disburseLoan() and the disburseLoan() handler
+// comment for the full lifecycle.
+router.post('/auto-disburse/:loanId', authenticate, requirePermission('loans:disburse'), loanController.disburseLoan);
+
 router.get('/admin/list', authenticate, requirePermission('loans:read'), loanController.getAdminLoans);
 router.get('/admin/pending', authenticate, requirePermission('loans:read'), loanController.getPendingLoans);
 

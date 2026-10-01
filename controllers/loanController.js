@@ -1,4 +1,5 @@
 const LoanService = require('../services/loanService');
+const DisbursementService = require('../services/disbursementService');
 const Member = require('../models/Member');
 const Loan = require('../models/Loan');
 const smsService = require('../services/smsService');
@@ -166,6 +167,11 @@ exports.repayLoan = async (req, res) => {
 // ============================================================
 // 6. Admin: Mark loan as manually disbursed (Phase 1)
 // ============================================================
+// This is the MANUAL path: a staff member sends the money to the member
+// themselves (via M-Pesa app, bank, whatever), then records the receipt
+// here to close the loan out and trigger the member SMS. It stays in
+// place after B2C is live because B2C can fail or be unavailable — see
+// disburseLoan() below for the automatic path.
 exports.markDisbursed = async (req, res) => {
     try {
         const { loanId } = req.params;
@@ -227,6 +233,74 @@ exports.markDisbursed = async (req, res) => {
         });
     } catch (err) {
         console.error('Manual disbursement error:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+
+// ============================================================
+// 6b. Admin: Disburse loan automatically via M-Pesa B2C (Phase 2)
+// ============================================================
+// Distinct from markDisbursed() above. This triggers the automatic payout
+// through Safaricom's B2C API — no staff member sends money manually.
+//
+// IMPORTANT: this endpoint is ASYNCHRONOUS. A 200 response here means
+// "Safaricom accepted the request", not "the member has the money". The
+// loan moves to 'disbursing' and sits there for 5–30 seconds while
+// Safaricom processes the transfer. The real outcome arrives at
+// /webhooks/daraja/b2c/result and resolves the loan — either to
+// 'disbursed' (success, balance incremented, member SMS sent) or back to
+// 'approved' (failure, staff notified).
+//
+// The frontend should show a "Disbursing…" state on the row after this
+// returns, and poll (or wait for the next fetch) until the loan resolves.
+// A staff member clicking Disburse again while the loan is already
+// disbursing will get a 400 explaining that — the service checks the
+// current status before initiating.
+exports.disburseLoan = async (req, res) => {
+    try {
+        const { loanId } = req.params;
+
+        const result = await DisbursementService.disburseLoan(loanId);
+
+        if (!result.success) {
+            // Log the failed attempt. A failed disbursement is as much a
+            // business event as a successful one — if a member complains
+            // they never received their loan, the audit trail needs to
+            // show that staff tried and why it didn't work.
+            await AuditLog.log({
+                actorId: req.user.id,
+                actorUsername: req.user.username,
+                action: 'Attempted B2C disbursement',
+                category: 'loan_decision',
+                targetType: 'loan',
+                targetId: loanId,
+                targetLabel: `loan #${loanId}`,
+                details: `B2C disbursement failed: ${result.message}`,
+            });
+            return res.status(400).json({ error: result.message });
+        }
+
+        // Accepted by Safaricom — loan is now in 'disbursing'
+        const member = await Member.findById(result.loan.member_id);
+        await AuditLog.log({
+            actorId: req.user.id,
+            actorUsername: req.user.username,
+            action: 'Initiated B2C disbursement',
+            category: 'loan_decision',
+            targetType: 'loan',
+            targetId: loanId,
+            targetLabel: member ? `${member.full_name} (loan #${loanId})` : `loan #${loanId}`,
+            details: `Initiated B2C disbursement of KES ${result.loan.principal}. ConversationID: ${result.conversationId}. Awaiting Safaricom confirmation.`,
+        });
+
+        res.json({
+            success: true,
+            message: result.message,
+            loan: result.loan,
+            conversationId: result.conversationId,
+        });
+    } catch (err) {
+        console.error('B2C disbursement error:', err);
         res.status(500).json({ error: 'Server error' });
     }
 };
