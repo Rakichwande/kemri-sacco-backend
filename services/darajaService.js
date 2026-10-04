@@ -1,43 +1,82 @@
 const axios = require('axios');
 require('dotenv').config();
 
-const BASE_URL = process.env.DARAJA_ENV === 'production'
-  ? 'https://api.safaricom.co.ke'
-  : 'https://sandbox.safaricom.co.ke';
+// Shared Daraja environment. Used by STK Push and — in the absence of a
+// B2C-specific override — by B2C too. Read lazily so the module can be
+// required before env vars are set without capturing a stale value.
+function getSharedEnv() {
+  return process.env.DARAJA_ENV === 'production' ? 'production' : 'sandbox';
+}
 
-// In-memory token cache
-let cachedToken = null;
-let tokenExpiry = 0;
+function baseUrlFor(env) {
+  return env === 'production'
+    ? 'https://api.safaricom.co.ke'
+    : 'https://sandbox.safaricom.co.ke';
+}
+
+// Kept for stkPush() below, which targets the shared environment
+// unconditionally. Anything that needs per-call environment selection
+// (currently only B2C) uses baseUrlFor() directly.
+const BASE_URL = baseUrlFor(getSharedEnv());
+
+// Token cache keyed by `${env}:${consumerKey}` so STK Push (shared env,
+// e.g. production) and B2C (potentially a different env with different
+// credentials, e.g. sandbox) hold independent cached tokens.
+//
+// Before this was a single module-level variable, which was fine while
+// both services shared one environment. The moment B2C needed to target
+// sandbox while STK Push stayed on production, a single cache would have
+// one overwriting the other — producing the "Invalid Access Token"
+// (401.002.01) error from Safaricom, because the token in flight was
+// minted against the wrong environment.
+//
+// Each entry: { token, expiresAt }
+const tokenCache = new Map();
 
 /**
- * Get OAuth access token from Daraja
+ * Get OAuth access token from Daraja.
+ *
+ * config is optional. When omitted, uses the shared DARAJA_ENV /
+ * DARAJA_CONSUMER_KEY / DARAJA_CONSUMER_SECRET — the behaviour STK Push
+ * depends on. When provided as { env, consumerKey, consumerSecret }, the
+ * caller targets a specific environment with specific credentials, and
+ * gets its own cached token.
  */
-async function getAccessToken() {
-  // Return cached token if still valid
-  if (cachedToken && Date.now() < tokenExpiry) {
-    return cachedToken;
+async function getAccessToken(config = null) {
+  const env = config?.env || getSharedEnv();
+  const consumerKey = config?.consumerKey || process.env.DARAJA_CONSUMER_KEY;
+  const consumerSecret = config?.consumerSecret || process.env.DARAJA_CONSUMER_SECRET;
+
+  if (!consumerKey || !consumerSecret) {
+    throw new Error(
+      `Missing Daraja consumer credentials for ${env}. ` +
+      `Set DARAJA_CONSUMER_KEY / DARAJA_CONSUMER_SECRET ` +
+      `(or the B2C-specific overrides for a B2C-only environment).`
+    );
+  }
+
+  const cacheKey = `${env}:${consumerKey}`;
+  const cached = tokenCache.get(cacheKey);
+  if (cached && Date.now() < cached.expiresAt) {
+    return cached.token;
   }
 
   try {
-    const consumerKey = process.env.DARAJA_CONSUMER_KEY;
-    const consumerSecret = process.env.DARAJA_CONSUMER_SECRET;
-
-    if (!consumerKey || !consumerSecret) {
-      throw new Error('Missing DARAJA_CONSUMER_KEY or DARAJA_CONSUMER_SECRET in environment');
-    }
-
     const credentials = Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64');
-
     const response = await axios.get(
-      `${BASE_URL}/oauth/v1/generate?grant_type=client_credentials`,
+      `${baseUrlFor(env)}/oauth/v1/generate?grant_type=client_credentials`,
       { headers: { Authorization: `Basic ${credentials}` } }
     );
 
-    cachedToken = response.data.access_token;
-    tokenExpiry = Date.now() + 55 * 60 * 1000; // refresh 5 min before expiry
-    return cachedToken;
+    const token = response.data.access_token;
+    // Refresh 5 minutes before Safaricom's own expiry (typically 1h).
+    tokenCache.set(cacheKey, {
+      token,
+      expiresAt: Date.now() + 55 * 60 * 1000,
+    });
+    return token;
   } catch (error) {
-    console.error('❌ Daraja OAuth error:', error.response?.data || error.message);
+    console.error(`❌ Daraja OAuth error (${env}):`, error.response?.data || error.message);
     throw error;
   }
 }
@@ -63,7 +102,7 @@ function getTimestamp() {
  * requires (12 digits, country code, no leading + or 0).
  *
  * Member phone numbers are validated at registration to accept EITHER
- * 07XXXXXXXX/01XXXXXXXX or 2547XXXXXXXX/254 1XXXXXXXX (see
+ * 07XXXXXXXX/01XXXXXXXX or 2547XXXXXXXX/2541XXXXXXXX (see
  * middleware/validate.js's isValidKenyanPhone) - nothing normalizes them
  * to one consistent stored format. Previously this function only stripped
  * non-digit characters, so a member stored as "0712345678" would be sent
@@ -93,7 +132,10 @@ function normalizeToMsisdn(phoneNumber) {
 }
 
 /**
- * Initiate STK push (M-Pesa payment request)
+ * Initiate STK push (M-Pesa payment request).
+ *
+ * Always targets the shared environment (DARAJA_ENV). B2C runs through
+ * its own service and can point elsewhere.
  */
 async function stkPush({ phoneNumber, amount, accountReference, description }) {
   try {
