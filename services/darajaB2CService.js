@@ -106,7 +106,17 @@ async function b2cPayment({ phoneNumber, amount, remarks, occasion }) {
     const response = await axios.post(
       `${b2cBaseUrl()}/mpesa/b2c/v1/paymentrequest`,
       payload,
-      { headers: { Authorization: `Bearer ${token}` } }
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        // Cap the wait at 8s. The B2C request itself is fast when
+        // Safaricom is healthy, but this call now sits inside the USSD
+        // request handler (Option A: board/staff auto-disburse) — an
+        // un-timed-out request would risk the USSD session expiring on
+        // the member's phone while they wait. If Safaricom hasn't
+        // accepted within 8s, treat it as "not initiated" and let the
+        // loan stay in 'approved' for staff to disburse manually.
+        timeout: 8000,
+      }
     );
 
     // Expected success shape:

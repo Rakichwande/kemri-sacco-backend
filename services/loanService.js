@@ -17,37 +17,6 @@ class LoanService {
     return MAX_ABSOLUTE_LIMIT;
   }
 
-  // Returns { allowed, reason, creditLimit?, member?, activeLoan? }.
-  //
-  // getActiveLoan() matches any loan in pending / approved / disbursed, so
-  // each of those states blocks a new application — but for a different
-  // reason, and the member deserves to know WHICH reason applies to them:
-  //
-  //   pending   — we haven't reviewed it yet; nothing to repay
-  //   approved  — we've said yes but no money has been sent yet
-  //   disbursed — money is in their hands, they owe it
-  //
-  // Before this change the same "You have an active loan of KES X. Clear
-  // it first." message was used for all three, which was nonsensical for
-  // the first two — it told members to repay a loan that hadn't been
-  // funded, and there was no action they could take to unblock themselves.
-  //
-  // IMPORTANT: for pending/approved loans the message references the
-  // PRINCIPAL (what the member applied for), not outstanding_balance.
-  // When a loan is created, outstanding_balance is set to total_repayment
-  // (principal + interest) because that is the amount that will eventually
-  // need to be repaid — but quoting it to the member at the pending stage
-  // reads as if a larger loan than they asked for was created without
-  // their consent. Principal is the number they will recognise from their
-  // own application. For a DISBURSED loan, outstanding_balance IS the
-  // correct figure (interest is now legitimately owed), and that case is
-  // unchanged below.
-  //
-  // NOTE for board/staff: this function does NOT consider is_board_staff.
-  // An active loan in any state still blocks a new application, board
-  // member or not. The auto-approval branch only affects what happens
-  // AFTER canApply() says yes — it does not exempt anyone from the
-  // one-active-loan rule, and it does not change their credit limit.
   static async canApply(memberId) {
     const member = await Member.findById(memberId);
     if (!member) {
@@ -63,9 +32,9 @@ class LoanService {
         reason = `Your loan application for KES ${principalText} is awaiting review. You'll receive an SMS once it is approved.`;
       } else if (activeLoan.status === 'approved') {
         reason = `Your loan of KES ${principalText} has been approved and is awaiting disbursement. You'll receive an SMS once funds are sent.`;
+      } else if (activeLoan.status === 'disbursing') {
+        reason = `Your loan of KES ${principalText} is being disbursed. You'll receive an SMS once funds are in your M-Pesa.`;
       } else {
-        // disbursed — here outstanding_balance is the right concept, since
-        // interest is now part of what they legitimately owe
         const outstandingText = Number(activeLoan.outstanding_balance).toLocaleString();
         reason = `You have an outstanding loan of KES ${outstandingText}. Clear it before applying for another.`;
       }
@@ -96,52 +65,33 @@ class LoanService {
 
   // Apply for a loan.
   //
-  // BOARD/STAFF AUTO-APPROVAL (SACCO policy, 25 Sept 2026):
-  // Members flagged is_board_staff on their member record are approved at
-  // the point of application — no staff review step. Everyone else
-  // follows the unchanged apply → staff-review path.
+  // TWO PATHS, chosen by the member's is_board_staff flag:
   //
-  // The auto-approval is deliberately implemented by creating the loan
-  // as 'pending' and then immediately calling approveLoan() — the same
-  // method a staff member's click would call — rather than by passing
-  // status='approved' to Loan.create(). Two reasons:
+  //   Regular member  → create as 'pending' → staff review (unchanged)
+  //   Board/staff     → create as 'pending' → auto-approve → auto-disburse
+  //                     via M-Pesa B2C, all within this single call
   //
-  //   1. Every side effect of approval (approval SMS, audit trail) happens
-  //      in exactly one place. If a future change adds or removes a step
-  //      from the approval path, board/staff loans inherit it
-  //      automatically — no chance of the two paths drifting apart.
+  // The board/staff path exists so a board or staff member dialing USSD
+  // gets a genuinely instant loan: dial *483*4444#, enter amount, walk
+  // away, receive M-Pesa funds shortly after. No staff click required at
+  // any step — that's SACCO policy agreed 25 Sept 2026.
   //
-  //   2. The 'pending' window is measured in milliseconds and is entirely
-  //      within a single request handler; no other process can interleave
-  //      and observe the intermediate state. The member's USSD session is
-  //      still open when we return the result, so they see only the final
-  //      approved state.
+  // Safety: if the B2C request fails at any point, the loan stays in the
+  // 'approved' state and staff are notified to disburse manually. The
+  // member is never left with a phantom disbursement; the worst case is
+  // that they wait a few minutes longer than expected.
+  //
+  // The auto-approval uses approveLoan() — the same method staff call —
+  // rather than setting status directly, so every side effect of approval
+  // (member SMS, audit trail) lives in one place.
   //
   // MESSAGING: all member SMS and staff notifications for a loan
-  // application are sent from here, not from the caller. The reason is
-  // that this function is the only place that knows whether the loan was
-  // auto-approved or is going to manual review — so it is the only place
-  // that can send exactly one, consistent message. Before this change,
-  // the USSD controller sent the member "your application was received,
-  // we'll notify you" and the service sent "your loan is approved" — two
-  // contradicting SMS arriving a second apart for every board/staff loan.
-  // A future web-based or admin-console loan form now inherits the
-  // correct messaging automatically, without duplicating it.
-  //
-  // The is_board_staff flag is read from the member object canApply()
-  // already loaded — no extra query. Anything other than exactly true
-  // (null, undefined, false) is treated as NOT board/staff: fail-safe
-  // in the direction of the manual review path.
+  // application are sent from here. This function is the only place that
+  // knows whether the loan was auto-approved or went to manual review, so
+  // it is the only place that can send exactly one, consistent message.
+  // The board/staff staff notification fires AFTER the B2C attempt so it
+  // can accurately describe what happened (disbursing vs failed vs ready).
   static async apply(memberId, requestedAmount) {
-    // requestedAmount arrives as whatever the caller sent - a USSD digit
-    // string, JSON from a future web client, etc. Comparing a non-numeric
-    // value with < or > silently coerces to NaN, and EVERY comparison
-    // involving NaN evaluates to false - not an error, not a rejection,
-    // just false. That means a bad amount ("abc", null-as-string, etc.)
-    // would previously sail straight past both the MIN_LOAN_AMOUNT and
-    // creditLimit checks below without tripping either one. Normalizing
-    // and validating up front, before any business-rule check, closes
-    // that gap.
     const amount = Number(requestedAmount);
     if (!Number.isFinite(amount) || amount <= 0) {
       return { success: false, message: 'Invalid loan amount.' };
@@ -162,25 +112,15 @@ class LoanService {
       };
     }
 
-    // Board/staff decision, read from the member record canApply() already
-    // loaded. Strict === true so any unexpected value (null, "1", truthy
-    // string) falls back to the safe manual-review path rather than
-    // granting auto-approval.
     const autoApprove = eligibility.member.is_board_staff === true;
 
-    let loan = await Loan.create({
+    const loan = await Loan.create({
       member_id: memberId,
       principal: amount,
       interest_rate: INTEREST_RATE,
       tenure_months: TENURE_MONTHS,
     });
 
-    // canApply() already checked for an active loan, but that check and
-    // this insert aren't atomic - a second, near-simultaneous application
-    // could have created one in between. Loan.create() returns null in
-    // exactly that case (the database's partial unique index rejected the
-    // insert), so this isn't a bug, it's the rare race actually being
-    // caught rather than silently corrupting data.
     if (!loan) {
       return { success: false, message: 'You already have an active loan. Clear it before applying again.' };
     }
@@ -200,7 +140,6 @@ class LoanService {
     }
 
     // --- Board/staff: auto-approval path ---
-    // approveLoan() sends the loanApproved SMS to the member.
     const approval = await this.approveLoan(
       loan.id,
       'Auto-approved: board/staff (SACCO policy, 25 Sept 2026)'
@@ -209,13 +148,9 @@ class LoanService {
     if (!approval.success) {
       // Should not happen — we just created the loan as 'pending', and
       // approveLoan() only fails when the loan isn't pending or isn't
-      // found. If it ever does, the loan exists and is intact; the
-      // correct outcome is to hand it to staff for manual review rather
-      // than report a failure that would prompt a duplicate application.
-      // Falling back to the regular-member messaging means the member
-      // gets an honest "we'll notify you once reviewed" SMS and the loan
-      // appears in the staff queue, rather than leaving them with an
-      // unexplained silence.
+      // found. If it ever does, fall back to the manual review path so
+      // the member gets a clear "we'll review" SMS and the loan appears
+      // in the staff queue.
       console.error(
         `Auto-approval failed for board/staff member ${memberId} on loan ${loan.id}: ${approval.message}`
       );
@@ -228,32 +163,51 @@ class LoanService {
       };
     }
 
-    // Auto-approved — staff notification is separate from the approval
-    // notification. Staff need to know a loan is ready for disbursement;
-    // they do NOT need to review it. Different template from the regular
-    // path, to reflect that.
-    await this._notifyAutoApprovedStaff(member, loan, ref);
+    // --- Board/staff: attempt immediate B2C disbursement ---
+    //
+    // Required here (in-process require) rather than at the top of the
+    // file, because disbursementService requires smsService and
+    // notificationService — both of which loanService already loads. A
+    // top-level require would create a load-order dependency that could
+    // bite if either service later requires loanService back.
+    const DisbursementService = require('./disbursementService');
+
+    let disbursement = { success: false, message: 'B2C not attempted' };
+    try {
+      disbursement = await DisbursementService.disburseLoan(loan.id);
+    } catch (err) {
+      // disburseLoan() catches its own errors and returns a result object,
+      // so this is a defensive catch for the impossible case.
+      console.error(`Auto-disburse threw unexpectedly for loan ${loan.id}:`, err.message);
+      disbursement = { success: false, message: err.message };
+    }
+
+    // Notify staff with an accurate status: either the disbursement is
+    // in flight, or it failed and needs manual attention.
+    await this._notifyAutoApprovedStaff(member, approval.loan, ref, {
+      disbursementStatus: disbursement.success ? 'disbursing' : 'failed',
+      failureReason: disbursement.success ? null : disbursement.message,
+    });
+
+    if (!disbursement.success) {
+      return {
+        success: true,
+        message: 'Loan automatically approved. Disbursement is pending — our team will complete it shortly.',
+        loan: approval.loan,
+        autoApproved: true,
+        disbursementFailed: true,
+      };
+    }
 
     return {
       success: true,
-      message: 'Loan automatically approved. Disbursement is manual until M-Pesa B2C is approved by Safaricom.',
-      loan: approval.loan,
+      message: 'Loan automatically approved and disbursement initiated. Funds will reach your M-Pesa shortly.',
+      loan: disbursement.loan || approval.loan,
       autoApproved: true,
+      disbursing: true,
     };
   }
 
-  // Notify the member their application was received (manual-review path),
-  // and alert staff that a new application needs review. Private helper
-  // because the auto-approval fallback branch in apply() needs to send
-  // exactly the same messages when approveLoan() unexpectedly fails — the
-  // member experience for "your application is with us" should not depend
-  // on which internal code path produced it.
-  //
-  // Wrapped in try/catch per call: an SMS delivery failure is a loggable
-  // event, not a reason to fail the whole application. sendSMS already
-  // never throws (see its own comment), but the additional catch here
-  // means an unexpected throw from a template function or notification
-  // service still can't abort the caller.
   static async _notifyApplicationReceived(member, loan, ref) {
     try {
       await smsService.sendSMS(
@@ -274,49 +228,40 @@ class LoanService {
     }
   }
 
-  // Notify staff that a board/staff loan was auto-approved and is ready
-  // for disbursement. Sends both SMS and email, matching the regular path
-  // — staff inboxes should not be the place where board/staff and
-  // regular-member loan events look different. The wording in both
-  // templates emphasises "ready for disbursement" so it is not mistaken
-  // for an item needing review.
-  //
-  // All staff are notified, including the applicant if they are staff. The
-  // notification is a record of a SACCO event, not a curated audience —
-  // filtering the applicant out would complicate the notify service for
-  // no real gain, and the applicant already receives their own separate
-  // member-facing confirmation SMS.
-  static async _notifyAutoApprovedStaff(member, loan, ref) {
+  // Staff notification for the board/staff auto-approval path. Called
+  // AFTER the B2C disbursement attempt so the message reflects what
+  // actually happened, rather than firing optimistically before we know.
+  static async _notifyAutoApprovedStaff(member, loan, ref, opts = {}) {
+    const { disbursementStatus, failureReason } = opts;
     try {
       await notificationService.notifyStaff({
-        smsText: smsService.templates.staffLoanAutoApproved(member.full_name, loan.principal, ref),
-        emailContent: emailService.staffTemplates.loanAutoApproved(member.full_name, loan.principal, ref),
+        smsText: smsService.templates.staffLoanAutoApproved(member.full_name, loan.principal, ref, {
+          status: disbursementStatus,
+        }),
+        emailContent: emailService.staffTemplates.loanAutoApproved(member.full_name, loan.principal, ref, {
+          installment: loan.monthly_installment,
+          tenureMonths: loan.tenure_months,
+          memberPhone: member.phone_number,
+          status: disbursementStatus,
+          failureReason,
+        }),
       });
     } catch (notifyErr) {
       console.error('Staff notification for auto-approved loan failed:', notifyErr.message);
     }
   }
 
-  // Approve a pending loan. Called both by staff (manual approval via the
-  // admin console) and by apply() for board/staff auto-approval.
-  //
-  // Sends the loanApproved SMS to the member. Deliberately does NOT notify
-  // staff — the two callers do that themselves, with different messages
-  // (a manual approval notification doesn't make sense; staff just did it).
   static async approveLoan(loanId, adminNotes = '') {
-    // 1. Approve the loan (changes status to 'approved')
     const loan = await Loan.approve(loanId);
     if (!loan) {
       return { success: false, message: 'Loan not found or not in a pending state.' };
     }
 
-    // 2. Get the member details
     const member = await Member.findById(loan.member_id);
     if (!member) {
       return { success: false, message: 'Member not found.' };
     }
 
-    // 4. Send SMS to member (Loan Approved)
     try {
       await smsService.sendSMS(
         member.phone_number,
@@ -359,15 +304,6 @@ class LoanService {
     return { success: true, loan, message: 'Loan rejected.' };
   }
 
-  // Only a DISBURSED loan is repayable. Using getActiveLoan here would let
-  // a member whose loan is still pending or approved trigger a real
-  // repayment via the /api/loans/repay endpoint before any money has moved
-  // to them. getRepayableLoan() filters to status='disbursed' only.
-  //
-  // When there's no disbursed loan but there IS one in flight, surface a
-  // specific, actionable message instead of the previous blunt "no active
-  // loan" - the member knows their application is being processed and
-  // won't assume they need to reapply.
   static async repayLoan(memberId) {
     const activeLoan = await Loan.getRepayableLoan(memberId);
     if (!activeLoan) {
@@ -377,6 +313,9 @@ class LoanService {
       }
       if (inFlight && inFlight.status === 'approved') {
         return { success: false, message: 'Your loan has been approved and is awaiting disbursement.' };
+      }
+      if (inFlight && inFlight.status === 'disbursing') {
+        return { success: false, message: 'Your loan is being disbursed. Please wait for the M-Pesa confirmation.' };
       }
       return { success: false, message: 'No active loan found.' };
     }

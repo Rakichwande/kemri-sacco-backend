@@ -4,10 +4,6 @@ function isConfigured() {
   return !!(process.env.BREVO_API_KEY && process.env.BREVO_SENDER_EMAIL);
 }
 
-// Sends one email via Brevo's REST API. Never throws - returns a result
-// object instead, since a failed/unconfigured email must not block invite
-// creation: the caller always has the invite link to share manually as a
-// fallback, configured or not.
 async function sendEmail({ to, subject, html, text }) {
   if (!isConfigured()) {
     return { sent: false, reason: 'Email is not configured yet (BREVO_API_KEY / BREVO_SENDER_EMAIL not set).' };
@@ -57,33 +53,80 @@ function inviteEmailContent({ inviteLink, role, inviterName }) {
   return { subject, html, text };
 }
 
+// Multi-paragraph staff event email. bodyLine may contain blank-line-
+// separated paragraphs (\n\n) which are rendered as separate HTML <p>
+// tags. This lets a template supply a richer body — a headline sentence,
+// a details block, and an action instruction — without needing its own
+// bespoke HTML wrapper for every new template.
 function staffEventEmail(title, bodyLine) {
   const subject = `KEMRI SACCO Admin: ${title}`;
+  const paragraphs = String(bodyLine)
+    .split(/\n\n+/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+  const htmlBody = paragraphs.map((p) => `<p>${p}</p>`).join('\n      ');
   const html = `
     <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
       <h3 style="color: #1F3D2E;">${title}</h3>
-      <p>${bodyLine}</p>
-      <p style="color: #666; font-size: 0.85em;">Log in to the admin console for details.</p>
+      ${htmlBody}
+      <p style="color: #666; font-size: 0.85em;">Log in to the admin console for the full record.</p>
     </div>
   `;
-  const text = `${title}\n\n${bodyLine}\n\nLog in to the admin console for details.`;
+  const text = `${title}\n\n${paragraphs.join('\n\n')}\n\nLog in to the admin console for the full record.`;
   return { subject, html, text };
 }
 
 const staffTemplates = {
   newMember: (name) =>
     staffEventEmail('New member registered', `${name} has just registered as a SACCO member.`),
+
   loanApplication: (name, amount, ref) =>
-    staffEventEmail('Loan application received', `${name} applied for a loan of KES ${Number(amount).toLocaleString()}. Reference: ${ref}. Awaiting review.`),
-  // Companion to staffLoanApplication above, for the board/staff auto-approval
-  // path. The wording deliberately differs: no review is pending, only
-  // disbursement — so it must not read as an item for the approval queue.
-  // Staff who see this in their inbox should go to the Disbursement Log,
-  // not the Approval Queue.
-  loanAutoApproved: (name, amount, ref) =>
-    staffEventEmail('Board/Staff loan auto-approved', `${name} applied for a loan of KES ${Number(amount).toLocaleString()}. Reference: ${ref}. Auto-approved — ready for disbursement.`),
+    staffEventEmail(
+      'Loan application received',
+      `${name} applied for a loan of KES ${Number(amount).toLocaleString()}.\n\nReference: ${ref}\n\nAwaiting review. Approve or reject from the Approval Queue.`
+    ),
+
+  // Sent when a board/staff loan auto-approves. With Option A, this fires
+  // AFTER the B2C disbursement attempt, so the email can tell staff what
+  // actually happened — not just that a decision was made. The opts object
+  // carries the additional context the earlier two-line version lacked.
+  //
+  //   status = 'disbursing'          B2C accepted, awaiting callback
+  //   status = 'failed'              B2C rejected or transport failed
+  //   status = 'pending_disbursement' B2C not attempted (config missing)
+  loanAutoApproved: (name, amount, ref, opts = {}) => {
+    const { installment, tenureMonths, memberPhone, status, failureReason } = opts;
+
+    const details = [];
+    if (installment) details.push(`Monthly repayment: KES ${Number(installment).toLocaleString()}`);
+    if (tenureMonths) details.push(`Term: ${tenureMonths} months`);
+    if (memberPhone) details.push(`Member phone: ${memberPhone}`);
+
+    const paragraphs = [
+      `${name} applied for a loan of KES ${Number(amount).toLocaleString()}.`,
+    ];
+    if (details.length) paragraphs.push(details.join('\n'));
+    paragraphs.push(`Reference: ${ref}`);
+
+    if (status === 'disbursing') {
+      paragraphs.push(
+        'The loan was auto-approved and M-Pesa B2C disbursement has been initiated. Safaricom will confirm shortly — no action is required. The loan will appear as Disbursed in the log once the callback resolves.'
+      );
+    } else if (status === 'failed') {
+      paragraphs.push(
+        `AUTO-APPROVED, BUT B2C DISBURSEMENT FAILED.${failureReason ? ` Reason: ${failureReason}.` : ''}\n\nThe loan is currently in the Approved state and requires manual disbursement. Open the Disbursement Log to record the M-Pesa receipt manually.`
+      );
+    } else {
+      paragraphs.push('Auto-approved — ready for disbursement. Open the Disbursement Log to trigger the payout.');
+    }
+
+    return staffEventEmail('Board/Staff loan auto-approved', paragraphs.join('\n\n'));
+  },
+
   repayment: (name, amount) =>
     staffEventEmail('Loan repayment received', `A repayment of KES ${Number(amount).toLocaleString()} was received from ${name}.`),
+
   deposit: (name, amount) =>
     staffEventEmail('Deposit received', `A deposit of KES ${Number(amount).toLocaleString()} was received from ${name}.`),
 };

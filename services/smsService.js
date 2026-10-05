@@ -70,13 +70,32 @@ const templates = {
     `KEMRI SACCO Admin: Loan application ${formatKES(amount)} from ${name}. Ref: ${ref}. Awaiting review.`,
 
   // Sent when a board/staff member's loan auto-approves at apply time.
-  // Different from staffLoanApplication above, which is for the regular
-  // manual-review path — the wording reflects that no review is needed,
-  // only disbursement. Without this, staff would receive "Awaiting review"
-  // for a loan that has already been approved, which invites them to go
-  // looking for something in the queue that isn't there.
-  staffLoanAutoApproved: (name, amount, ref) =>
-    `KEMRI SACCO Admin: Board/Staff loan ${formatKES(amount)} from ${name} (Ref: ${ref}) auto-approved. Ready for disbursement.`,
+  // With Option A (25 Sept policy), auto-approval triggers an immediate
+  // B2C disbursement attempt in the same USSD call, so this notification
+  // fires AFTER that attempt — not before. The opts.status therefore
+  // describes the actual disbursement outcome, not a guess:
+  //
+  //   status = 'disbursing'  B2C accepted, callback coming, no action needed
+  //   status = 'failed'      B2C rejected or transport error, staff must
+  //                          disburse manually from the Disbursement Log
+  //   status absent/other    auto-approved but B2C not attempted (rare —
+  //                          e.g. B2C credentials not yet configured)
+  //
+  // Without this branching, staff would receive "Ready for disbursement"
+  // for a loan that already has money moving to the member's phone, which
+  // invites them to click a button that would double-disburse.
+  staffLoanAutoApproved: (name, amount, ref, opts = {}) => {
+    const { status } = opts;
+    let closing;
+    if (status === 'disbursing') {
+      closing = 'Auto-approved, B2C disbursement initiated. No action needed.';
+    } else if (status === 'failed') {
+      closing = 'Auto-approved, but B2C FAILED — manual disbursement required.';
+    } else {
+      closing = 'Auto-approved — ready for disbursement.';
+    }
+    return `KEMRI SACCO Admin: Board/Staff loan ${formatKES(amount)} from ${name} (Ref: ${ref}). ${closing}`;
+  },
 
   staffRepayment: (name, amount) =>
     `KEMRI SACCO Admin: Repayment of ${formatKES(amount)} received from ${name}.`,

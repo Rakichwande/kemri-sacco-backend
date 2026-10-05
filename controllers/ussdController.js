@@ -366,18 +366,33 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
     const { loan } = result;
     const ref = `LN-${String(loan.id).padStart(5, '0')}`;
 
-    // Two different narratives, chosen by what apply() decided. The
-    // board/staff path auto-approves at apply time; everyone else goes to
-    // staff review. The opening and closing lines must match reality or
-    // the member sees one thing on screen and another in the SMS they
-    // receive a second later.
+    // FOUR possible outcomes, each with its own opening and closing line.
+    // They must reflect what actually happened, because the member sees
+    // this screen for a few seconds and then receives an SMS — any
+    // mismatch between the two reads as a bug.
     //
-    // When auto-approval fell back to the manual path (autoApprovalFailed),
-    // autoApproved is undefined, so the summary correctly reads as the
-    // regular "awaiting review" message - matching the pending state the
-    // loan is actually in, and the "we'll review" SMS the member receives.
-    const opening = result.autoApproved ? 'Loan approved' : 'Loan application received';
-    const closing = result.autoApproved ? 'Disbursement shortly.' : 'Awaiting SACCO review.';
+    //   disbursing           board/staff, auto-approved, B2C accepted —
+    //                        money is on the way
+    //   disbursementFailed   board/staff, auto-approved, but B2C rejected
+    //                        or errored — staff will disburse manually
+    //   autoApproved         board/staff, auto-approved, B2C not attempted
+    //                        (rare; e.g. B2C credentials not yet configured)
+    //   (none of the above)  regular member, awaiting staff review
+    let opening;
+    let closing;
+    if (result.disbursing) {
+      opening = 'Loan approved';
+      closing = 'Funds on the way to your M-Pesa.';
+    } else if (result.disbursementFailed) {
+      opening = 'Loan approved';
+      closing = 'Our team will complete this shortly.';
+    } else if (result.autoApproved) {
+      opening = 'Loan approved';
+      closing = 'Disbursement shortly.';
+    } else {
+      opening = 'Loan application received';
+      closing = 'Awaiting SACCO review.';
+    }
 
     const summary =
       `${opening}: KES ${Number(loan.principal).toLocaleString()}\n` +
@@ -411,20 +426,30 @@ async function handleRepayLoan(phoneNumber, steps, sessionId) {
   const remaining = pinCheck.remainingSteps;
 
   // Only a DISBURSED loan is repayable — see getRepayableLoan()'s comment
-  // in models/Loan.js. A pending or approved loan exists but no money has
-  // moved to the member yet, so there is nothing to repay.
+  // in models/Loan.js. A pending, approved, or disbursing loan exists but
+  // no money has reached the member's M-Pesa yet, so there is nothing to
+  // repay.
   const repayableLoan = await Loan.getRepayableLoan(member.id);
 
   if (!repayableLoan) {
-    // Distinguish the two non-repayable states so the member gets a clear,
+    // Distinguish the non-repayable states so the member gets a clear,
     // actionable message rather than the previous misleading "no
     // outstanding loan" when they actually have an application in flight.
+    //
+    // The 'disbursing' case matters under Option A: a board/staff member
+    // who dials again within ~30 seconds of their original application may
+    // hit the window between B2C acceptance and the result callback.
+    // Without this branch the fallback would say "no outstanding loan",
+    // which reads as if their application had vanished.
     const inFlightLoan = await Loan.getActiveLoan(member.id);
     if (inFlightLoan && inFlightLoan.status === 'pending') {
       return 'END Your loan application is still awaiting approval. You will receive an SMS once it is reviewed.';
     }
     if (inFlightLoan && inFlightLoan.status === 'approved') {
       return 'END Your loan has been approved and is awaiting disbursement. You will receive an SMS once funds are sent.';
+    }
+    if (inFlightLoan && inFlightLoan.status === 'disbursing') {
+      return 'END Your loan is being disbursed to your M-Pesa right now. You will receive an SMS once the funds arrive.';
     }
     return 'END You have no outstanding loan to repay.';
   }
