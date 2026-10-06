@@ -4,6 +4,7 @@ const Loan = require('../models/Loan');
 const Withdrawal = require('../models/Withdrawal');
 const paymentService = require('../services/paymentService');
 const LoanService = require('../services/loanService');
+const DisbursementService = require('../services/disbursementService');
 const smsService = require('../services/smsService');
 const UssdSession = require('../models/UssdSession');
 const notificationService = require('../services/notificationService');
@@ -572,16 +573,24 @@ async function handleChangePin(phoneNumber, steps) {
 // ============================================================
 // 8. WITHDRAW (PIN required)
 // ============================================================
-// IMPORTANT: this creates a withdrawal REQUEST, not an instant payout.
-// This system has no Safaricom B2C (Business-to-Customer) integration -
-// the same reason loan disbursement is a manual staff action today (see
-// services/loanService.js's approveLoan message: "Disbursement is manual
-// until M-Pesa B2C is approved by Safaricom"). A member's money does not
-// move the moment they complete this menu; a staff member sees the
-// request in the admin portal, sends the M-Pesa payment themselves, and
-// marks it processed. Once B2C is approved, this is the natural place to
-// wire in an automatic payout - the request/approval shape here doesn't
-// need to change, only what happens after the request is created.
+// Withdrawals support two payout paths, selected by amount:
+//
+//   ≤ INSTANT_WITHDRAWAL_LIMIT (KES 5,000 by default)
+//     Attempts an immediate M-Pesa B2C payout. If B2C accepts, the
+//     withdrawal moves to 'disbursing' and resolves via webhook callback
+//     — the member receives their money within ~30 seconds without any
+//     staff involvement.
+//
+//   > INSTANT_WITHDRAWAL_LIMIT
+//     Queued as a pending request for staff processing, unchanged from
+//     the original design. Staff send the payout manually and mark it
+//     processed via the admin console.
+//
+// Fallback behaviour: if an instant attempt fails for any reason
+// (Safaricom unreachable, B2C wallet float insufficient, config issue),
+// the withdrawal simply stays 'pending' and appears in the staff queue.
+// The member's request is never lost — worst case, staff process it a
+// few minutes later as they would for a large withdrawal.
 async function handleWithdraw(phoneNumber, steps, sessionId) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) {
@@ -594,7 +603,7 @@ async function handleWithdraw(phoneNumber, steps, sessionId) {
 
   const existingPending = await Withdrawal.getPendingForMember(member.id);
   if (existingPending) {
-    return `END You already have a pending withdrawal request of KES ${Number(existingPending.amount).toLocaleString()}. Please wait for it to be processed.`;
+    return `END You already have a withdrawal of KES ${Number(existingPending.amount).toLocaleString()} in progress. Please wait for it to complete.`;
   }
 
   const savingsBalance = await Payment.getMemberBalance(member.id);
@@ -618,9 +627,39 @@ async function handleWithdraw(phoneNumber, steps, sessionId) {
     // this check is just a fast, friendly rejection for the common case.
     const withdrawal = await Withdrawal.create({ member_id: member.id, amount });
     if (!withdrawal) {
-      return 'END You already have a pending withdrawal request. Please wait for it to be processed.';
+      return 'END You already have a withdrawal request in progress. Please wait for it to complete.';
     }
 
+    // Decide the payout path. The threshold constant lives on the
+    // DisbursementService class so the same value is used by every caller.
+    const isInstantEligible = amount <= DisbursementService.INSTANT_WITHDRAWAL_LIMIT;
+
+    if (isInstantEligible) {
+      // Attempt instant payout. The service itself also enforces the
+      // threshold, so even if this check is somehow bypassed the amount
+      // cap still holds — this check just avoids a pointless call.
+      const instantResult = await DisbursementService.disburseWithdrawal(withdrawal.id);
+
+      if (instantResult.success) {
+        // Withdrawal is now 'disbursing'. The B2C result callback will
+        // send the member their completion SMS (with the M-Pesa receipt)
+        // and notify staff when Safaricom confirms. We do NOT send an SMS
+        // here — that would duplicate the callback's message.
+        return `END Instant withdrawal of KES ${amount.toLocaleString()} initiated. Funds will reach your M-Pesa shortly.`;
+      }
+
+      // Instant attempt failed at request time — the withdrawal is still
+      // 'pending' because the service only moves it to 'disbursing' on
+      // accept. Log the reason and fall through to the queue path so the
+      // member's request isn't lost.
+      console.warn(
+        `Instant withdrawal attempt failed for member ${member.id}, withdrawal ${withdrawal.id}: ${instantResult.message}`
+      );
+    }
+
+    // Queue path — either the amount is above the threshold, or the
+    // instant attempt failed at request time. Send the standard
+    // "request received" SMS and alert staff.
     try {
       await smsService.sendSMS(phoneNumber, smsService.templates.withdrawalRequested(member.full_name, amount));
     } catch (smsErr) {
@@ -638,7 +677,15 @@ async function handleWithdraw(phoneNumber, steps, sessionId) {
       console.error('Staff withdrawal-request SMS failed (request still recorded):', staffSmsErr.message);
     }
 
-    return `END Withdrawal request of KES ${amount.toLocaleString()} received. We will process it and contact you once complete. This is not instant.`;
+    // Two possible closing messages, depending on context:
+    //   - Above threshold: the queuing is expected; standard message.
+    //   - Below threshold but instant attempt failed: the member expected
+    //     instant, so acknowledge the delay and reassure them it's queued.
+    const closingMessage = isInstantEligible
+      ? `We could not complete your instant withdrawal right now. Your request of KES ${amount.toLocaleString()} is queued - our team will process it shortly.`
+      : `Withdrawal request of KES ${amount.toLocaleString()} received. We will process it and contact you once complete.`;
+
+    return `END ${closingMessage}`;
   }
 
   return 'END Invalid input. Please dial again.';
