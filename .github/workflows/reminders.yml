@@ -1,0 +1,34 @@
+name: Loan Reminders
+
+# Runs once a day at 09:00 East Africa Time (06:00 UTC).
+#
+# GitHub cron uses UTC. EAT is UTC+3 year-round (Kenya does not observe
+# DST), so 09:00 EAT = 06:00 UTC. If the offset ever changes, adjust the
+# hour in the cron expression accordingly.
+#
+# Scheduled workflows are automatically paused after 60 days of repo
+# inactivity. Any push to the repo resets the clock. If reminders
+# mysteriously stop, check the Actions tab in GitHub for a pause banner.
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  # workflow_dispatch allows manually triggering the job from the GitHub UI.
+  # Useful for testing after a deploy, without waiting for the next 09:00.
+  workflow_dispatch:
+
+jobs:
+  run-reminders:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger daily reminder job
+        run: |
+          response=$(curl -sS -X POST \
+            https://kemri-sacco-backend.onrender.com/internal/run-reminders \
+            -H "Content-Type: application/json" \
+            -H "X-Reminder-Secret: ${{ secrets.REMINDER_SECRET }}" \
+            -w "\n__HTTP_STATUS__%{http_code}")
+          echo "$response"
+          if [[ "$response" != *"__HTTP_STATUS__200"* ]]; then
+            echo "❌ Reminder job did not return 200"
+            exit 1
+          fi

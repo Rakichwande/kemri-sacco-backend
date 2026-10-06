@@ -29,7 +29,22 @@ CREATE TABLE IF NOT EXISTS loans (
   b2c_conversation_id VARCHAR(64),
   next_payment_due DATE,
   purpose TEXT DEFAULT 'General loan',
-  admin_notes TEXT
+  admin_notes TEXT,
+  -- Reminder cadence tracking. Set by services/reminderService.js; never
+  -- written by anything else. Nulls mean "no reminder has been sent yet
+  -- for this loan" - a fresh disbursement starts clean.
+  --
+  -- last_member_reminder_at: the most recent reminder sent TO the member
+  --   (mid-month, end-of-month, or day-3 overdue - all share this column).
+  --   The reminder service checks whether this is today's date before
+  --   sending, so a duplicate call (e.g. GitHub Actions retry) cannot
+  --   double-send.
+  --
+  -- last_staff_alert_at: the most recent overdue alert sent TO staff.
+  --   Kept separate from the member column so a staff alert and a member
+  --   reminder on the same day don't interfere with each other.
+  last_member_reminder_at TIMESTAMP,
+  last_staff_alert_at TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_loans_member_id ON loans(member_id);
@@ -48,6 +63,17 @@ ALTER TABLE loans ADD COLUMN IF NOT EXISTS disbursing_at TIMESTAMP;
 ALTER TABLE loans ADD COLUMN IF NOT EXISTS b2c_conversation_id VARCHAR(64);
 CREATE UNIQUE INDEX IF NOT EXISTS loans_b2c_conversation_id_unique
   ON loans (b2c_conversation_id) WHERE b2c_conversation_id IS NOT NULL;
+`;
+
+// Reminder-tracking columns. Added via ALTER for existing deployments; also
+// in CREATE TABLE above for fresh databases. The partial index on
+// (next_payment_due) WHERE status='disbursed' lets the reminder service's
+// "which loans are due soon" query stay fast as the loan book grows.
+const addReminderColumnsQuery = `
+ALTER TABLE loans ADD COLUMN IF NOT EXISTS last_member_reminder_at TIMESTAMP;
+ALTER TABLE loans ADD COLUMN IF NOT EXISTS last_staff_alert_at TIMESTAMP;
+CREATE INDEX IF NOT EXISTS idx_loans_disbursed_due
+  ON loans (next_payment_due) WHERE status = 'disbursed';
 `;
 
 // LoanService.canApply() checks "does this member already have an active
@@ -91,6 +117,7 @@ async function init() {
   await db.query(createLoansTableQuery);
   await db.query(addRejectedAtColumnQuery);
   await db.query(addB2CColumnsQuery);
+  await db.query(addReminderColumnsQuery);
   await db.query(enforceOneActiveLoanPerMemberQuery);
 }
 
@@ -330,6 +357,13 @@ async function rollbackDisbursing(loan_id, reason = '') {
 // loan was manually disbursed and records the staff-entered M-Pesa
 // receipt. source='b2c' does the same but with a different note, using
 // the TransactionReceipt Safaricom returned in the callback.
+//
+// Also sets next_payment_due to one month from the disbursement date, which
+// starts the reminder clock. This is a FIXED schedule — variable repayments
+// (a member paying KES 500 one month, KES 400 the next) change what's PAID,
+// not when payments are expected. The reminder service uses this date both
+// to know when reminders should start and to compute the "amount expected
+// by now" for the on-track/behind tolerance.
 async function markDisbursed(loan_id, mpesa_receipt = null, source = 'manual') {
   const client = await db.pool.connect();
   try {
@@ -355,6 +389,7 @@ async function markDisbursed(loan_id, mpesa_receipt = null, source = 'manual') {
       `UPDATE loans 
        SET status = 'disbursed', 
            disbursed_at = NOW(),
+           next_payment_due = (NOW() + INTERVAL '1 month')::date,
            admin_notes = COALESCE(admin_notes, '') || $3 || $2
        WHERE id = $1 
        RETURNING *`,
@@ -523,6 +558,45 @@ async function findPending() {
   return result.rows;
 }
 
+// --- Reminder support ---
+
+// Every currently-disbursed loan with its member's name and phone number,
+// in one query. The reminder service iterates this list each day and
+// decides per-loan what (if anything) needs to be sent. Includes the
+// reminder-tracking columns so the service can check "already sent today?"
+// without a second round-trip per loan.
+async function findAllDisbursedForReminders() {
+  const result = await db.query(
+    `SELECT
+       l.id, l.member_id, l.principal, l.monthly_installment,
+       l.outstanding_balance, l.amount_paid, l.tenure_months,
+       l.disbursed_at, l.next_payment_due,
+       l.last_member_reminder_at, l.last_staff_alert_at,
+       ${REFERENCE_SQL} AS reference,
+       m.full_name, m.phone_number
+     FROM loans l
+     JOIN members m ON l.member_id = m.id
+     WHERE l.status = 'disbursed'
+     ORDER BY l.next_payment_due ASC`
+  );
+  return result.rows;
+}
+
+// Record that a reminder was sent, so a duplicate call (e.g. a GitHub
+// Actions retry, or someone manually triggering the workflow twice) does
+// not double-send the same reminder. Called after each successful send.
+//
+// kind='member' updates last_member_reminder_at (used by mid-month,
+//   end-of-month, and day-3 overdue reminders).
+// kind='staff'  updates last_staff_alert_at (used by day-6 alerts).
+async function markReminderSent(loan_id, kind) {
+  const column = kind === 'staff' ? 'last_staff_alert_at' : 'last_member_reminder_at';
+  await db.query(
+    `UPDATE loans SET ${column} = NOW() WHERE id = $1`,
+    [loan_id]
+  );
+}
+
 module.exports = {
   init,
   create,
@@ -542,4 +616,6 @@ module.exports = {
   getStatementLines,
   REFERENCE_SQL,
   getRepayableLoan,
+  findAllDisbursedForReminders,
+  markReminderSent,
 };

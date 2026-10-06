@@ -116,6 +116,14 @@ app.use('/api/system-health', require('./routes/systemHealth'));
 // ----- WITHDRAWAL ROUTES (NEW) -----
 app.use('/api/withdrawals', require('./routes/withdrawals'));
 
+// ----- INTERNAL ROUTES (scheduled jobs) -----
+// Called by GitHub Actions, not by users. Auth is a shared-secret header
+// (X-Reminder-Secret) instead of a JWT because the caller is a scheduled
+// job with no user account. Mounted under /internal to keep it visually
+// and semantically separate from the /api namespace that the portal and
+// USSD callers use.
+app.use('/internal', require('./routes/internal'));
+
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 

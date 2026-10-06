@@ -68,6 +68,12 @@ function normalizePhone(phoneNumber) {
 //  Every template is byte-for-byte identical to the previous version.
 //  No message text has changed — members see the same wording, only the
 //  sender ID on their phone changes (Kemri_Sacco instead of AFRICASTKNG).
+//
+//  Reminder templates added for the loan reminder system. Those use plain
+//  hyphens and standard characters only — no em dashes — because an em
+//  dash forces the whole message into UCS-2 encoding, splitting it into
+//  multiple SMS segments and tripling the per-message cost. Keep it that
+//  way for every new template added here.
 // ─────────────────────────────────────────────────────────────────────────
 
 const formatKES = (amount) => `KES ${Number(amount).toLocaleString()}`;
@@ -127,6 +133,66 @@ const templates = {
 
   staffWithdrawalRequest: (name, amount) =>
     `KEMRI SACCO Admin: Withdrawal request of ${formatKES(amount)} from ${name}. Awaiting processing.`,
+
+  // ───────────────────────────────────────────────────────────────────────
+  //  Loan reminders
+  //
+  //  Sent by services/reminderService.js on the schedule defined there.
+  //  Five member-facing and two staff-facing variants, chosen per loan per
+  //  day based on where the member is against their repayment schedule.
+  //
+  //  Tone progression:
+  //    Mid-month       informational — a gentle "here's your balance"
+  //    End-of-month    positive if on track, factual if behind
+  //    Day-3 overdue   firmer, still courteous
+  //    Day-6 staff     internal — names the member so staff can act
+  // ───────────────────────────────────────────────────────────────────────
+
+  // Mid-month reminder (15th of every month). Informational only — no
+  // action implied, no pressure. Designed to keep the balance visible so
+  // month-end doesn't come as a surprise. Sent to every member with an
+  // active disbursed loan regardless of their repayment status.
+  loanReminderMidMonth: (name, balance, paid) =>
+    `KEMRI SACCO: Hi ${name}, your loan balance is ${formatKES(balance)}. You have paid ${formatKES(paid)} so far. Pay anytime via *483*4444#.`,
+
+  // End-of-month reminder, on-track variant (last day of month). Sent when
+  // the member's cumulative payments are within the 1-instalment tolerance
+  // of their schedule. Positive framing — reinforces the behaviour rather
+  // than nagging.
+  loanReminderEndMonthOnTrack: (name, balance) =>
+    `KEMRI SACCO: End-of-month check-in. Loan balance: ${formatKES(balance)}. You are on track - thank you for keeping up with your repayments.`,
+
+  // End-of-month reminder, behind variant (last day of month). Sent when
+  // the member has fallen more than 1 instalment behind their cumulative
+  // schedule. Names the gap amount so the number is actionable rather
+  // than abstract.
+  loanReminderEndMonthBehind: (name, balance, amountBehind) =>
+    `KEMRI SACCO: End-of-month check-in. Loan balance: ${formatKES(balance)}. You are ${formatKES(amountBehind)} behind schedule. Please pay via *483*4444#.`,
+
+  // Day-3 overdue nudge. Only fires when the member was behind at month
+  // end and still behind on the 3rd. Firmer than the end-of-month
+  // reminder but still courteous — this is the last member-facing
+  // reminder before staff get involved at day 6.
+  loanOverdueDay3: (name, amountBehind) =>
+    `KEMRI SACCO: You are ${formatKES(amountBehind)} behind on your loan repayment. Please pay via *483*4444# to avoid further reminders.`,
+
+  // Staff alert at day 6 — the member is still behind despite the day-3
+  // nudge. Names the member, their loan reference, and the shortfall in
+  // one message so staff can act without first opening the portal.
+  staffLoanOverdueAlert: (name, reference, amountBehind) =>
+    `KEMRI SACCO Admin: ${name} is ${formatKES(amountBehind)} behind on loan ${reference}. 6 days past month-end - consider calling.`,
+
+  // Monday morning digest. Only sent when there's something to report —
+  // a digest with no content wastes an SMS. The service checks the counts
+  // before calling this; the function itself just formats.
+  staffWeeklyDigest: (dueCount, dueTotal, overdueCount) => {
+    const duePart = dueCount > 0
+      ? `${dueCount} loan${dueCount > 1 ? 's' : ''} due this week (${formatKES(dueTotal)})`
+      : null;
+    const overduePart = overdueCount > 0 ? `${overdueCount} overdue` : null;
+    const parts = [duePart, overduePart].filter(Boolean).join(' | ');
+    return `KEMRI SACCO Admin: ${parts}. Log in to the portal for details.`;
+  },
 };
 
 // ─────────────────────────────────────────────────────────────────────────
