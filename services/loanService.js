@@ -252,7 +252,7 @@ class LoanService {
   }
 
   static async approveLoan(loanId, adminNotes = '') {
-    const loan = await Loan.approve(loanId);
+    const loan = await Loan.approve(loanId, adminNotes);
     if (!loan) {
       return { success: false, message: 'Loan not found or not in a pending state.' };
     }

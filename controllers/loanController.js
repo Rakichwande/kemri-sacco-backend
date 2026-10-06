@@ -188,7 +188,11 @@ exports.markDisbursed = async (req, res) => {
             return res.status(404).json({ error: 'Loan not found' });
         }
 
-        // 2. Get member details for SMS
+        // 2. Get member details for SMS. Fetched AFTER markDisbursed()
+        //    above, so member.total_outstanding_balance already includes
+        //    this loan's contribution — that's the number the SMS should
+        //    show, because it's what the member actually owes across all
+        //    their loans.
         const member = await Member.findById(loan.member_id);
         if (!member) {
             return res.status(404).json({ error: 'Member not found' });
@@ -202,12 +206,18 @@ exports.markDisbursed = async (req, res) => {
                 year: 'numeric'
             });
             
+            // Third argument is the member's running outstanding total,
+            // NOT this loan's total_repayment. The two are the same only
+            // for a member with a single lifetime loan; for anyone with
+            // history, sending loan.total_repayment understated what they
+            // owe. Matches the B2C path (disbursementService.handleB2CResult),
+            // which already re-read the member for the same reason.
             await smsService.sendSMS(
                 member.phone_number,
                 smsService.templates.loanDisbursed(
                     member.full_name,
                     loan.principal,
-                    loan.total_repayment,
+                    member.total_outstanding_balance,
                     disbursementDate
                 )
             );

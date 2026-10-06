@@ -240,7 +240,11 @@ async function findByB2CConversationId(conversationId) {
 // money has moved yet - approving is a staff decision, not a cash event.
 // The balance increment happens in markDisbursed() below, at the moment
 // funds are physically sent.
-async function approve(loan_id) {
+//
+// adminNotes is appended to any existing notes rather than replacing them,
+// using the same convention as reject() — a loan that had prior notes
+// (e.g. from a B2C rollback) doesn't lose them when approved later.
+async function approve(loan_id, adminNotes = '') {
   const client = await db.pool.connect();
   try {
     await client.query('BEGIN');
@@ -256,10 +260,13 @@ async function approve(loan_id) {
 
     const updateRes = await client.query(
       `UPDATE loans 
-       SET status = 'approved', approved_at = NOW() 
+       SET status = 'approved',
+           approved_at = NOW(),
+           admin_notes = COALESCE(admin_notes, '') ||
+             CASE WHEN $2 <> '' THEN ' | Approved: ' || $2 ELSE ' | Approved' END
        WHERE id = $1 
        RETURNING *`,
-      [loan_id]
+      [loan_id, adminNotes]
     );
 
     await client.query('COMMIT');
@@ -515,7 +522,11 @@ async function getStatementLines(member_id) {
        'disbursement' AS type,
        disbursed_at AS date,
        principal AS amount,
-       id::text AS reference,
+       -- Display format matches the reference everywhere else in the UI
+       -- (LN-00019 rather than the raw internal id of 19). Previously the
+       -- id was returned as-is, which made statement rows inconsistent
+       -- with the Directory, Disbursement Log, and Performance page.
+       'LN-' || LPAD(id::text, 5, '0') AS reference,
        status
      FROM loans
      WHERE member_id = $1 AND disbursed_at IS NOT NULL
