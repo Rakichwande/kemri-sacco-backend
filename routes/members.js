@@ -16,10 +16,21 @@ router.get('/:id/statement', authenticate, requirePermission('members:read'), as
       return res.status(404).json({ error: 'Member not found' });
     }
 
-    const [deposits, disbursements, withdrawals] = await Promise.all([
+    // Four queries in parallel — the three statement-line sources plus the
+    // member's current active loan. The active loan drives the "Loan
+    // Outstanding" and "Net Position" figures at the top of the statement
+    // modal, which is what staff and members actually want to see when
+    // checking a member's position. Without it, the statement only showed
+    // savings — hiding the member's debt entirely.
+    const [deposits, disbursements, withdrawals, activeLoan] = await Promise.all([
       Payment.getStatementLines(member.id),
       Loan.getStatementLines(member.id),
       Withdrawal.getStatementLines(member.id),
+      // getActiveLoan() returns a pending/approved/disbursing/disbursed
+      // loan — i.e. anything not yet repaid or rejected. Returns undefined
+      // for a member with no current obligation, which the response
+      // reflects as activeLoan: null.
+      Loan.getActiveLoan(member.id),
     ]);
 
     // Merge and sort chronologically. Running balance only reflects
@@ -46,7 +57,31 @@ router.get('/:id/statement', authenticate, requirePermission('members:read'), as
         full_name: member.full_name,
         reference: member.reference,
         phone_number: member.phone_number,
+        // The member's running total across all active loans. Maintained
+        // by markDisbursed() (increment on disbursement) and
+        // applyRepayment() (decrement on repayment). Returned as a Number
+        // so the frontend never has to guess the type — pg returns
+        // INTEGER columns as strings in some configurations, and the modal
+        // does arithmetic on this value (Net Position = savings − outstanding).
+        total_outstanding_balance: Number(member.total_outstanding_balance || 0),
+        credit_limit: member.credit_limit,
       },
+      // Active loan detail, or null. The frontend renders a compact panel
+      // when present and omits it entirely when null, so savers without
+      // loans get a clean statement.
+      activeLoan: activeLoan
+        ? {
+            id: activeLoan.id,
+            reference: activeLoan.reference,
+            principal: Number(activeLoan.principal),
+            outstanding_balance: Number(activeLoan.outstanding_balance),
+            amount_paid: Number(activeLoan.amount_paid),
+            monthly_installment: Number(activeLoan.monthly_installment),
+            tenure_months: activeLoan.tenure_months,
+            status: activeLoan.status,
+            disbursed_at: activeLoan.disbursed_at,
+          }
+        : null,
       openingBalance: 0, // no pre-system balances - see models/Member.js's bulkImport note
       closingBalance: runningBalance,
       lines: withBalance,
