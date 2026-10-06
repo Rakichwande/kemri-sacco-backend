@@ -23,13 +23,27 @@ const smsService = require('./smsService');
 //   Before sending any member reminder, we check whether one was already
 //   sent today. If yes, skip. This makes the endpoint safe to call twice —
 //   e.g. on a GitHub Actions retry — without double-sending.
+//
+// DRY RUN
+//   Every send path checks opts.dryRun first. When true, no SMS goes out
+//   and no money is spent — the intended message is logged to the console
+//   instead. Used by the /internal/run-reminders endpoint's ?dryRun=1
+//   parameter to verify cadence logic without triggering real sends.
 
 class ReminderService {
   // Entry point. Returns a summary of what was sent, which the endpoint
   // returns to GitHub Actions for logging.
-  static async runDaily(today = new Date()) {
+  //
+  //   today — the effective date for scheduling. Defaults to real now;
+  //           overridable via ?testDate= for cadence verification.
+  //   opts  — { dryRun: boolean }. When true, everything computes but
+  //           nothing sends.
+  static async runDaily(today = new Date(), opts = {}) {
+    const { dryRun = false } = opts;
+
     const summary = {
       date: today.toISOString().slice(0, 10),
+      dryRun,
       midMonthSent: 0,
       endMonthSent: 0,
       day3Sent: 0,
@@ -72,8 +86,8 @@ class ReminderService {
           if (this.alreadySentToday(loan.last_member_reminder_at, today)) {
             summary.skipped++;
           } else {
-            await this.sendMidMonth(loan, status);
-            await Loan.markReminderSent(loan.id, 'member');
+            await this.sendMidMonth(loan, status, dryRun);
+            if (!dryRun) await Loan.markReminderSent(loan.id, 'member');
             summary.midMonthSent++;
           }
         }
@@ -82,8 +96,8 @@ class ReminderService {
           if (this.alreadySentToday(loan.last_member_reminder_at, today)) {
             summary.skipped++;
           } else {
-            await this.sendEndOfMonth(loan, status);
-            await Loan.markReminderSent(loan.id, 'member');
+            await this.sendEndOfMonth(loan, status, dryRun);
+            if (!dryRun) await Loan.markReminderSent(loan.id, 'member');
             summary.endMonthSent++;
           }
         }
@@ -92,8 +106,8 @@ class ReminderService {
           if (this.alreadySentToday(loan.last_member_reminder_at, today)) {
             summary.skipped++;
           } else {
-            await this.sendDay3Overdue(loan, status);
-            await Loan.markReminderSent(loan.id, 'member');
+            await this.sendDay3Overdue(loan, status, dryRun);
+            if (!dryRun) await Loan.markReminderSent(loan.id, 'member');
             summary.day3Sent++;
           }
         }
@@ -102,8 +116,8 @@ class ReminderService {
           if (this.alreadySentToday(loan.last_staff_alert_at, today)) {
             summary.skipped++;
           } else {
-            await this.sendDay6StaffAlert(loan, status);
-            await Loan.markReminderSent(loan.id, 'staff');
+            await this.sendDay6StaffAlert(loan, status, dryRun);
+            if (!dryRun) await Loan.markReminderSent(loan.id, 'staff');
             summary.day6StaffAlertSent++;
           }
         }
@@ -117,7 +131,7 @@ class ReminderService {
 
     if (isMonday && (weeklyDueCount > 0 || weeklyOverdueCount > 0)) {
       try {
-        await this.sendWeeklyDigest(weeklyDueCount, weeklyDueTotal, weeklyOverdueCount);
+        await this.sendWeeklyDigest(weeklyDueCount, weeklyDueTotal, weeklyOverdueCount, dryRun);
         summary.weeklyDigestSent = true;
       } catch (err) {
         console.error('Weekly digest send failed:', err.message);
@@ -146,42 +160,67 @@ class ReminderService {
     return { monthsElapsed, instalmentsDue, threshold, amountPaid, outstanding, behind, amountBehind };
   }
 
-  static async sendMidMonth(loan, status) {
-    await smsService.sendSMS(
-      loan.phone_number,
-      smsService.templates.loanReminderMidMonth(loan.full_name, status.outstanding, status.amountPaid)
+  static async sendMidMonth(loan, status, dryRun) {
+    const message = smsService.templates.loanReminderMidMonth(
+      loan.full_name, status.outstanding, status.amountPaid
     );
+    await this.deliver({ dryRun, to: loan.phone_number, message, logLabel: `mid-month → ${loan.reference}` });
   }
 
-  static async sendEndOfMonth(loan, status) {
+  static async sendEndOfMonth(loan, status, dryRun) {
     const message = status.behind
       ? smsService.templates.loanReminderEndMonthBehind(loan.full_name, status.outstanding, status.amountBehind)
       : smsService.templates.loanReminderEndMonthOnTrack(loan.full_name, status.outstanding);
-    await smsService.sendSMS(loan.phone_number, message);
+    await this.deliver({
+      dryRun,
+      to: loan.phone_number,
+      message,
+      logLabel: `end-of-month (${status.behind ? 'behind' : 'on-track'}) → ${loan.reference}`,
+    });
   }
 
-  static async sendDay3Overdue(loan, status) {
-    await smsService.sendSMS(
-      loan.phone_number,
-      smsService.templates.loanOverdueDay3(loan.full_name, status.amountBehind)
-    );
+  static async sendDay3Overdue(loan, status, dryRun) {
+    const message = smsService.templates.loanOverdueDay3(loan.full_name, status.amountBehind);
+    await this.deliver({ dryRun, to: loan.phone_number, message, logLabel: `day-3 overdue → ${loan.reference}` });
   }
 
-  static async sendDay6StaffAlert(loan, status) {
-    await smsService.notifyStaff(
-      smsService.templates.staffLoanOverdueAlert(loan.full_name, loan.reference, status.amountBehind)
+  static async sendDay6StaffAlert(loan, status, dryRun) {
+    const message = smsService.templates.staffLoanOverdueAlert(
+      loan.full_name, loan.reference, status.amountBehind
     );
+    await this.deliver({ dryRun, to: 'STAFF', message, logLabel: `day-6 staff alert → ${loan.reference}`, isStaff: true });
   }
 
-  static async sendWeeklyDigest(dueCount, dueTotal, overdueCount) {
-    await smsService.notifyStaff(
-      smsService.templates.staffWeeklyDigest(dueCount, dueTotal, overdueCount)
-    );
+  static async sendWeeklyDigest(dueCount, dueTotal, overdueCount, dryRun) {
+    const message = smsService.templates.staffWeeklyDigest(dueCount, dueTotal, overdueCount);
+    await this.deliver({ dryRun, to: 'STAFF', message, logLabel: 'weekly digest', isStaff: true });
+  }
+
+  // Single dispatch helper. Handles both member and staff sends, and the
+  // dry-run branch that short-circuits before smsService is called.
+  //
+  // The dry-run log line deliberately spells out the intended SMS so it
+  // can be eyeballed in the Render logs without needing to match
+  // template functions back to their templates — the whole message text
+  // is on one line.
+  static async deliver({ dryRun, to, message, logLabel, isStaff = false }) {
+    if (dryRun) {
+      console.log(`[DRY RUN] would send (${logLabel}) to ${to}: ${message}`);
+      return;
+    }
+    if (isStaff) {
+      return smsService.notifyStaff(message);
+    }
+    return smsService.sendSMS(to, message);
   }
 
   // Has a reminder of the given kind already been sent today? Null-safe:
   // a loan that has never had a reminder sent returns false, and the
   // reminder fires normally.
+  //
+  // In dry-run mode this still executes — the check reads existing data,
+  // it doesn't write. So a dry-run correctly skips a loan that a real
+  // reminder already touched today.
   static alreadySentToday(timestamp, today) {
     if (!timestamp) return false;
     const sent = new Date(timestamp);
