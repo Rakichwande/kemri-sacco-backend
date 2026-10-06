@@ -3,7 +3,14 @@ const Repayment = require('./Repayment');
 
 // All figures here are derived from real, already-existing data:
 // - members: headcount
-// - payments (status='completed'): total savings held, contributions-by-month
+// - payments (status='completed' AND loan_id IS NULL): total savings held,
+//   contributions-by-month. The loan_id filter matters: the payments table
+//   holds BOTH deposits and loan repayments, distinguished only by whether
+//   loan_id is set. A repayment is money the member is returning to the
+//   SACCO on a loan, NOT a savings contribution — counting it as savings
+//   inflates the headline figure and misrepresents the member's position.
+//   Same convention Member.findAllForDirectory() uses for its
+//   savings_balance column.
 // - loans: outstanding balance, repaid-to-date, pending count, total disbursed
 // - repayments: per-transaction repayment history, for the monthly comparison
 //
@@ -24,15 +31,19 @@ async function getSummary() {
     loansByMonthRows,
   ] = await Promise.all([
     db.query('SELECT COUNT(*)::int AS count FROM members'),
-    db.query(`SELECT COALESCE(SUM(amount), 0)::bigint AS total FROM payments WHERE status = 'completed'`),
+    // Total savings = completed deposits only. Excludes repayments, which
+    // are money coming back on a loan, not savings contributions.
+    db.query(`SELECT COALESCE(SUM(amount), 0)::bigint AS total FROM payments WHERE status = 'completed' AND loan_id IS NULL`),
     db.query(`SELECT COALESCE(SUM(outstanding_balance), 0)::bigint AS total FROM loans WHERE status = 'disbursed'`),
     db.query(`SELECT COALESCE(SUM(amount_paid), 0)::bigint AS total FROM loans`),
     db.query(`SELECT COUNT(*)::int AS count FROM loans WHERE status = 'pending'`),
     db.query(`SELECT COALESCE(SUM(principal), 0)::bigint AS total FROM loans WHERE status IN ('disbursed', 'repaid')`),
+    // Contributions by month — same deposit-only filter as the headline
+    // savings figure above, so the chart's tallies reconcile with the total.
     db.query(`
       SELECT date_trunc('month', created_at) AS month, SUM(amount)::bigint AS total
       FROM payments
-      WHERE status = 'completed' AND created_at >= NOW() - INTERVAL '6 months'
+      WHERE status = 'completed' AND loan_id IS NULL AND created_at >= NOW() - INTERVAL '6 months'
       GROUP BY month
       ORDER BY month
     `),
