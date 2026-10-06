@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const Report = require('../models/Report');
+const AgingService = require('../services/agingService');
 const { authenticate, requirePermission } = require('../middleware/auth');
 
 function validatePeriodParams(req, res) {
@@ -56,6 +57,25 @@ router.get('/financial/export', authenticate, requirePermission('reports:read'),
   } catch (err) {
     console.error('Financial report export error:', err);
     res.status(500).json({ error: 'Failed to export report' });
+  }
+});
+
+// Loan aging report — groups all currently-disbursed loans into buckets
+// by how long the member has been behind on their repayment schedule.
+// No query params: the report always reflects "now." A point-in-time
+// historical aging report would need a snapshot table; not built yet.
+//
+// Returns a bucketed breakdown plus the individual loans in each bucket.
+// The bucket definitions reuse the tolerance logic from reminderService
+// (see services/agingService.js) so staff never see a loan marked
+// "current" here while receiving overdue reminders about it.
+router.get('/aging', authenticate, requirePermission('reports:read'), async (req, res) => {
+  try {
+    const report = await AgingService.getAgingReport();
+    res.json(report);
+  } catch (err) {
+    console.error('Aging report error:', err);
+    res.status(500).json({ error: 'Failed to generate aging report' });
   }
 });
 
