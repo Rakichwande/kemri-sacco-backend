@@ -418,12 +418,21 @@ async function applyRepayment(loan_id, amount, externalClient = null) {
       [newBalance, newAmountPaid, newStatus, isFullyRepaid, loan_id]
     );
 
-    // Update member's outstanding balance
+    // Update member's outstanding balance.
+    //
+    // amount arrives as a STRING like "227.00" — the payments table's
+    // NUMERIC column is returned as a string by the pg driver to preserve
+    // precision. total_outstanding_balance is INTEGER, so passing
+    // "227.00" directly fails with:
+    //   invalid input syntax for type integer: "227.00"
+    // Math.round(Number(...)) converts cleanly — KES amounts are whole
+    // numbers, so rounding is a no-op for legitimate values. Same pattern
+    // markDisbursed() uses for the inverse operation on the same column.
     await client.query(
       `UPDATE members 
        SET total_outstanding_balance = total_outstanding_balance - $1 
        WHERE id = $2`,
-      [amount, loan.member_id]
+      [Math.round(Number(amount)), loan.member_id]
     );
 
     // If fully repaid, increment successful_repayments and update credit
