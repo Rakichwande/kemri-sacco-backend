@@ -92,6 +92,25 @@ router.get('/:id/statement', authenticate, requirePermission('members:read'), as
   }
 });
 
+// Per-member credit performance report — lifetime loan history, on-time
+// repayment tally, savings vs outstanding position. Read-only, gated on
+// the same members:read permission as the statement. Used by the admin
+// portal's Member Performance page.
+//
+// Returns 404 if the member doesn't exist. Otherwise returns the full
+// report — see services/memberPerformanceService.js for the shape.
+router.get('/:id/performance', authenticate, requirePermission('members:read'), async (req, res) => {
+  try {
+    const MemberPerformanceService = require('../services/memberPerformanceService');
+    const report = await MemberPerformanceService.getMemberPerformance(req.params.id);
+    if (!report) return res.status(404).json({ error: 'Member not found' });
+    res.json(report);
+  } catch (err) {
+    console.error('Member performance error:', err);
+    res.status(500).json({ error: 'Failed to fetch member performance' });
+  }
+});
+
 // Public - member self-registration, unchanged
 router.post('/', validateMemberRegistration, memberController.registerMember);
 
