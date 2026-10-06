@@ -109,9 +109,9 @@ const templates = {
     if (status === 'disbursing') {
       closing = 'Auto-approved, B2C disbursement initiated. No action needed.';
     } else if (status === 'failed') {
-      closing = 'Auto-approved, but B2C FAILED — manual disbursement required.';
+      closing = 'Auto-approved, but B2C FAILED - manual disbursement required.';
     } else {
-      closing = 'Auto-approved — ready for disbursement.';
+      closing = 'Auto-approved - ready for disbursement.';
     }
     return `KEMRI SACCO Admin: Board/Staff loan ${formatKES(amount)} from ${name} (Ref: ${ref}). ${closing}`;
   },
