@@ -24,7 +24,7 @@ async function registerMember(req, res) {
     const member = await Member.create({ full_name, id_number, phone_number, nationality, age, employer, scheme });
 
     // SMS is a notification, not a precondition - registration should succeed
-    // even if Africa's Talking is unreachable or unconfigured
+    // even if the SMS provider is unreachable or unconfigured
     try {
       await smsService.sendSMS(phone_number, smsService.templates.applicationReceived(full_name));
     } catch (smsErr) {
@@ -223,17 +223,27 @@ async function setBoardStaff(req, res) {
 // general edit route cannot reach this, and Member.remove() enforces the
 // history check regardless of caller.
 //
-// Response codes, all deliberate:
-//   200 — deleted
+// DELETION RULE:
+//   Financial history (deposits, repayments, disbursed/repaid loans,
+//   disbursing/processed withdrawals) BLOCKS deletion — those records
+//   must survive for audit and reconciliation.
+//
+//   Non-financial records (pending or rejected loan applications,
+//   pending or rejected withdrawal requests) do NOT block deletion.
+//   They are removed alongside the member, since they represent no money
+//   movement and no obligation. This lets staff clean up test entries,
+//   mistaken applications, or abandoned registrations via the admin
+//   console without needing direct database access.
+//
+// Response codes:
+//   200 — deleted (with counts of what else was cleaned up)
 //   404 — member not found (or already deleted)
-//   409 — blocked: member has transaction history; body carries a
-//         breakdown of what blocked it so the UI can show a specific message
+//   409 — blocked: member has financial history; body carries a
+//         breakdown so the UI can show exactly what blocked it
 //   500 — unexpected error
 //
-// EVERY outcome is audit-logged, including blocked attempts. A refused
-// deletion is as worth recording as a successful one — it is evidence the
-// safety check ran, and it lets an auditor later answer "who tried to
-// delete this member and when?" without needing the original request logs.
+// EVERY outcome is audit-logged, including blocked attempts and any
+// non-financial records removed alongside the member.
 async function deleteMember(req, res) {
   try {
     const result = await Member.remove(req.params.id);
@@ -265,6 +275,27 @@ async function deleteMember(req, res) {
       });
     }
 
+    // Build a summary of what was cleaned up alongside the member.
+    // Pending/rejected loan applications and withdrawal requests have no
+    // financial consequence so they were removed with the member — but
+    // the audit trail should record that they existed, so a future reader
+    // can see the full picture of what was deleted and why.
+    const cleanupDetails = [];
+    if (result.removedLoans?.length) {
+      cleanupDetails.push(
+        `${result.removedLoans.length} loan application(s) removed: ${result.removedLoans
+          .map((l) => `LN-${String(l.id).padStart(5, '0')} (${l.status})`)
+          .join(', ')}`
+      );
+    }
+    if (result.removedWithdrawals?.length) {
+      cleanupDetails.push(
+        `${result.removedWithdrawals.length} withdrawal request(s) removed: ids ${result.removedWithdrawals
+          .map((w) => w.id)
+          .join(', ')}`
+      );
+    }
+
     await AuditLog.log({
       actorId: req.user.id,
       actorUsername: req.user.username,
@@ -273,7 +304,9 @@ async function deleteMember(req, res) {
       targetType: 'member',
       targetId: req.params.id,
       targetLabel: `${result.member.full_name} (ref ${result.member.imported_reference || '—'})`,
-      details: 'Permanent deletion — no transaction history on record',
+      details:
+        'Permanent deletion — no financial history on record.' +
+        (cleanupDetails.length ? ' Also removed: ' + cleanupDetails.join('; ') + '.' : ''),
     });
 
     res.json({
@@ -283,6 +316,10 @@ async function deleteMember(req, res) {
         full_name: result.member.full_name,
         reference: result.member.imported_reference,
       },
+      // Counts let the frontend show a more informative confirmation —
+      // "Member deleted. 1 pending loan application was also removed."
+      removedLoans: result.removedLoans?.length || 0,
+      removedWithdrawals: result.removedWithdrawals?.length || 0,
     });
   } catch (err) {
     console.error('Member deletion error:', err);
