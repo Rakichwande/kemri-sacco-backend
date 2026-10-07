@@ -12,10 +12,10 @@ const axios = require('axios');
 //   - The sendSMS(phoneNumber, message) signature
 //   - The { sent, reason } return shape
 //   - The "never throws" contract
-//   - Every template in the templates object
-//   - notifyStaff(message)
+//   - The notifyStaff(message) function
 //
-// Callers are unaffected. This is a transport swap, not an API change.
+// Callers are unaffected by the template overhaul below — every template
+// keeps its existing signature. Only the message text is clearer.
 
 // ─────────────────────────────────────────────────────────────────────────
 //  PROVIDER CONFIGURATION
@@ -37,11 +37,6 @@ function isConfigured() {
 //  form the Daraja normaliser produces, so a member registered with any of
 //  the accepted local formats (0722..., 722..., +254722..., 254 722...)
 //  resolves to the same outgoing value.
-//
-//  Returns null when the input cannot be resolved to a plausible Kenyan
-//  mobile — the caller logs the failure rather than sending a malformed
-//  number to the provider (which would return a generic error with no
-//  useful detail).
 // ─────────────────────────────────────────────────────────────────────────
 
 function normalizePhone(phoneNumber) {
@@ -65,62 +60,180 @@ function normalizePhone(phoneNumber) {
 // ─────────────────────────────────────────────────────────────────────────
 //  SMS TEMPLATES
 //
-//  Every template is byte-for-byte identical to the previous version.
-//  No message text has changed — members see the same wording, only the
-//  sender ID on their phone changes (Kemri_Sacco instead of AFRICASTKNG).
+//  Conventions followed by every message in this file:
 //
-//  Reminder templates added for the loan reminder system. Those use plain
-//  hyphens and standard characters only — no em dashes — because an em
-//  dash forces the whole message into UCS-2 encoding, splitting it into
-//  multiple SMS segments and tripling the per-message cost. Keep it that
-//  way for every new template added here.
+//  1. GSM-7 characters ONLY. No em dashes, smart quotes, or special
+//     symbols. They force the message into UCS-2 encoding, which splits
+//     it into multiple segments and triples the per-message cost. Use
+//     plain hyphens and standard characters.
+//
+//  2. Member messages start with "KEMRI SACCO:" so the brand is visible
+//     even if the carrier truncates the sender name in a preview.
+//
+//  3. Staff messages start with "KEMRI SACCO Admin:" and are dense —
+//     name, amount, reference — so staff can triage from the notification
+//     preview without opening the portal.
+//
+//  4. Aim for under 160 characters. Any message longer than that splits
+//     into 2 segments and doubles the cost. Some messages need to be
+//     longer; those are flagged in comments.
+//
+//  5. Members are addressed by first word of their full name where the
+//     template has access to it. "Hi Joshua, ..." reads better than a
+//     bare statement. Full name is used where the reference matters
+//     (staff notifications, since staff need to disambiguate members).
 // ─────────────────────────────────────────────────────────────────────────
 
 const formatKES = (amount) => `KES ${Number(amount).toLocaleString()}`;
 
+// First word of a full name — "Joshua Rakich Odhiambo" -> "Joshua".
+// Falls back to the full string if no space is present. Used by member
+// templates that want a friendlier greeting without the surname.
+function firstName(fullName) {
+  if (!fullName) return '';
+  return String(fullName).trim().split(/\s+/)[0];
+}
+
 const templates = {
+  // ───────────────────────────────────────────────────────────────────────
+  //  MEMBER-FACING — REGISTRATION
+  // ───────────────────────────────────────────────────────────────────────
+
   applicationReceived: (name) =>
-    `Welcome to KEMRI SACCO, ${name}. Your account is active. Dial *483*4444# to save, check balance, or apply for a loan.`,
+    `Welcome to KEMRI SACCO, ${firstName(name)}. Your account is active. Dial *483*4444# to save, check balance, or apply for a loan.`,
+
+  // ───────────────────────────────────────────────────────────────────────
+  //  MEMBER-FACING — DEPOSITS
+  // ───────────────────────────────────────────────────────────────────────
 
   paymentConfirmed: (name, amount, reference, receipt) =>
-    `KEMRI SACCO: ${formatKES(amount)} deposit received. Receipt: ${receipt}. Ref: ${reference}. Thank you for saving!`,
+    `KEMRI SACCO: Hi ${firstName(name)}, we received your deposit of ${formatKES(amount)}. Receipt: ${receipt}. Your savings balance is updated. Ref: ${reference}.`,
 
   paymentFailed: (name) =>
-    `KEMRI SACCO: Your deposit was not completed. Please try again or visit our office.`,
+    `KEMRI SACCO: Hi ${firstName(name)}, your deposit did not go through. Nothing was deducted. Please try again or visit our office.`,
+
+  // ───────────────────────────────────────────────────────────────────────
+  //  MEMBER-FACING — LOANS
+  // ───────────────────────────────────────────────────────────────────────
 
   loanApplicationReceived: (name, amount, ref) =>
-    `KEMRI SACCO: Loan application of ${formatKES(amount)} received. Ref: ${ref}. We will notify you once reviewed.`,
+    `KEMRI SACCO: Hi ${firstName(name)}, we received your loan application of ${formatKES(amount)}. Ref: ${ref}. We'll review it and SMS you the decision shortly.`,
 
   loanApproved: (name, amount, installment, tenure) =>
-    `KEMRI SACCO: CONGRATULATIONS! Loan of ${formatKES(amount)} approved. Repay ${formatKES(installment)}/month for ${tenure} months. Disbursement pending.`,
+    `KEMRI SACCO: Hi ${firstName(name)}, your loan of ${formatKES(amount)} has been approved. Repay ${formatKES(installment)}/month for ${tenure} months. Funds will be sent to your M-Pesa shortly.`,
 
   loanDisbursed: (name, amount, totalOutstanding, date) =>
-    `KEMRI SACCO: ${formatKES(amount)} loan disbursed to your M-Pesa. Repayment starts ${date}. Outstanding: ${formatKES(totalOutstanding)}.`,
+    `KEMRI SACCO: Hi ${firstName(name)}, ${formatKES(amount)} has been sent to your M-Pesa. Repayment starts ${date}. Your total outstanding is now ${formatKES(totalOutstanding)}.`,
 
   loanRepaymentConfirmed: (name, amount, newBalance, receipt) =>
-    `KEMRI SACCO: Repayment of ${formatKES(amount)} received. Outstanding loan: ${formatKES(newBalance)}. Receipt: ${receipt}. Thank you!`,
+    `KEMRI SACCO: Hi ${firstName(name)}, we received your repayment of ${formatKES(amount)}. New loan balance: ${formatKES(newBalance)}. Receipt: ${receipt}. Thank you.`,
 
   loanRejected: (name, reason) =>
-    `KEMRI SACCO: Your loan application was not approved.${reason ? ' Reason: ' + reason : ''} Contact the SACCO office for details.`,
+    `KEMRI SACCO: Hi ${firstName(name)}, your loan application was not approved.${reason ? ' Reason: ' + reason + '.' : ''} Contact our office for details.`,
+
+  // Sent when a B2C disbursement fails at either stage (request-time
+  // rejection, or result-callback failure). The member's loan is intact —
+  // staff will disburse manually. Wording stays reassuring without
+  // promising a specific timeline we can't guarantee.
+  loanDisbursementFailed: (name) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, we could not complete your loan disbursement right now. Our team will contact you shortly.`,
+
+  // ───────────────────────────────────────────────────────────────────────
+  //  MEMBER-FACING — WITHDRAWALS
+  // ───────────────────────────────────────────────────────────────────────
+
+  // Sent when a withdrawal is queued for staff (above the instant
+  // threshold), OR when an instant attempt failed and fell back to the
+  // queue. Same wording works for both — the member's request is
+  // recorded either way; only the timeline differs, and that's honest
+  // without being alarming.
+  withdrawalRequested: (name, amount) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, we received your withdrawal request of ${formatKES(amount)}. Our team will process it and SMS you once the funds are sent.`,
+
+  // Instant withdrawal success. Short and unambiguous — the member just
+  // watched money arrive, this confirms it with the receipt for their
+  // records.
+  withdrawalInstantConfirmed: (name, amount, receipt) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, ${formatKES(amount)} has been sent to your M-Pesa. Receipt: ${receipt}. Thank you.`,
+
+  // Instant withdrawal failed at request time or timed out. Different from
+  // withdrawalRequested because the member's expectation was "instant" —
+  // the wording acknowledges the shortfall without apologising unduly.
+  withdrawalInstantFailed: (name, amount) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, we could not complete your instant withdrawal right now. Your KES ${Number(amount).toLocaleString()} request is queued - our team will process it shortly.`,
+
+  // ───────────────────────────────────────────────────────────────────────
+  //  MEMBER-FACING — LOAN REMINDERS
+  //
+  //  Sent by services/reminderService.js on the cadence described there.
+  //  Tone progression: informational at mid-month, positive or factual at
+  //  end-of-month, firm but courteous at day-3 overdue.
+  // ───────────────────────────────────────────────────────────────────────
+
+  loanReminderMidMonth: (name, balance, paid) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, your loan balance is ${formatKES(balance)}. You have paid ${formatKES(paid)} so far. Pay anytime via *483*4444#.`,
+
+  loanReminderEndMonthOnTrack: (name, balance) =>
+    `KEMRI SACCO: End-of-month check-in. Loan balance: ${formatKES(balance)}. You are on track - thank you for keeping up with your repayments.`,
+
+  loanReminderEndMonthBehind: (name, balance, amountBehind) =>
+    `KEMRI SACCO: End-of-month check-in. Loan balance: ${formatKES(balance)}. You are ${formatKES(amountBehind)} behind schedule. Please pay via *483*4444#.`,
+
+  loanOverdueDay3: (name, amountBehind) =>
+    `KEMRI SACCO: You are ${formatKES(amountBehind)} behind on your loan repayment. Please pay via *483*4444# to avoid further reminders.`,
+
+  // ───────────────────────────────────────────────────────────────────────
+  //  STAFF-FACING — MEMBERS
+  // ───────────────────────────────────────────────────────────────────────
 
   staffNewMember: (name) =>
     `KEMRI SACCO Admin: New member registered - ${name}.`,
 
-  staffLoanApplication: (name, amount, ref) =>
-    `KEMRI SACCO Admin: Loan application ${formatKES(amount)} from ${name}. Ref: ${ref}. Awaiting review.`,
+  // ───────────────────────────────────────────────────────────────────────
+  //  STAFF-FACING — LOANS
+  // ───────────────────────────────────────────────────────────────────────
 
+  staffLoanApplication: (name, amount, ref) =>
+    `KEMRI SACCO Admin: Loan request ${formatKES(amount)} from ${name}. Ref: ${ref}. Awaiting review.`,
+
+  // Two states, chosen by the caller via opts.status:
+  //   'disbursing' — auto-approved, B2C has been initiated, no action needed
+  //   'failed'     — auto-approved but B2C failed, staff must disburse manually
+  //   (absent)     — auto-approved but B2C not attempted (e.g. not configured)
   staffLoanAutoApproved: (name, amount, ref, opts = {}) => {
     const { status } = opts;
     let closing;
     if (status === 'disbursing') {
-      closing = 'Auto-approved, B2C disbursement initiated. No action needed.';
+      closing = 'B2C initiated - no action needed.';
     } else if (status === 'failed') {
-      closing = 'Auto-approved, but B2C FAILED - manual disbursement required.';
+      closing = 'B2C FAILED - manual disbursement required.';
     } else {
-      closing = 'Auto-approved - ready for disbursement.';
+      closing = 'Awaiting disbursement.';
     }
-    return `KEMRI SACCO Admin: Board/Staff loan ${formatKES(amount)} from ${name} (Ref: ${ref}). ${closing}`;
+    return `KEMRI SACCO Admin: Board/Staff loan ${formatKES(amount)} for ${name} (Ref: ${ref}). Auto-approved. ${closing}`;
   },
+
+  // Sent when a loan is successfully disbursed via B2C. Staff already got
+  // the auto-approval notification; this is the confirmation that money
+  // actually moved. Includes the receipt for reconciliation.
+  staffLoanDisbursed: (name, reference, receipt) =>
+    `KEMRI SACCO Admin: Loan ${reference} for ${name} disbursed via B2C. Receipt: ${receipt || 'N/A'}.`,
+
+  // Sent when a B2C disbursement fails at either stage. Actionable —
+  // staff need to disburse manually, so the message says so.
+  staffLoanDisbursementFailed: (name, reference, reason) =>
+    `KEMRI SACCO Admin: Loan ${reference} for ${name} - B2C FAILED (${reason}). Manual disbursement required.`,
+
+  // Sent when Safaricom times out a B2C request. The loan rolled back to
+  // 'approved' so it's still in the Disbursement Log awaiting action, but
+  // staff should be aware it timed out in case the member reports funds
+  // arriving anyway (rare, but possible).
+  staffLoanDisbursementTimedOut: (name, reference) =>
+    `KEMRI SACCO Admin: Loan ${reference} for ${name} - B2C TIMED OUT. Verify on M-Pesa and disburse manually if needed.`,
+
+  // ───────────────────────────────────────────────────────────────────────
+  //  STAFF-FACING — PAYMENTS AND REPAYMENTS
+  // ───────────────────────────────────────────────────────────────────────
 
   staffRepayment: (name, amount) =>
     `KEMRI SACCO Admin: Repayment of ${formatKES(amount)} received from ${name}.`,
@@ -128,63 +241,38 @@ const templates = {
   staffDeposit: (name, amount) =>
     `KEMRI SACCO Admin: Deposit of ${formatKES(amount)} received from ${name}.`,
 
-  withdrawalRequested: (name, amount) =>
-    `KEMRI SACCO: Withdrawal request of ${formatKES(amount)} received. We will process it and contact you once complete. This is not instant.`,
+  // ───────────────────────────────────────────────────────────────────────
+  //  STAFF-FACING — WITHDRAWALS
+  // ───────────────────────────────────────────────────────────────────────
 
+  // Sent when a withdrawal is queued for staff processing. Actionable —
+  // staff need to send the money and mark it processed.
   staffWithdrawalRequest: (name, amount) =>
     `KEMRI SACCO Admin: Withdrawal request of ${formatKES(amount)} from ${name}. Awaiting processing.`,
 
+  // Sent when a small withdrawal pays out instantly via B2C. Informational
+  // — no action needed, but staff should have a record for reconciliation.
+  staffWithdrawalInstantSuccess: (name, amount, receipt) =>
+    `KEMRI SACCO Admin: Withdrawal of ${formatKES(amount)} paid instantly to ${name}. Receipt: ${receipt || 'N/A'}.`,
+
+  // Sent when an instant withdrawal fails and falls back to the staff
+  // queue. Actionable — the member is now waiting for manual processing.
+  staffWithdrawalInstantFailed: (name, amount) =>
+    `KEMRI SACCO Admin: Instant withdrawal FAILED for ${name} (${formatKES(amount)}). Queued for manual processing.`,
+
+  staffWithdrawalInstantTimedOut: (name, amount) =>
+    `KEMRI SACCO Admin: Instant withdrawal TIMED OUT for ${name} (${formatKES(amount)}). Queued for manual processing.`,
+
   // ───────────────────────────────────────────────────────────────────────
-  //  Loan reminders
-  //
-  //  Sent by services/reminderService.js on the schedule defined there.
-  //  Five member-facing and two staff-facing variants, chosen per loan per
-  //  day based on where the member is against their repayment schedule.
-  //
-  //  Tone progression:
-  //    Mid-month       informational — a gentle "here's your balance"
-  //    End-of-month    positive if on track, factual if behind
-  //    Day-3 overdue   firmer, still courteous
-  //    Day-6 staff     internal — names the member so staff can act
+  //  STAFF-FACING — REMINDERS
   // ───────────────────────────────────────────────────────────────────────
 
-  // Mid-month reminder (15th of every month). Informational only — no
-  // action implied, no pressure. Designed to keep the balance visible so
-  // month-end doesn't come as a surprise. Sent to every member with an
-  // active disbursed loan regardless of their repayment status.
-  loanReminderMidMonth: (name, balance, paid) =>
-    `KEMRI SACCO: Hi ${name}, your loan balance is ${formatKES(balance)}. You have paid ${formatKES(paid)} so far. Pay anytime via *483*4444#.`,
-
-  // End-of-month reminder, on-track variant (last day of month). Sent when
-  // the member's cumulative payments are within the 1-instalment tolerance
-  // of their schedule. Positive framing — reinforces the behaviour rather
-  // than nagging.
-  loanReminderEndMonthOnTrack: (name, balance) =>
-    `KEMRI SACCO: End-of-month check-in. Loan balance: ${formatKES(balance)}. You are on track - thank you for keeping up with your repayments.`,
-
-  // End-of-month reminder, behind variant (last day of month). Sent when
-  // the member has fallen more than 1 instalment behind their cumulative
-  // schedule. Names the gap amount so the number is actionable rather
-  // than abstract.
-  loanReminderEndMonthBehind: (name, balance, amountBehind) =>
-    `KEMRI SACCO: End-of-month check-in. Loan balance: ${formatKES(balance)}. You are ${formatKES(amountBehind)} behind schedule. Please pay via *483*4444#.`,
-
-  // Day-3 overdue nudge. Only fires when the member was behind at month
-  // end and still behind on the 3rd. Firmer than the end-of-month
-  // reminder but still courteous — this is the last member-facing
-  // reminder before staff get involved at day 6.
-  loanOverdueDay3: (name, amountBehind) =>
-    `KEMRI SACCO: You are ${formatKES(amountBehind)} behind on your loan repayment. Please pay via *483*4444# to avoid further reminders.`,
-
-  // Staff alert at day 6 — the member is still behind despite the day-3
-  // nudge. Names the member, their loan reference, and the shortfall in
-  // one message so staff can act without first opening the portal.
   staffLoanOverdueAlert: (name, reference, amountBehind) =>
     `KEMRI SACCO Admin: ${name} is ${formatKES(amountBehind)} behind on loan ${reference}. 6 days past month-end - consider calling.`,
 
-  // Monday morning digest. Only sent when there's something to report —
-  // a digest with no content wastes an SMS. The service checks the counts
-  // before calling this; the function itself just formats.
+  // Weekly digest — one SMS, staff's Monday morning briefing. Only sent
+  // when there's something to report. The conditional parts avoid
+  // awkward phrasing when one count is zero.
   staffWeeklyDigest: (dueCount, dueTotal, overdueCount) => {
     const duePart = dueCount > 0
       ? `${dueCount} loan${dueCount > 1 ? 's' : ''} due this week (${formatKES(dueTotal)})`
@@ -202,7 +290,7 @@ const templates = {
 //    POST <endpoint>
 //    Authorization: Bearer <API_KEY>
 //    Content-Type: application/json
-//    Body: { from, to, message } — the minimal accepted payload
+//    Body: { from, to, message }
 //
 //  Response format:
 //    { status: "SUCCESS" | "FAILED", statusCode: 0, desc, to, msgId,
@@ -210,13 +298,7 @@ const templates = {
 //
 //  Success is status === "SUCCESS" and statusCode === 0. Anything else is
 //  treated as a delivery failure; the desc field carries the provider's
-//  human-readable reason (e.g. "Invalid request. The parameter 'to'
-//  cannot be empty."), which is more useful than the raw status code.
-//
-//  Per-recipient detail: unlike Africa's Talking's multi-recipient
-//  response, this endpoint handles ONE recipient per request. So there's
-//  no array to iterate — a single failed status IS the per-recipient
-//  failure. That simplifies parsing compared to the old implementation.
+//  human-readable reason.
 // ─────────────────────────────────────────────────────────────────────────
 
 async function sendViaProvider(cleanPhone, message) {
@@ -297,7 +379,7 @@ async function sendSMS(phoneNumber, message) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-//  notifyStaff — unchanged from the previous version
+//  notifyStaff — unchanged
 // ─────────────────────────────────────────────────────────────────────────
 
 async function notifyStaff(message) {
