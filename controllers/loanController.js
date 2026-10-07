@@ -316,6 +316,129 @@ exports.disburseLoan = async (req, res) => {
 };
 
 // ============================================================
+// 6c. Admin: Resolve a stuck B2C disbursement
+// ============================================================
+// A loan sits in 'disbursing' when Safaricom accepted the B2C request
+// but the result callback never arrived (or failed to match). The admin
+// console surfaces a "Resolve" action on any disbursing row older than
+// 5 minutes; this endpoint handles the outcome.
+//
+// Body: { outcome: 'received' | 'not_received', receipt?, reason? }
+//
+//   outcome='received'       Staff verified on M-Pesa that the member
+//                            received the funds. Requires a receipt.
+//                            Loan → disbursed, balance incremented,
+//                            member SMS fired.
+//
+//   outcome='not_received'   Staff verified on M-Pesa that the funds
+//                            never moved. Loan → approved, ready to
+//                            retry from the portal. No balance change.
+//
+// Both paths audit-log the actor, the choice, the original ConversationID
+// (preserved in admin_notes for reconciliation), and the timestamp.
+exports.resolveStuckDisbursement = async (req, res) => {
+    try {
+        const { loanId } = req.params;
+        const { outcome, receipt, reason } = req.body;
+
+        if (!['received', 'not_received'].includes(outcome)) {
+            return res.status(400).json({
+                error: 'outcome must be "received" or "not_received".',
+            });
+        }
+
+        const loan = await Loan.findById(loanId);
+        if (!loan) {
+            return res.status(404).json({ error: 'Loan not found.' });
+        }
+        if (loan.status !== 'disbursing') {
+            return res.status(400).json({
+                error: `Loan is currently '${loan.status}' — only loans stuck in 'disbursing' can be resolved this way.`,
+            });
+        }
+
+        // Require a receipt when confirming the member received funds.
+        // Without it, we have no proof the payout actually happened —
+        // the whole point of this override path is a human confirming
+        // against M-Pesa with the receipt as evidence.
+        if (outcome === 'received' && (!receipt || !receipt.trim())) {
+            return res.status(400).json({
+                error: 'An M-Pesa receipt is required when confirming the member received the funds.',
+            });
+        }
+
+        const member = await Member.findById(loan.member_id);
+
+        let result;
+        if (outcome === 'received') {
+            // markDisbursed() moves the loan to 'disbursed' and increments
+            // the member's running outstanding total in one transaction.
+            // source='manual' produces the standard "Manually disbursed"
+            // note; the audit log records that this was a stuck-resolution.
+            result = await Loan.markDisbursed(loanId, receipt.trim(), 'manual');
+        } else {
+            const rollbackReason = reason && reason.trim()
+                ? reason.trim()
+                : 'manual override: callback never arrived';
+            result = await Loan.rollbackDisbursing(loanId, rollbackReason);
+        }
+
+        if (!result) {
+            return res.status(500).json({ error: 'Failed to resolve the stuck disbursement.' });
+        }
+
+        await AuditLog.log({
+            actorId: req.user.id,
+            actorUsername: req.user.username,
+            action: outcome === 'received'
+                ? 'Resolved stuck disbursement: member received funds'
+                : 'Resolved stuck disbursement: member did NOT receive funds',
+            category: 'loan_decision',
+            targetType: 'loan',
+            targetId: loanId,
+            targetLabel: member ? `${member.full_name} (loan #${loanId})` : `loan #${loanId}`,
+            details: outcome === 'received'
+                ? `Manually confirmed receipt ${receipt}. Original ConversationID: ${loan.b2c_conversation_id || 'unknown'}`
+                : `Rolled back to approved. Reason: ${reason || 'callback never arrived'}. Original ConversationID: ${loan.b2c_conversation_id || 'unknown'}`,
+        });
+
+        // Send member SMS on the "received" path — the money moved and the
+        // member needs to know their new outstanding balance and the
+        // receipt. The "not received" path doesn't send an SMS, because
+        // from the member's perspective nothing has changed; their loan
+        // is still approved and awaiting disbursement.
+        if (outcome === 'received' && member) {
+            try {
+                const updatedMember = await Member.findById(loan.member_id);
+                await smsService.sendSMS(
+                    member.phone_number,
+                    smsService.templates.loanDisbursed(
+                        member.full_name,
+                        loan.principal,
+                        updatedMember?.total_outstanding_balance || loan.total_repayment,
+                        new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+                    )
+                );
+            } catch (err) {
+                console.error('Resolve-disbursement SMS failed:', err.message);
+            }
+        }
+
+        res.json({
+            success: true,
+            outcome,
+            loan: result,
+            message: outcome === 'received'
+                ? 'Loan marked disbursed with the recorded receipt.'
+                : 'Loan rolled back to approved. Ready to retry.',
+        });
+    } catch (err) {
+        console.error('Resolve stuck disbursement error:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+};
+
+// ============================================================
 // 7. Admin: Get all loans for dashboard
 // ============================================================
 exports.getAdminLoans = async (req, res) => {

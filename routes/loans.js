@@ -57,6 +57,21 @@ router.post('/disburse/:loanId', authenticate, requirePermission('loans:disburse
 // comment for the full lifecycle.
 router.post('/auto-disburse/:loanId', authenticate, requirePermission('loans:disburse'), loanController.disburseLoan);
 
+// Resolve a stuck B2C disbursement. Distinct from /auto-disburse — that
+// endpoint INITIATES a payout; this one handles a payout that was
+// initiated but whose result callback never arrived (or arrived and
+// failed to match a live loan). Same permission (loans:disburse) because
+// the underlying action is the same class: completing a disbursement.
+//
+// Body: { outcome: 'received' | 'not_received', receipt?, reason? }
+// See loanController.resolveStuckDisbursement() for the full flow.
+//
+// Route path uses a nested segment (/:loanId/resolve-disbursement) rather
+// than a bare POST /resolve/:loanId, so it reads as "an action on a
+// specific loan" — consistent with /disburse/:loanId and
+// /auto-disburse/:loanId above.
+router.post('/:loanId/resolve-disbursement', authenticate, requirePermission('loans:disburse'), loanController.resolveStuckDisbursement);
+
 router.get('/admin/list', authenticate, requirePermission('loans:read'), loanController.getAdminLoans);
 router.get('/admin/pending', authenticate, requirePermission('loans:read'), loanController.getPendingLoans);
 
