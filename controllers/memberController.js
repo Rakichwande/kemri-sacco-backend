@@ -23,8 +23,6 @@ async function registerMember(req, res) {
 
     const member = await Member.create({ full_name, id_number, phone_number, nationality, age, employer, scheme });
 
-    // SMS is a notification, not a precondition - registration should succeed
-    // even if the SMS provider is unreachable or unconfigured
     try {
       await smsService.sendSMS(phone_number, smsService.templates.applicationReceived(full_name));
     } catch (smsErr) {
@@ -47,7 +45,6 @@ async function registerMember(req, res) {
   }
 }
 
-// Public self-registration endpoint (USSD/registration form) - no auth
 async function registerMemberHandler(req, res) {
   try {
     const member = await registerMember(req, res);
@@ -59,9 +56,6 @@ async function registerMemberHandler(req, res) {
   }
 }
 
-// Admin-initiated member creation - same underlying logic, but requires
-// admin auth and writes to the audit trail, since this is staff acting on a
-// member's behalf rather than the member registering themselves.
 async function adminCreateMember(req, res) {
   try {
     const member = await registerMember(req, res);
@@ -106,18 +100,35 @@ async function listMembers(req, res) {
   }
 }
 
-// Admin-only edit. Deliberately excludes id_number, phone_number, credit_limit,
-// total_outstanding_balance and successful_repayments - those are either
-// registration-fixed identity fields or values the loan/payment flows own
-// and must stay in sync with actual transactions, not a manual edit.
+// Admin-only edit. Fields are restricted to a whitelist — values the
+// loan/payment flows own (credit_limit, total_outstanding_balance,
+// successful_repayments) and identity fields that must not change
+// silently (id_number) are excluded.
 //
-// is_board_staff is ALSO deliberately excluded here, for a stricter reason:
-// it grants auto-approved loans. That write path is the separate
-// setBoardStaff() endpoint below, gated by its own permission. Member.update()
-// enforces this at the model layer too, so even a future controller that
-// forgets to keep the whitelist clean cannot grant the privilege through the
-// general edit route.
-const EDITABLE_FIELDS = ['full_name', 'nationality', 'age', 'employer', 'scheme', 'status'];
+// phone_number IS editable (added Oct 2026) because members change SIMs
+// and staff must be able to update records without direct SQL access.
+// Three safeguards apply:
+//
+//   1. Normalization. The admin might type 0722757590, 722757590,
+//      +254722757590, or with spaces/dashes. All normalize to the
+//      canonical +254 form via Member.normalizePhone(). Rejecting
+//      unparseable input rather than storing a non-standard form.
+//
+//   2. Unique-constraint handling. The members table has a UNIQUE
+//      constraint on phone_number. If the new value matches another
+//      member's, Postgres throws code 23505; the catch block below
+//      converts that to a specific 409 message rather than a generic 500.
+//
+//   3. Dual notification. Changing a phone changes the member's USSD
+//      identity — an attacker who gains access to this form could
+//      reassign a phone number and, if no PIN is set, set one via USSD.
+//      To mitigate: after a successful change, an SMS is sent to BOTH
+//      the old and new numbers so the real member is informed and can
+//      report fraud.
+//
+// is_board_staff remains excluded — it grants auto-approved loans and has
+// its own dedicated endpoint, gated by its own permission.
+const EDITABLE_FIELDS = ['full_name', 'phone_number', 'nationality', 'age', 'employer', 'scheme', 'status'];
 
 async function updateMember(req, res) {
   try {
@@ -127,11 +138,18 @@ async function updateMember(req, res) {
     const updates = {};
     for (const field of EDITABLE_FIELDS) {
       if (req.body[field] === undefined) continue;
-      // A blank field from the edit form means "clear this," not the literal
-      // string "" - especially critical for `age`, an integer column that
-      // rejects an empty string outright (this was the actual cause behind
-      // "Failed to update member" whenever age or nationality was left blank).
       updates[field] = req.body[field] === '' ? null : req.body[field];
+    }
+
+    // Normalize phone_number BEFORE the update.
+    if (updates.phone_number !== undefined && updates.phone_number !== null) {
+      const normalized = Member.normalizePhone(updates.phone_number);
+      if (!normalized) {
+        return res.status(400).json({
+          error: `"${updates.phone_number}" is not a valid Kenyan mobile number. Accepted formats: 0722757590, 722757590, +254722757590.`,
+        });
+      }
+      updates.phone_number = normalized;
     }
 
     if (Object.keys(updates).length === 0) {
@@ -140,41 +158,60 @@ async function updateMember(req, res) {
 
     const updated = await Member.update(req.params.id, updates);
 
+    const phoneChanged =
+      updates.phone_number !== undefined && updates.phone_number !== existing.phone_number;
+
     await AuditLog.log({
       actorId: req.user.id,
       actorUsername: req.user.username,
-      action: 'Updated member',
+      action: phoneChanged ? 'Updated member (phone changed)' : 'Updated member',
       category: 'member_edit',
       targetType: 'member',
       targetId: req.params.id,
       targetLabel: updated.full_name,
-      details: `Changed: ${Object.keys(updates).join(', ')}`,
+      details: phoneChanged
+        ? `Changed: ${Object.keys(updates).join(', ')}. Phone: ${existing.phone_number || '(none)'} → ${updated.phone_number}`
+        : `Changed: ${Object.keys(updates).join(', ')}`,
     });
+
+    if (phoneChanged) {
+      const changeMsg =
+        `KEMRI SACCO: Your registered phone number was changed to ${updated.phone_number}. ` +
+        `If this wasn't you, contact our office immediately.`;
+
+      try {
+        await smsService.sendSMS(updated.phone_number, changeMsg);
+      } catch (smsErr) {
+        console.error('Phone-change SMS to new number failed:', smsErr.message);
+      }
+
+      if (existing.phone_number) {
+        try {
+          await smsService.sendSMS(existing.phone_number, changeMsg);
+        } catch (smsErr) {
+          console.error('Phone-change SMS to old number failed:', smsErr.message);
+        }
+      }
+    }
 
     res.json(updated);
   } catch (err) {
+    if (err.code === '23505') {
+      const constraint = err.constraint || '';
+      if (constraint.includes('phone_number')) {
+        return res.status(409).json({
+          error: 'That phone number is already registered to another member. Each phone can only be linked to one account.',
+        });
+      }
+      return res.status(409).json({
+        error: 'A member with that value already exists.',
+      });
+    }
     console.error(err);
     res.status(500).json({ error: 'Failed to update member' });
   }
 }
 
-// Grant or revoke board/staff status. Board/staff members are auto-approved
-// for loans under the SACCO policy agreed 25 Sept 2026; everyone else follows
-// the normal staff-review path. This is the ONLY endpoint that may write
-// is_board_staff — the general edit route excludes it, and Member.update()
-// throws if it's ever passed there anyway.
-//
-// Requires the members:set_board_status permission (Super Administrator and
-// SACCO Administrator only), enforced by middleware on the route, not here.
-//
-// Body: { is_board_staff: true | false }. The typeof check is strict on
-// purpose: Member.setBoardStaffStatus() coerces with !! internally, so a
-// stray "false" string coming through as truthy would silently grant the
-// privilege. Rejecting anything that isn't a real boolean closes that.
-//
-// A no-op request (flag already in the target state) is short-circuited:
-// the write is skipped and no audit entry is written, so repeated clicks
-// or a duplicated request don't fill the trail with non-changes.
 async function setBoardStaff(req, res) {
   try {
     const { is_board_staff } = req.body;
@@ -195,8 +232,6 @@ async function setBoardStaff(req, res) {
 
     const updated = await Member.setBoardStaffStatus(req.params.id, is_board_staff);
     if (!updated) {
-      // The row vanished between the read above and the write. Rare, but a
-      // concurrent delete would land here, and a 404 is the honest answer.
       return res.status(404).json({ error: 'Member not found' });
     }
 
@@ -218,32 +253,6 @@ async function setBoardStaff(req, res) {
   }
 }
 
-// Permanently delete a member. Only reachable through a route gated by
-// members:delete (Super Administrator and SACCO Administrator only) — the
-// general edit route cannot reach this, and Member.remove() enforces the
-// history check regardless of caller.
-//
-// DELETION RULE:
-//   Financial history (deposits, repayments, disbursed/repaid loans,
-//   disbursing/processed withdrawals) BLOCKS deletion — those records
-//   must survive for audit and reconciliation.
-//
-//   Non-financial records (pending or rejected loan applications,
-//   pending or rejected withdrawal requests) do NOT block deletion.
-//   They are removed alongside the member, since they represent no money
-//   movement and no obligation. This lets staff clean up test entries,
-//   mistaken applications, or abandoned registrations via the admin
-//   console without needing direct database access.
-//
-// Response codes:
-//   200 — deleted (with counts of what else was cleaned up)
-//   404 — member not found (or already deleted)
-//   409 — blocked: member has financial history; body carries a
-//         breakdown so the UI can show exactly what blocked it
-//   500 — unexpected error
-//
-// EVERY outcome is audit-logged, including blocked attempts and any
-// non-financial records removed alongside the member.
 async function deleteMember(req, res) {
   try {
     const result = await Member.remove(req.params.id);
@@ -253,8 +262,6 @@ async function deleteMember(req, res) {
     }
 
     if (!result.deleted) {
-      // Blocked: the member has financial history. Log the attempt with
-      // the counts so the trail shows exactly why it was refused.
       await AuditLog.log({
         actorId: req.user.id,
         actorUsername: req.user.username,
@@ -275,16 +282,18 @@ async function deleteMember(req, res) {
       });
     }
 
-    // Build a summary of what was cleaned up alongside the member.
-    // Pending/rejected loan applications and withdrawal requests have no
-    // financial consequence so they were removed with the member — but
-    // the audit trail should record that they existed, so a future reader
-    // can see the full picture of what was deleted and why.
     const cleanupDetails = [];
     if (result.removedLoans?.length) {
       cleanupDetails.push(
         `${result.removedLoans.length} loan application(s) removed: ${result.removedLoans
           .map((l) => `LN-${String(l.id).padStart(5, '0')} (${l.status})`)
+          .join(', ')}`
+      );
+    }
+    if (result.removedPayments?.length) {
+      cleanupDetails.push(
+        `${result.removedPayments.length} pending/failed payment attempt(s) removed: ids ${result.removedPayments
+          .map((p) => p.id)
           .join(', ')}`
       );
     }
@@ -316,9 +325,8 @@ async function deleteMember(req, res) {
         full_name: result.member.full_name,
         reference: result.member.imported_reference,
       },
-      // Counts let the frontend show a more informative confirmation —
-      // "Member deleted. 1 pending loan application was also removed."
       removedLoans: result.removedLoans?.length || 0,
+      removedPayments: result.removedPayments?.length || 0,
       removedWithdrawals: result.removedWithdrawals?.length || 0,
     });
   } catch (err) {
@@ -327,8 +335,6 @@ async function deleteMember(req, res) {
   }
 }
 
-// Bulk import of pre-existing members. One summary audit entry, not one per
-// row - a 2,000-row import writing 2,000 audit rows would drown the trail.
 async function importMembers(req, res) {
   try {
     const { rows } = req.body;
