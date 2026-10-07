@@ -97,13 +97,36 @@ const PERMISSIONS = {
 // path. A SACCO Administrator can staff up the operational roles but
 // cannot create or promote someone to Super Administrator or SACCO
 // Administrator; only an existing Super Administrator can do that.
+//
+// KEMRI SACCO operates with four roles in practice. Three entries in the
+// ROLES object above are deliberately NOT assignable via the invite flow:
+//
+//   MEMBER_SUPPORT: its permissions are a subset of SACCO_ADMIN's. A
+//     distinct support role adds complexity without adding safety at
+//     this scale — if you need someone to edit member records, make
+//     them a SACCO Administrator.
+//
+//   AUDITOR: read-only access, useful only if an external auditor needs
+//     direct console access rather than shared reports. Add the value
+//     back below if that changes.
+//
+//   STAFF_LEGACY: kept for backward compatibility with pre-existing
+//     accounts. Should never be assigned to new staff.
+//
+// The PERMISSIONS map above still defines all seven roles — existing
+// accounts with a hidden role keep their permissions and continue to
+// work. Hiding a role from ASSIGNABLE_ROLES only prevents creating NEW
+// accounts with that role; it does not revoke anything.
+//
+// To re-enable a hidden role, add its value to the arrays below. The
+// frontend's constants/roles.js mirrors this list — keep the two in sync.
 const ASSIGNABLE_ROLES = {
   [ROLES.SUPER_ADMIN]: [
-    ROLES.SUPER_ADMIN, ROLES.SACCO_ADMIN, ROLES.FINANCE_OFFICER,
-    ROLES.LOANS_OFFICER, ROLES.MEMBER_SUPPORT, ROLES.AUDITOR, ROLES.STAFF_LEGACY,
+    ROLES.SUPER_ADMIN, ROLES.SACCO_ADMIN,
+    ROLES.FINANCE_OFFICER, ROLES.LOANS_OFFICER,
   ],
   [ROLES.SACCO_ADMIN]: [
-    ROLES.FINANCE_OFFICER, ROLES.LOANS_OFFICER, ROLES.MEMBER_SUPPORT, ROLES.AUDITOR,
+    ROLES.FINANCE_OFFICER, ROLES.LOANS_OFFICER,
   ],
 };
 
