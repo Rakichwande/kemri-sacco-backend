@@ -260,7 +260,13 @@ async function handleRegister(phoneNumber, steps) {
     // sacco_member_reference_seq sequence, so the row already has it.
     const memberRef = member.imported_reference;
 
-    return `END Thank you, ${full_name}. Your registration is received. Ref: ${memberRef}. Visit our portal to complete your application.\nYou'll set a SACCO PIN the first time you check your balance or apply for a loan.`;
+    // Registration via USSD is COMPLETE — there is no follow-up step. The
+    // earlier wording ("Visit our portal to complete your application")
+    // was written when the web portal was the primary channel, but for
+    // USSD-first members the portal may be unreachable. The message now
+    // confirms completion and points at the concrete next actions
+    // (deposit, balance, loan) all available from this same menu.
+    return `END Thank you, ${full_name}. Your registration is complete. Ref: ${memberRef}. You can now save, check balance, or apply for a loan by dialling *483*4444#.\nYou'll set a SACCO PIN the first time you check your balance or apply for a loan.`;
   }
 
   return 'END Invalid input. Please dial again.';
