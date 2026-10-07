@@ -16,6 +16,14 @@ const Admin = require('../models/Admin');
 //   - any rejection that does slip through (from a future change) is
 //     captured here and logged rather than becoming an unhandled rejection
 //     that would take the whole server down
+//
+// CHANNEL-OPTIONAL CONTRACT: either smsText or emailContent may be
+// null/undefined when the caller only wants one channel. Passing
+// emailContent: null (used by the withdrawal success notification, which
+// is SMS-only) skips the email task entirely for every staff member —
+// previously this crashed on `emailContent.subject` and was caught by
+// the caller's try/catch, so the SMS still delivered but the email branch
+// logged a spurious error every time. Same for smsText: null.
 async function notifyStaff({ smsText, emailContent }) {
   let staff;
   try {
@@ -28,7 +36,7 @@ async function notifyStaff({ smsText, emailContent }) {
   const tasks = [];
 
   for (const s of staff) {
-    if (s.notify_sms && s.phone) {
+    if (s.notify_sms && s.phone && smsText) {
       // sendSMS itself never throws now (returns { sent, reason }), but
       // wrapping it as a task in allSettled means even a future regression
       // that reintroduces a throw is handled - not turned into an
@@ -40,7 +48,11 @@ async function notifyStaff({ smsText, emailContent }) {
         )
       );
     }
-    if (s.notify_email && s.email) {
+    // The `emailContent &&` guard is the fix: a caller that only wants
+    // SMS passes emailContent: null, and no email task is queued for
+    // anyone. Before this guard, the code reached into emailContent.subject
+    // and threw.
+    if (s.notify_email && s.email && emailContent) {
       tasks.push(
         emailService.sendEmail({
           to: s.email,
