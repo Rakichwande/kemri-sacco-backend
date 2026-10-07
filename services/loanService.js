@@ -7,7 +7,18 @@ const emailService = require('./emailService');
 const MAX_ABSOLUTE_LIMIT = 20000;
 const MIN_LOAN_AMOUNT = 1000;
 const INTEREST_RATE = 6.0;
-const TENURE_MONTHS = 6;
+
+// Loan tenure. Changed from 6 months to 1 month on 7 October 2026 by SACCO
+// board decision. Interest rate remains 6% flat — for a 1-month loan this
+// means total interest = principal × 6% × 1. Any existing loan rows are
+// recalculated by a one-off SQL migration deployed alongside this change;
+// only NEW loans created after this deploy will default to the new tenure
+// through this constant.
+//
+// If tenure ever changes again, the same pattern applies: update this
+// constant, update the SMS/email templates if the wording assumes a
+// specific term, and run a matching SQL migration for existing loans.
+const TENURE_MONTHS = 1;
 
 class LoanService {
   static calculateCreditLimit(successfulRepayments) {
@@ -29,14 +40,14 @@ class LoanService {
       let reason;
 
       if (activeLoan.status === 'pending') {
-        reason = `Your loan application for KES ${principalText} is awaiting review. You'll receive an SMS once it is approved.`;
+        reason = `Your loan application for a principal of KES ${principalText} is awaiting review. You'll receive an SMS once it is approved.`;
       } else if (activeLoan.status === 'approved') {
         reason = `Your loan of KES ${principalText} has been approved and is awaiting disbursement. You'll receive an SMS once funds are sent.`;
       } else if (activeLoan.status === 'disbursing') {
         reason = `Your loan of KES ${principalText} is being disbursed. You'll receive an SMS once funds are in your M-Pesa.`;
       } else {
         const outstandingText = Number(activeLoan.outstanding_balance).toLocaleString();
-        reason = `You have an outstanding loan of KES ${outstandingText}. Clear it before applying for another.`;
+        reason = `You have an outstanding balance of KES ${outstandingText} on your current loan. Settle it before applying for another.`;
       }
 
       return { allowed: false, reason, activeLoan };
@@ -48,10 +59,19 @@ class LoanService {
     return { allowed: true, creditLimit, member, reason: 'Eligible to apply.' };
   }
 
+  // Standard SACCO 1-month loan repayment schedule:
+  //   interest        = principal × (rate / 100) × tenure
+  //   total payable   = principal + interest
+  //
+  // The field `monthlyInstallment` is retained for database and code
+  // compatibility (the loans table has a NOT NULL column by that name),
+  // but with a 1-month tenure it is semantically the SAME as
+  // totalRepayment — there is only one payment due. Treat it as
+  // "amount payable" in all messaging.
   static calculateRepaymentSchedule(principal) {
     const totalInterest = Math.round(principal * (INTEREST_RATE / 100) * TENURE_MONTHS);
     const totalRepayment = principal + totalInterest;
-    const monthlyInstallment = Math.round(totalRepayment / TENURE_MONTHS);
+    const amountPayable = totalRepayment; // single payment, no division by tenure
 
     return {
       principal,
@@ -59,7 +79,7 @@ class LoanService {
       tenureMonths: TENURE_MONTHS,
       totalInterest,
       totalRepayment,
-      monthlyInstallment,
+      monthlyInstallment: amountPayable,
     };
   }
 
@@ -74,12 +94,11 @@ class LoanService {
   // The board/staff path exists so a board or staff member dialing USSD
   // gets a genuinely instant loan: dial *483*4444#, enter amount, walk
   // away, receive M-Pesa funds shortly after. No staff click required at
-  // any step — that's SACCO policy agreed 25 Sept 2026.
+  // any step — SACCO policy agreed 25 Sept 2026.
   //
   // Safety: if the B2C request fails at any point, the loan stays in the
   // 'approved' state and staff are notified to disburse manually. The
-  // member is never left with a phantom disbursement; the worst case is
-  // that they wait a few minutes longer than expected.
+  // member is never left with a phantom disbursement.
   //
   // The auto-approval uses approveLoan() — the same method staff call —
   // rather than setting status directly, so every side effect of approval
@@ -89,8 +108,6 @@ class LoanService {
   // application are sent from here. This function is the only place that
   // knows whether the loan was auto-approved or went to manual review, so
   // it is the only place that can send exactly one, consistent message.
-  // The board/staff staff notification fires AFTER the B2C attempt so it
-  // can accurately describe what happened (disbursing vs failed vs ready).
   static async apply(memberId, requestedAmount) {
     const amount = Number(requestedAmount);
     if (!Number.isFinite(amount) || amount <= 0) {
@@ -103,12 +120,12 @@ class LoanService {
     }
 
     if (amount < MIN_LOAN_AMOUNT) {
-      return { success: false, message: `Minimum loan is KES ${MIN_LOAN_AMOUNT}.` };
+      return { success: false, message: `Minimum loan principal is KES ${MIN_LOAN_AMOUNT}.` };
     }
     if (amount > eligibility.creditLimit) {
       return {
         success: false,
-        message: `Your current limit is KES ${eligibility.creditLimit.toLocaleString()}. Requested KES ${amount.toLocaleString()}.`,
+        message: `Your current credit limit is KES ${eligibility.creditLimit.toLocaleString()}. Requested principal of KES ${amount.toLocaleString()} exceeds this.`,
       };
     }
 
@@ -122,7 +139,7 @@ class LoanService {
     });
 
     if (!loan) {
-      return { success: false, message: 'You already have an active loan. Clear it before applying again.' };
+      return { success: false, message: 'You already have an active loan. Settle it before applying again.' };
     }
 
     const ref = `LN-${String(loan.id).padStart(5, '0')}`;
@@ -167,9 +184,8 @@ class LoanService {
     //
     // Required here (in-process require) rather than at the top of the
     // file, because disbursementService requires smsService and
-    // notificationService — both of which loanService already loads. A
-    // top-level require would create a load-order dependency that could
-    // bite if either service later requires loanService back.
+    // notificationService — both of which loanService already loads.
+    // A top-level require would create a load-order dependency.
     const DisbursementService = require('./disbursementService');
 
     let disbursement = { success: false, message: 'B2C not attempted' };
@@ -251,6 +267,18 @@ class LoanService {
     }
   }
 
+  // Approve a pending loan.
+  //
+  // Member SMS uses standard SACCO accounting terminology:
+  //   Principal             — the amount borrowed
+  //   Interest              — the charge for the 1-month term
+  //   Total amount payable  — principal + interest
+  //   Due date              — the date the full amount is due
+  //
+  // The due date is NOT included in this SMS because next_payment_due is
+  // only set when the loan is actually disbursed (see Loan.markDisbursed).
+  // The disbursement SMS carries the date; the approval SMS just
+  // communicates the terms.
   static async approveLoan(loanId, adminNotes = '') {
     const loan = await Loan.approve(loanId, adminNotes);
     if (!loan) {
@@ -268,8 +296,8 @@ class LoanService {
         smsService.templates.loanApproved(
           member.full_name,
           loan.principal,
-          loan.monthly_installment,
-          loan.tenure_months
+          loan.total_interest,
+          loan.total_repayment
         )
       );
     } catch (smsErr) {
@@ -320,13 +348,17 @@ class LoanService {
       return { success: false, message: 'No active loan found.' };
     }
 
+    // With a 1-month loan, the "due amount" is really "the remaining
+    // principal balance you owe". Using min(monthly, outstanding) still
+    // works — both are the same figure when nothing has been paid, and
+    // min picks outstanding when a partial payment was made.
     const dueAmount = Math.min(Number(activeLoan.monthly_installment), Number(activeLoan.outstanding_balance));
 
     return {
       success: true,
       loan: activeLoan,
       dueAmount,
-      message: `Outstanding balance: KES ${Number(activeLoan.outstanding_balance).toLocaleString()}.`,
+      message: `Amount payable: KES ${Number(activeLoan.outstanding_balance).toLocaleString()}.`,
     };
   }
 }

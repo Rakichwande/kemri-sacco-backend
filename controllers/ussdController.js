@@ -122,7 +122,7 @@ function mainMenu() {
     '2. Balance\n' +
     '3. Deposit\n' +
     '4. Loan\n' +
-    '5. Repay Loan\n' +
+    '5. Settle Loan\n' +
     '6. Transactions\n' +
     '7. Change PIN\n' +
     '8. Withdraw\n' +
@@ -245,7 +245,6 @@ async function handleRegister(phoneNumber, steps) {
       throw err;
     }
 
-    // Send registration SMS using the template
     try {
       await smsService.sendSMS(phoneNumber, smsService.templates.applicationReceived(full_name));
     } catch (smsErr) {
@@ -256,16 +255,8 @@ async function handleRegister(phoneNumber, steps) {
       emailContent: emailService.staffTemplates.newMember(full_name),
     });
 
-    // Member.create() draws the reference from the shared
-    // sacco_member_reference_seq sequence, so the row already has it.
     const memberRef = member.imported_reference;
 
-    // Registration via USSD is COMPLETE — there is no follow-up step. The
-    // earlier wording ("Visit our portal to complete your application")
-    // was written when the web portal was the primary channel, but for
-    // USSD-first members the portal may be unreachable. The message now
-    // confirms completion and points at the concrete next actions
-    // (deposit, balance, loan) all available from this same menu.
     return `END Thank you, ${full_name}. Your registration is complete. Ref: ${memberRef}. You can now save, check balance, or apply for a loan by dialling *483*4444#.\nYou'll set a SACCO PIN the first time you check your balance or apply for a loan.`;
   }
 
@@ -275,6 +266,9 @@ async function handleRegister(phoneNumber, steps) {
 // ============================================================
 // 2. BALANCE (PIN required)
 // ============================================================
+// The "Balance" here is the member's SAVINGS balance, not a loan balance.
+// The word "balance" is correct in this context — it's a savings account,
+// not a loan. Leave the wording as-is.
 async function handleBalance(phoneNumber, steps, sessionId) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) {
@@ -285,9 +279,8 @@ async function handleBalance(phoneNumber, steps, sessionId) {
   if (!pinCheck.authenticated) return pinCheck.response;
 
   const balance = await Payment.getMemberBalance(member.id);
-  const balanceText = `Your KEMRI SACCO balance is KES ${balance.toLocaleString()}.`;
+  const balanceText = `Your KEMRI SACCO savings balance is KES ${balance.toLocaleString()}.`;
 
-  // Send the balance via SMS (simple, no template needed)
   try {
     await smsService.sendSMS(phoneNumber, balanceText);
   } catch (smsErr) {
@@ -341,21 +334,17 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
   if (!pinCheck.authenticated) return pinCheck.response;
   const remaining = pinCheck.remainingSteps;
 
-  // Check eligibility BEFORE asking for an amount.
-  //
-  // Previously the flow always asked for an amount first and only rejected
-  // the member after they had typed one in - which cost them an extra USSD
-  // screen (real money on production) and read as if the loan might have
-  // gone through, since the rejection message quoted an amount at all. If
-  // the member has an active loan, a pending/approved application, or is
-  // otherwise ineligible, we tell them immediately and end the session.
+  // Check eligibility BEFORE asking for an amount. If the member has an
+  // active loan, a pending/approved application, or is otherwise
+  // ineligible, we tell them immediately and end the session rather than
+  // costing them an extra USSD screen.
   const eligibility = await LoanService.canApply(member.id);
   if (!eligibility.allowed) {
     return `END ${eligibility.reason}`;
   }
 
   if (remaining.length === 0) {
-    return `CON Enter loan amount (KES)\nLimit: KES ${eligibility.creditLimit.toLocaleString()}`;
+    return `CON Enter loan amount (KES)\nCredit limit: KES ${eligibility.creditLimit.toLocaleString()}`;
   }
 
   if (remaining.length === 1) {
@@ -401,17 +390,20 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
       closing = 'Awaiting SACCO review.';
     }
 
+    // Summary uses standard SACCO accounting terminology:
+    //   Principal            — amount borrowed
+    //   Interest             — charge for the 1-month term
+    //   Total amount payable — principal + interest (what the member owes)
+    //
+    // Field name note: loan.total_interest is the stored interest figure;
+    // loan.total_repayment is the stored principal + interest figure.
+    // Names retained in the DB for backward compatibility, but displayed
+    // here with the vocabulary an accountant would use.
     const summary =
-      `${opening}: KES ${Number(loan.principal).toLocaleString()}\n` +
-      `Total repayable (incl. interest): KES ${Number(loan.total_repayment).toLocaleString()}\n` +
-      `Over ${loan.tenure_months} months, ~KES ${Number(loan.monthly_installment).toLocaleString()}/month\n` +
+      `${opening}: Principal KES ${Number(loan.principal).toLocaleString()}\n` +
+      `Interest: KES ${Number(loan.total_interest).toLocaleString()}\n` +
+      `Total amount payable: KES ${Number(loan.total_repayment).toLocaleString()}\n` +
       `Ref: ${ref}. ${closing}`;
-
-    // Member SMS and staff notification are sent by LoanService.apply()
-    // itself — it knows which path was taken, so it can send exactly one
-    // consistent message (loanApproved for board/staff, or
-    // loanApplicationReceived for everyone else) rather than sending both
-    // from two different layers. See the messaging comment on apply().
 
     return `END ${summary}`;
   }
@@ -420,8 +412,13 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
 }
 
 // ============================================================
-// 5. REPAY LOAN (PIN required)
+// 5. SETTLE LOAN (PIN required)
 // ============================================================
+// The member-facing wording is "settle" rather than "repay" to match the
+// accounting terminology the SACCO's board adopted on 7 Oct 2026. The
+// underlying endpoint, service methods, and DB fields still use
+// "repayment" naming for backward compatibility — only the visible
+// wording changes here.
 async function handleRepayLoan(phoneNumber, steps, sessionId) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) {
@@ -432,22 +429,15 @@ async function handleRepayLoan(phoneNumber, steps, sessionId) {
   if (!pinCheck.authenticated) return pinCheck.response;
   const remaining = pinCheck.remainingSteps;
 
-  // Only a DISBURSED loan is repayable — see getRepayableLoan()'s comment
-  // in models/Loan.js. A pending, approved, or disbursing loan exists but
-  // no money has reached the member's M-Pesa yet, so there is nothing to
-  // repay.
+  // Only a DISBURSED loan is settleable. A pending, approved, or
+  // disbursing loan exists but no money has reached the member's M-Pesa
+  // yet, so there is nothing to settle.
   const repayableLoan = await Loan.getRepayableLoan(member.id);
 
   if (!repayableLoan) {
-    // Distinguish the non-repayable states so the member gets a clear,
-    // actionable message rather than the previous misleading "no
-    // outstanding loan" when they actually have an application in flight.
-    //
-    // The 'disbursing' case matters under Option A: a board/staff member
-    // who dials again within ~30 seconds of their original application may
-    // hit the window between B2C acceptance and the result callback.
-    // Without this branch the fallback would say "no outstanding loan",
-    // which reads as if their application had vanished.
+    // Distinguish the non-settleable states so the member gets a clear,
+    // actionable message rather than a misleading "no outstanding loan"
+    // when they actually have an application in flight.
     const inFlightLoan = await Loan.getActiveLoan(member.id);
     if (inFlightLoan && inFlightLoan.status === 'pending') {
       return 'END Your loan application is still awaiting approval. You will receive an SMS once it is reviewed.';
@@ -458,11 +448,11 @@ async function handleRepayLoan(phoneNumber, steps, sessionId) {
     if (inFlightLoan && inFlightLoan.status === 'disbursing') {
       return 'END Your loan is being disbursed to your M-Pesa right now. You will receive an SMS once the funds arrive.';
     }
-    return 'END You have no outstanding loan to repay.';
+    return 'END You have no active loan to settle.';
   }
 
   if (remaining.length === 0) {
-    return `CON Outstanding balance: KES ${Number(repayableLoan.outstanding_balance).toLocaleString()}\nEnter amount to repay`;
+    return `CON Amount outstanding: KES ${Number(repayableLoan.outstanding_balance).toLocaleString()}\nEnter amount to pay`;
   }
 
   if (remaining.length === 1) {
@@ -478,10 +468,10 @@ async function handleRepayLoan(phoneNumber, steps, sessionId) {
         amount,
         loanId: repayableLoan.id,
       });
-      return 'END An M-Pesa prompt has been sent to your phone. Enter your PIN to complete the repayment.';
+      return 'END An M-Pesa prompt has been sent to your phone. Enter your PIN to complete the payment.';
     } catch (err) {
-      console.error('USSD loan repayment STK push failed:', err.message);
-      return 'END We could not process your repayment right now. Please try again shortly.';
+      console.error('USSD loan settlement STK push failed:', err.message);
+      return 'END We could not process your payment right now. Please try again shortly.';
     }
   }
 
@@ -583,20 +573,13 @@ async function handleChangePin(phoneNumber, steps) {
 //
 //   ≤ INSTANT_WITHDRAWAL_LIMIT (KES 5,000 by default)
 //     Attempts an immediate M-Pesa B2C payout. If B2C accepts, the
-//     withdrawal moves to 'disbursing' and resolves via webhook callback
-//     — the member receives their money within ~30 seconds without any
-//     staff involvement.
+//     withdrawal moves to 'disbursing' and resolves via webhook callback.
 //
 //   > INSTANT_WITHDRAWAL_LIMIT
-//     Queued as a pending request for staff processing, unchanged from
-//     the original design. Staff send the payout manually and mark it
-//     processed via the admin console.
+//     Queued as a pending request for staff processing.
 //
-// Fallback behaviour: if an instant attempt fails for any reason
-// (Safaricom unreachable, B2C wallet float insufficient, config issue),
-// the withdrawal simply stays 'pending' and appears in the staff queue.
-// The member's request is never lost — worst case, staff process it a
-// few minutes later as they would for a large withdrawal.
+// The word "balance" in this section refers to the member's SAVINGS
+// balance (their own money), which is correct — this is not a loan.
 async function handleWithdraw(phoneNumber, steps, sessionId) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) {
@@ -615,7 +598,7 @@ async function handleWithdraw(phoneNumber, steps, sessionId) {
   const savingsBalance = await Payment.getMemberBalance(member.id);
 
   if (remaining.length === 0) {
-    return `CON Available balance: KES ${savingsBalance.toLocaleString()}\nEnter amount to withdraw`;
+    return `CON Savings balance: KES ${savingsBalance.toLocaleString()}\nEnter amount to withdraw`;
   }
 
   if (remaining.length === 1) {
@@ -624,69 +607,47 @@ async function handleWithdraw(phoneNumber, steps, sessionId) {
       return 'END Invalid amount. Please dial again.';
     }
     if (amount > savingsBalance) {
-      return `END Insufficient balance. Your available balance is KES ${savingsBalance.toLocaleString()}.`;
+      return `END Insufficient funds. Your savings balance is KES ${savingsBalance.toLocaleString()}.`;
     }
 
-    // Guards against the rare case of two near-simultaneous requests both
-    // passing the getPendingForMember() check above before either has
-    // written its row - the database is the real source of truth here,
-    // this check is just a fast, friendly rejection for the common case.
     const withdrawal = await Withdrawal.create({ member_id: member.id, amount });
     if (!withdrawal) {
       return 'END You already have a withdrawal request in progress. Please wait for it to complete.';
     }
 
-    // Decide the payout path. The threshold constant lives on the
-    // DisbursementService class so the same value is used by every caller.
     const isInstantEligible = amount <= DisbursementService.INSTANT_WITHDRAWAL_LIMIT;
 
     if (isInstantEligible) {
-      // Attempt instant payout. The service itself also enforces the
-      // threshold, so even if this check is somehow bypassed the amount
-      // cap still holds — this check just avoids a pointless call.
       const instantResult = await DisbursementService.disburseWithdrawal(withdrawal.id);
 
       if (instantResult.success) {
-        // Withdrawal is now 'disbursing'. The B2C result callback will
-        // send the member their completion SMS (with the M-Pesa receipt)
-        // and notify staff when Safaricom confirms. We do NOT send an SMS
-        // here — that would duplicate the callback's message.
+        // Withdrawal is now 'disbursing'. The B2C result callback sends
+        // the member their completion SMS with the M-Pesa receipt.
         return `END Instant withdrawal of KES ${amount.toLocaleString()} initiated. Funds will reach your M-Pesa shortly.`;
       }
 
       // Instant attempt failed at request time — the withdrawal is still
-      // 'pending' because the service only moves it to 'disbursing' on
-      // accept. Log the reason and fall through to the queue path so the
-      // member's request isn't lost.
+      // 'pending'. Log the reason and fall through to the queue path so
+      // the member's request isn't lost.
       console.warn(
         `Instant withdrawal attempt failed for member ${member.id}, withdrawal ${withdrawal.id}: ${instantResult.message}`
       );
     }
 
     // Queue path — either the amount is above the threshold, or the
-    // instant attempt failed at request time. Send the standard
-    // "request received" SMS and alert staff.
+    // instant attempt failed at request time.
     try {
       await smsService.sendSMS(phoneNumber, smsService.templates.withdrawalRequested(member.full_name, amount));
     } catch (smsErr) {
       console.error('USSD withdrawal request SMS failed (request still recorded):', smsErr.message);
     }
 
-    // SMS-only staff alert for now - notificationService.notifyStaff's
-    // emailContent parameter expects a template from emailService, which
-    // hasn't been reviewed yet in this pass. Add an email template there
-    // once that file's shape is confirmed, following the same pattern as
-    // the other staff notifications in this file.
     try {
       await smsService.notifyStaff(smsService.templates.staffWithdrawalRequest(member.full_name, amount));
     } catch (staffSmsErr) {
       console.error('Staff withdrawal-request SMS failed (request still recorded):', staffSmsErr.message);
     }
 
-    // Two possible closing messages, depending on context:
-    //   - Above threshold: the queuing is expected; standard message.
-    //   - Below threshold but instant attempt failed: the member expected
-    //     instant, so acknowledge the delay and reassure them it's queued.
     const closingMessage = isInstantEligible
       ? `We could not complete your instant withdrawal right now. Your request of KES ${amount.toLocaleString()} is queued - our team will process it shortly.`
       : `Withdrawal request of KES ${amount.toLocaleString()} received. We will process it and contact you once complete.`;
