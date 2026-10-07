@@ -35,11 +35,39 @@ router.get('/', authenticate, requireAdmin, async (req, res) => {
     detail: darajaConfigured ? `${process.env.DARAJA_ENV || 'sandbox'} mode` : 'Missing DARAJA_* env vars',
   };
 
-  // Africa's Talking (SMS/USSD) - configuration presence, same reasoning
-  const atConfigured = !!process.env.AT_API_KEY;
+  // Africa's Talking — USSD gateway ONLY. SMS was moved off AT on 6 Oct
+  // 2026 (see services/smsService.js); the only AT variable this system
+  // still needs is AT_USSD_SHARED_SECRET, which validates inbound USSD
+  // requests. The previous check for AT_API_KEY was a false negative:
+  // the key was intentionally removed during the SMS cutover, and AT
+  // never needs it for USSD. A green "Operational" here means the shared
+  // secret is present — not that AT is reachable (they push to us, we
+  // don't call them, so there's nothing to ping).
+  const atUssdConfigured = !!process.env.AT_USSD_SHARED_SECRET;
   checks.africastalking = {
-    status: atConfigured ? 'operational' : 'not configured',
-    detail: atConfigured ? `username: ${process.env.AT_USERNAME || 'sandbox'}` : 'Missing AT_API_KEY',
+    status: atUssdConfigured ? 'operational' : 'not configured',
+    detail: atUssdConfigured ? 'USSD gateway shared secret configured' : 'Missing AT_USSD_SHARED_SECRET',
+  };
+
+  // SMS provider (Infinity Tech / Tiara) — this is now the SMS transport
+  // for the whole platform. All three variables are required: endpoint,
+  // API key, and the registered sender ID (Kemri_Sacco). SMS delivery
+  // failures surface separately in the Render logs; this check only
+  // reports whether the integration is configured at all.
+  const smsProviderConfigured = !!(
+    process.env.SMS_PROVIDER_API_URL &&
+    process.env.SMS_PROVIDER_API_KEY &&
+    process.env.SMS_PROVIDER_SENDER_ID
+  );
+  const smsProviderMissing = [];
+  if (!process.env.SMS_PROVIDER_API_URL) smsProviderMissing.push('SMS_PROVIDER_API_URL');
+  if (!process.env.SMS_PROVIDER_API_KEY) smsProviderMissing.push('SMS_PROVIDER_API_KEY');
+  if (!process.env.SMS_PROVIDER_SENDER_ID) smsProviderMissing.push('SMS_PROVIDER_SENDER_ID');
+  checks.sms_provider = {
+    status: smsProviderConfigured ? 'operational' : 'not configured',
+    detail: smsProviderConfigured
+      ? `sender: ${process.env.SMS_PROVIDER_SENDER_ID}`
+      : `Missing ${smsProviderMissing.join(', ')}`,
   };
 
   // USSD gateway - degraded if more than 20% of the last hour's sessions
