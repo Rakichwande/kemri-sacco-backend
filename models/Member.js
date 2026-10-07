@@ -367,22 +367,32 @@ async function isBoardStaff(memberId) {
 // --- Member deletion ---
 
 // Permanently delete a member record. Refuses if the member has any
-// FINANCIAL history — deposits, repayments, or loans/withdrawals that
-// actually moved money. Records that carry no financial consequence
-// (pending or rejected loan applications, pending or rejected withdrawal
-// requests) do NOT block deletion; they are removed alongside the member.
+// FINANCIAL history — completed deposits, repayments, or loans/withdrawals
+// that actually moved money. Records that carry no financial consequence
+// do NOT block deletion; they are removed alongside the member.
 //
-// Why the distinction matters:
-//   A pending loan application is not a financial obligation. No money
-//   moved. No promise was made. It is an expression of interest that
-//   the member may have abandoned or that staff may have decided not
-//   to act on. Keeping it alive blocks a test entry or a mistaken
-//   application from being cleaned up via the admin console, forcing
-//   staff to use direct database access — which they should not need.
+// What blocks deletion (financial history):
+//   - payments with status = 'completed'      real money arrived
+//   - repayments (any row)                    real money arrived
+//   - loans in 'disbursing'/'disbursed'/'repaid'  real money left or is in flight
+//   - withdrawals in 'disbursing'/'processed'     same
 //
-//   A disbursed loan is the opposite: real money left the SACCO's
-//   account. That record must survive forever for audit and
-//   reconciliation.
+// What does NOT block (no financial consequence):
+//   - payments with status = 'pending' or 'failed'  an STK push was
+//     attempted but never completed. The row is proof of an ATTEMPT,
+//     not of money movement. Counting these blocked deletion of members
+//     who had only tried and failed to deposit, which defeats the
+//     purpose of the rule — protect real records, not abandoned
+//     attempts. (A member whose STK push was cancelled by mistake on
+//     their side should not be undeletable forever.)
+//   - loans in 'pending'/'rejected'           an application, not an obligation
+//   - withdrawals in 'pending'/'rejected'     a request, not a payout
+//
+// Why the distinction matters: a financial record has to survive for
+// audit and reconciliation because reversing it would break reports and
+// remove evidence of real money movement. A pending application or a
+// failed payment attempt carries no such weight — deleting it removes
+// nothing that ever mattered.
 //
 // Reference numbers are NEVER reused. Deleting a member does not roll
 // back sacco_member_reference_seq — the sequence continues, so the next
@@ -412,14 +422,15 @@ async function remove(memberId) {
     }
     const member = memberRes.rows[0];
 
-    // Count BLOCKING history. The loan and withdrawal counts are
-    // restricted to statuses that represent actual money movement or an
-    // in-flight transfer — pending and rejected records are excluded
-    // because they carry no financial consequence and are cleaned up
-    // below.
+    // Count BLOCKING history. Every subquery is filtered to statuses
+    // that represent actual or in-flight money movement. Pending and
+    // failed records (payment attempts, loan applications, withdrawal
+    // requests) are excluded — they carry no financial consequence and
+    // are cleaned up below if present.
     const histRes = await client.query(
       `SELECT
-         (SELECT COUNT(*) FROM payments    WHERE member_id = $1) AS payments,
+         (SELECT COUNT(*) FROM payments    WHERE member_id = $1
+            AND status = 'completed') AS payments,
          (SELECT COUNT(*) FROM loans       WHERE member_id = $1
             AND status IN ('disbursing', 'disbursed', 'repaid')) AS loans,
          (SELECT COUNT(*) FROM repayments  WHERE member_id = $1) AS repayments,
@@ -433,10 +444,14 @@ async function remove(memberId) {
 
     if (total > 0) {
       await client.query('ROLLBACK');
+
+      // Singular / plural: "1 payment" not "1 payments". Each table name
+      // ends in 's', so stripping a trailing 's' for n===1 is safe.
       const parts = Object.entries(counts)
         .filter(([, n]) => Number(n) > 0)
-        .map(([table, n]) => `${n} ${table}`)
+        .map(([table, n]) => `${n} ${Number(n) === 1 ? table.replace(/s$/, '') : table}`)
         .join(', ');
+
       return {
         deleted: false,
         code: 'HAS_HISTORY',
@@ -445,13 +460,27 @@ async function remove(memberId) {
       };
     }
 
-    // No blocking history. Now clear the non-blocking records that
-    // reference this member via foreign key — pending and rejected loan
-    // applications and withdrawal requests. They have no financial
+    // No blocking history. Now clear the NON-BLOCKING records that
+    // reference this member via foreign key. These carry no financial
     // consequence but do have FK constraints that would prevent the
-    // member delete.
+    // member delete:
+    //
+    //   - pending/rejected loans      (applications, not obligations)
+    //   - pending/rejected withdrawals (requests, not payouts)
+    //   - pending/failed payments      (STK attempts, not payments)
+    //
+    // Payments must be removed too, otherwise the FK constraint on
+    // payments.member_id would block the member delete. The order
+    // matters: loans first (payments.loan_id may reference loans), then
+    // payments, then withdrawals, then the member.
     const removedLoansRes = await client.query(
       `DELETE FROM loans WHERE member_id = $1 AND status IN ('pending', 'rejected')
+       RETURNING id, status`,
+      [memberId]
+    );
+
+    const removedPaymentsRes = await client.query(
+      `DELETE FROM payments WHERE member_id = $1 AND status IN ('pending', 'failed')
        RETURNING id, status`,
       [memberId]
     );
@@ -470,6 +499,7 @@ async function remove(memberId) {
       deleted: true,
       member,
       removedLoans: removedLoansRes.rows,
+      removedPayments: removedPaymentsRes.rows,
       removedWithdrawals: removedWithdrawalsRes.rows,
     };
   } catch (err) {
