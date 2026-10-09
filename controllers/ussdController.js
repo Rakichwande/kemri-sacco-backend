@@ -10,13 +10,7 @@ const emailService = require('../services/emailService');
 
 // 2026-10-09: Withdrawal feature retired per board instruction.
 // Removed imports: models/Withdrawal, services/disbursementService.
-// Those modules remain on disk (still used by loans B2C in loanController),
-// but this controller no longer touches them.
 
-// Heuristic for whether a USSD response represents a failed step, based on
-// the response text itself - there's no separate error flag in the Africa's
-// Talking response format (just CON/END + a message), so this is the most
-// honest signal available without changing the underlying menu logic.
 const FAILURE_PHRASES = [
   'invalid', 'wrong', 'failed', 'error', 'something went wrong', 'not found',
   'insufficient', 'incorrect', 'locked', 'did not match',
@@ -26,23 +20,8 @@ function looksLikeFailure(responseText) {
   return FAILURE_PHRASES.some((phrase) => lower.includes(phrase));
 }
 
-// Per-USSD-session memory of "how many leading steps were spent on PIN
-// entry/setup", keyed by Africa's Talking's sessionId (constant for the
-// whole call, one HTTP request per screen). This exists because deciding
-// that purely from Member.hasPinSet() re-read fresh from the database on
-// every request breaks: the moment a first-time PIN is actually saved,
-// hasPinSet flips true, and the NEXT request then wrongly treats the
-// already-consumed PIN digits as a login attempt instead of recognizing
-// they were already spent - corrupting how much of the accumulated input
-// belongs to the action itself (loan amount, repayment amount).
-//
-// In-memory and safe ONLY because this app currently runs as a single
-// process (Render's WEB_CONCURRENCY=1). If this is ever scaled to more
-// than one instance, USSD screens for the same session could land on
-// different instances and this cache would miss - move it to a shared
-// store (Redis, or a DB table keyed by sessionId) before scaling up.
-const pinSessionState = new Map(); // sessionId -> { pinStepsConsumed, touchedAt }
-const PIN_SESSION_TTL_MS = 5 * 60 * 1000; // USSD sessions time out well before this
+const pinSessionState = new Map();
+const PIN_SESSION_TTL_MS = 5 * 60 * 1000;
 
 function cleanupStalePinSessions() {
   const cutoff = Date.now() - PIN_SESSION_TTL_MS;
@@ -89,7 +68,6 @@ async function handleUssd(req, res) {
         case '7':
           response = await handleChangePin(phoneNumber, steps);
           break;
-        // 2026-10-09: Option 8 used to be Withdraw. Renumbered Exit here.
         case '8':
           response = 'END Thank you for using KEMRI SACCO. Goodbye.';
           break;
@@ -117,8 +95,6 @@ async function handleUssd(req, res) {
 }
 
 function mainMenu() {
-  // 2026-10-09: "Settle Loan" reverted to "Loan Repayment"; Withdraw
-  // removed; Exit renumbered from 9 to 8.
   return (
     'CON Welcome to KEMRI SACCO\n' +
     '1. Register\n' +
@@ -136,16 +112,12 @@ function mainMenu() {
 // PIN AUTHENTICATION
 // ============================================================
 async function requirePin(member, steps, sessionId) {
-  // Already authenticated earlier in this exact USSD session - trust that,
-  // rather than re-deriving from hasPinSet() (which may have flipped since
-  // the PIN was set/verified a screen or two ago in this same dialog).
   const cached = pinSessionState.get(sessionId);
   if (cached) {
     return { authenticated: true, remainingSteps: steps.slice(cached.pinStepsConsumed) };
   }
 
   if (!Member.hasPinSet(member)) {
-    // First-time setup: steps[0] = new PIN, steps[1] = confirmation.
     if (steps.length === 0) {
       return { authenticated: false, response: 'CON No SACCO PIN set yet.\nEnter a new 4-digit PIN:' };
     }
@@ -163,8 +135,6 @@ async function requirePin(member, steps, sessionId) {
       await Member.setPin(member.id, newPin);
       pinSessionState.set(sessionId, { pinStepsConsumed: 2, touchedAt: Date.now() });
 
-      // First-time PIN confirmation SMS - separate from the "PIN changed"
-      // SMS sent by Change PIN, so a member has a clear record either way.
       try {
         await smsService.sendSMS(
           member.phone_number,
@@ -178,7 +148,6 @@ async function requirePin(member, steps, sessionId) {
     }
   }
 
-  // Existing PIN on file.
   if (Member.isPinLocked(member)) {
     return {
       authenticated: false,
@@ -235,9 +204,6 @@ async function handleRegister(phoneNumber, steps) {
         scheme: 'holiday_savings',
       });
     } catch (err) {
-      // members can collide on id_number (common) or phone_number (rare
-      // race). Surface the specific reason rather than letting the outer
-      // catch return a generic "Something went wrong".
       if (err.code === '23505' && err.constraint === 'members_id_number_key') {
         return 'END This ID number is already registered with KEMRI SACCO. If this is your ID, contact the office to link your new phone number.';
       }
@@ -268,9 +234,6 @@ async function handleRegister(phoneNumber, steps) {
 // ============================================================
 // 2. BALANCE (PIN required)
 // ============================================================
-// The "Balance" here is the member's SAVINGS balance, not a loan balance.
-// The word "balance" is correct in this context — it's a savings account,
-// not a loan. Leave the wording as-is.
 async function handleBalance(phoneNumber, steps, sessionId) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) {
@@ -336,10 +299,6 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
   if (!pinCheck.authenticated) return pinCheck.response;
   const remaining = pinCheck.remainingSteps;
 
-  // Check eligibility BEFORE asking for an amount. If the member has an
-  // active loan, a pending/approved application, or is otherwise
-  // ineligible, we tell them immediately and end the session rather than
-  // costing them an extra USSD screen.
   const eligibility = await LoanService.canApply(member.id);
   if (!eligibility.allowed) {
     return `END ${eligibility.reason}`;
@@ -364,18 +323,6 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
     const { loan } = result;
     const ref = `LN-${String(loan.id).padStart(5, '0')}`;
 
-    // FOUR possible outcomes, each with its own opening and closing line.
-    // They must reflect what actually happened, because the member sees
-    // this screen for a few seconds and then receives an SMS — any
-    // mismatch between the two reads as a bug.
-    //
-    //   disbursing           board/staff, auto-approved, B2C accepted —
-    //                        money is on the way
-    //   disbursementFailed   board/staff, auto-approved, but B2C rejected
-    //                        or errored — staff will disburse manually
-    //   autoApproved         board/staff, auto-approved, B2C not attempted
-    //                        (rare; e.g. B2C credentials not yet configured)
-    //   (none of the above)  regular member, awaiting staff review
     let opening;
     let closing;
     if (result.disbursing) {
@@ -392,15 +339,6 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
       closing = 'Awaiting SACCO review.';
     }
 
-    // Summary uses standard SACCO accounting terminology:
-    //   Principal            — amount borrowed
-    //   Interest             — charge for the 1-month term
-    //   Total amount payable — principal + interest (what the member owes)
-    //
-    // Field name note: loan.total_interest is the stored interest figure;
-    // loan.total_repayment is the stored principal + interest figure.
-    // Names retained in the DB for backward compatibility, but displayed
-    // here with the vocabulary an accountant would use.
     const summary =
       `${opening}: Principal KES ${Number(loan.principal).toLocaleString()}\n` +
       `Interest: KES ${Number(loan.total_interest).toLocaleString()}\n` +
@@ -416,10 +354,6 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
 // ============================================================
 // 5. LOAN REPAYMENT (PIN required)
 // ============================================================
-// 2026-10-09: Menu label reverted from "Settle Loan" to "Loan Repayment"
-// per board instruction. The endpoint, service methods, and DB fields have
-// always used "repayment" naming, so nothing below this line changed —
-// only the visible menu string in mainMenu().
 async function handleRepayLoan(phoneNumber, steps, sessionId) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) {
@@ -430,15 +364,9 @@ async function handleRepayLoan(phoneNumber, steps, sessionId) {
   if (!pinCheck.authenticated) return pinCheck.response;
   const remaining = pinCheck.remainingSteps;
 
-  // Only a DISBURSED loan is repayable. A pending, approved, or
-  // disbursing loan exists but no money has reached the member's M-Pesa
-  // yet, so there is nothing to repay.
   const repayableLoan = await Loan.getRepayableLoan(member.id);
 
   if (!repayableLoan) {
-    // Distinguish the non-repayable states so the member gets a clear,
-    // actionable message rather than a misleading "no outstanding loan"
-    // when they actually have an application in flight.
     const inFlightLoan = await Loan.getActiveLoan(member.id);
     if (inFlightLoan && inFlightLoan.status === 'pending') {
       return 'END Your loan application is still awaiting approval. You will receive an SMS once it is reviewed.';
@@ -482,6 +410,21 @@ async function handleRepayLoan(phoneNumber, steps, sessionId) {
 // ============================================================
 // 6. TRANSACTIONS (PIN required)
 // ============================================================
+// Shows the member their 5 most recent M-Pesa movements — deposits (money
+// in) and loan repayments (money out, reducing a loan).
+//
+// 2026-10-09: Previous output was "07 Oct: KES 40 (completed)" — the
+// member couldn't tell what each line represented, and "(completed)"
+// was redundant because only completed rows are worth showing. New
+// format replaces the status with the transaction type so each line
+// says what actually happened:
+//   07 Oct: Deposit KES 40
+//   06 Oct: Repay KES 227
+//
+// Scope note: loan DISBURSEMENTS live in the loans table, not payments,
+// so they don't appear here. The member portal statement shows the full
+// money-movement picture including disbursements. This USSD view is
+// deliberately just the M-Pesa movements a member initiated.
 async function handleTransactions(phoneNumber, steps, sessionId) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) {
@@ -492,13 +435,24 @@ async function handleTransactions(phoneNumber, steps, sessionId) {
   if (!pinCheck.authenticated) return pinCheck.response;
 
   const transactions = await Payment.findRecentByMember(member.id, 5);
-  if (transactions.length === 0) {
-    return 'END You have no transactions yet.';
+
+  // Filter to completed only. A pending STK push the member abandoned,
+  // or a failed attempt, shouldn't clutter the history.
+  const completed = transactions.filter((t) => t.status === 'completed');
+
+  if (completed.length === 0) {
+    return 'END You have no completed transactions yet.';
   }
 
-  const lines = transactions.map((t) => {
-    const date = new Date(t.created_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
-    return `${date}: KES ${Number(t.amount).toLocaleString()} (${t.status})`;
+  const lines = completed.map((t) => {
+    const date = new Date(t.created_at).toLocaleDateString('en-GB', {
+      day: '2-digit', month: 'short',
+    });
+    // loan_id NULL = savings deposit (money in); set = loan repayment
+    // (money out). Same distinction used across the entire platform —
+    // see models/Payment.js and models/Dashboard.js.
+    const label = t.loan_id === null ? 'Deposit' : 'Repay';
+    return `${date}: ${label} KES ${Number(t.amount).toLocaleString()}`;
   });
 
   return `END Recent transactions:\n${lines.join('\n')}`;
