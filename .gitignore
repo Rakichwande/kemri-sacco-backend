@@ -6,3 +6,4 @@ node_modules/
 *.dump
 schema.sql
 secrets-scan.json
+archives/
