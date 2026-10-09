@@ -13,6 +13,7 @@ const Repayment = require('./Repayment');
 //   savings_balance column.
 // - loans: outstanding balance, repaid-to-date, pending count, total disbursed
 // - repayments: per-transaction repayment history, for the monthly comparison
+//   AND for the interest split (Phase 2 — principal_paid / interest_paid).
 //
 // Deliberately NOT included: any "dividend accrual" or "available liquidity"
 // figure - no dividend formula or liquidity policy is defined anywhere in the
@@ -29,6 +30,9 @@ async function getSummary() {
     recentPendingResult,
     repaymentsByMonthRows,
     loansByMonthRows,
+    interestByMonthRows,
+    interestEarnedResult,
+    interestCollectedResult,
   ] = await Promise.all([
     db.query('SELECT COUNT(*)::int AS count FROM members'),
     // Total savings = completed deposits only. Excludes repayments, which
@@ -37,6 +41,9 @@ async function getSummary() {
     db.query(`SELECT COALESCE(SUM(outstanding_balance), 0)::bigint AS total FROM loans WHERE status = 'disbursed'`),
     db.query(`SELECT COALESCE(SUM(amount_paid), 0)::bigint AS total FROM loans`),
     db.query(`SELECT COUNT(*)::int AS count FROM loans WHERE status = 'pending'`),
+    // Principal disbursed — includes both currently-outstanding and
+    // fully-repaid loans, but excludes pending/approved/disbursing
+    // (no money has left the SACCO for those).
     db.query(`SELECT COALESCE(SUM(principal), 0)::bigint AS total FROM loans WHERE status IN ('disbursed', 'repaid')`),
     // Contributions by month — same deposit-only filter as the headline
     // savings figure above, so the chart's tallies reconcile with the total.
@@ -55,7 +62,7 @@ async function getSummary() {
       ORDER BY l.applied_at DESC
       LIMIT 3
     `),
-    Repayment.getMonthlyTotals(6), // returns rows array directly
+    Repayment.getMonthlyTotals(6),
     db.query(`
       SELECT date_trunc('month', disbursed_at) AS month, SUM(principal)::bigint AS total
       FROM loans
@@ -63,11 +70,21 @@ async function getSummary() {
         AND disbursed_at >= NOW() - INTERVAL '6 months'
       GROUP BY month
       ORDER BY month
-    `).then((r) => r.rows), // <-- unwrap to the rows array so .map() works below
+    `).then((r) => r.rows),
+    // NEW (Phase 3): interest collected per month, from the Phase 2 split.
+    // Cash-basis — this is what the combined chart's interest bar shows.
+    Repayment.getMonthlyInterestTotals(6),
+    // NEW (Phase 3): interest earned (accrued). For 1-month loans this is
+    // the sum of total_interest on every disbursed loan — money the SACCO
+    // has earned by issuing the loan, whether or not it's been repaid yet.
+    db.query(`SELECT COALESCE(SUM(total_interest), 0)::bigint AS total FROM loans WHERE disbursed_at IS NOT NULL`),
+    // NEW (Phase 3): interest collected (all-time). Cash actually received.
+    db.query(`SELECT COALESCE(SUM(interest_paid), 0)::bigint AS total FROM repayments`),
   ]);
 
-  // Fill in every one of the last 6 months for all three series, even months
-  // with zero activity, so the chart doesn't silently skip a quiet month.
+  // Fill in every one of the last 6 months for all four series, even
+  // months with zero activity, so the chart doesn't silently skip a quiet
+  // month.
   const contributionsMap = new Map(
     monthlySeriesResult.rows.map((r) => [r.month.toISOString().slice(0, 7), Number(r.total)])
   );
@@ -76,6 +93,9 @@ async function getSummary() {
   );
   const loansMap = new Map(
     loansByMonthRows.map((r) => [r.month.toISOString().slice(0, 7), Number(r.total)])
+  );
+  const interestMap = new Map(
+    interestByMonthRows.map((r) => [r.month.toISOString().slice(0, 7), Number(r.total)])
   );
   const monthlySeries = [];
   const now = new Date();
@@ -87,10 +107,14 @@ async function getSummary() {
       contributions: contributionsMap.get(key) || 0,
       loans: loansMap.get(key) || 0,
       repayments: repaymentsMap.get(key) || 0,
+      // NEW (Phase 3) — interest collected that month, from the Phase 2
+      // split. Feeds the third bar in the combined Financial Trends chart.
+      interest: interestMap.get(key) || 0,
     });
   }
 
   return {
+    // Existing fields — unchanged shape so nothing else breaks.
     totalMembers: membersResult.rows[0].count,
     totalSavings: Number(savingsResult.rows[0].total),
     loansOutstanding: Number(loansOutstandingResult.rows[0].total),
@@ -105,6 +129,14 @@ async function getSummary() {
       purpose: r.purpose,
       appliedAt: r.applied_at,
     })),
+
+    // NEW (Phase 3) — dashboard card inputs.
+    // principalDisbursed aliases totalDisbursed (same number, clearer name
+    // for the new card). Kept separate for forward-compatibility if the two
+    // ever need to diverge (e.g. netting off a clawback).
+    principalDisbursed: Number(disbursedResult.rows[0].total),
+    interestEarned: Number(interestEarnedResult.rows[0].total),
+    interestCollected: Number(interestCollectedResult.rows[0].total),
   };
 }
 
