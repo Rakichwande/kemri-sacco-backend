@@ -134,10 +134,63 @@ async function getMonthlyInterestTotals(monthsBack = 6) {
   return result.rows;
 }
 
+// Per-member repayment summary — total principal, interest, and combined
+// amount. Used by the statement route (routes/members.js) for the
+// "Principal Repaid / Interest Paid / Total Repaid" band that appears
+// below the main financial snapshot. Added 2026-10-09 (Phase 4).
+//
+// COALESCE on every column so a member with zero repayments returns
+// { principalPaid: 0, interestPaid: 0, total: 0 } instead of throwing —
+// the frontend uses the total === 0 case to hide the split band.
+async function getSummaryForMember(member_id) {
+  const result = await db.query(
+    `SELECT
+       COALESCE(SUM(principal_paid), 0)::bigint AS principal_paid,
+       COALESCE(SUM(interest_paid), 0)::bigint AS interest_paid,
+       COALESCE(SUM(amount), 0)::bigint AS total
+     FROM repayments
+     WHERE member_id = $1`,
+    [member_id]
+  );
+  const row = result.rows[0];
+  return {
+    principalPaid: Number(row.principal_paid),
+    interestPaid: Number(row.interest_paid),
+    total: Number(row.total),
+  };
+}
+
+// Per-loan repayment split — how much of the amount_paid on a loan went
+// to principal vs interest. Used by the statement route for the active
+// loan card's split sub-line. Returns zeros for a loan with no repayments
+// yet (rare, but possible between disbursement and first payment). Added
+// 2026-10-09 (Phase 4).
+//
+// Note this returns raw snake_case (principal_paid, interest_paid) to
+// match the Loan row's own field naming, so the caller can spread the
+// result directly into the activeLoan object without renaming.
+async function getSplitForLoan(loan_id) {
+  const result = await db.query(
+    `SELECT
+       COALESCE(SUM(principal_paid), 0)::bigint AS principal_paid,
+       COALESCE(SUM(interest_paid), 0)::bigint AS interest_paid
+     FROM repayments
+     WHERE loan_id = $1`,
+    [loan_id]
+  );
+  const row = result.rows[0];
+  return {
+    principal_paid: Number(row.principal_paid),
+    interest_paid: Number(row.interest_paid),
+  };
+}
+
 module.exports = {
   init,
   create,
   findAll,
   getMonthlyTotals,
   getMonthlyInterestTotals,
+  getSummaryForMember,   // ← new (Phase 4)
+  getSplitForLoan,       // ← new (Phase 4)
 };
