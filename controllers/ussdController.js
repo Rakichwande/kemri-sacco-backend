@@ -1,14 +1,17 @@
 const Member = require('../models/Member');
 const Payment = require('../models/Payment');
 const Loan = require('../models/Loan');
-const Withdrawal = require('../models/Withdrawal');
 const paymentService = require('../services/paymentService');
 const LoanService = require('../services/loanService');
-const DisbursementService = require('../services/disbursementService');
 const smsService = require('../services/smsService');
 const UssdSession = require('../models/UssdSession');
 const notificationService = require('../services/notificationService');
 const emailService = require('../services/emailService');
+
+// 2026-10-09: Withdrawal feature retired per board instruction.
+// Removed imports: models/Withdrawal, services/disbursementService.
+// Those modules remain on disk (still used by loans B2C in loanController),
+// but this controller no longer touches them.
 
 // Heuristic for whether a USSD response represents a failed step, based on
 // the response text itself - there's no separate error flag in the Africa's
@@ -86,10 +89,8 @@ async function handleUssd(req, res) {
         case '7':
           response = await handleChangePin(phoneNumber, steps);
           break;
+        // 2026-10-09: Option 8 used to be Withdraw. Renumbered Exit here.
         case '8':
-          response = await handleWithdraw(phoneNumber, steps, sessionId);
-          break;
-        case '9':
           response = 'END Thank you for using KEMRI SACCO. Goodbye.';
           break;
         default:
@@ -116,17 +117,18 @@ async function handleUssd(req, res) {
 }
 
 function mainMenu() {
+  // 2026-10-09: "Settle Loan" reverted to "Loan Repayment"; Withdraw
+  // removed; Exit renumbered from 9 to 8.
   return (
     'CON Welcome to KEMRI SACCO\n' +
     '1. Register\n' +
     '2. Balance\n' +
     '3. Deposit\n' +
     '4. Loan\n' +
-    '5. Settle Loan\n' +
+    '5. Loan Repayment\n' +
     '6. Transactions\n' +
     '7. Change PIN\n' +
-    '8. Withdraw\n' +
-    '9. Exit'
+    '8. Exit'
   );
 }
 
@@ -412,13 +414,12 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
 }
 
 // ============================================================
-// 5. SETTLE LOAN (PIN required)
+// 5. LOAN REPAYMENT (PIN required)
 // ============================================================
-// The member-facing wording is "settle" rather than "repay" to match the
-// accounting terminology the SACCO's board adopted on 7 Oct 2026. The
-// underlying endpoint, service methods, and DB fields still use
-// "repayment" naming for backward compatibility — only the visible
-// wording changes here.
+// 2026-10-09: Menu label reverted from "Settle Loan" to "Loan Repayment"
+// per board instruction. The endpoint, service methods, and DB fields have
+// always used "repayment" naming, so nothing below this line changed —
+// only the visible menu string in mainMenu().
 async function handleRepayLoan(phoneNumber, steps, sessionId) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) {
@@ -429,13 +430,13 @@ async function handleRepayLoan(phoneNumber, steps, sessionId) {
   if (!pinCheck.authenticated) return pinCheck.response;
   const remaining = pinCheck.remainingSteps;
 
-  // Only a DISBURSED loan is settleable. A pending, approved, or
+  // Only a DISBURSED loan is repayable. A pending, approved, or
   // disbursing loan exists but no money has reached the member's M-Pesa
-  // yet, so there is nothing to settle.
+  // yet, so there is nothing to repay.
   const repayableLoan = await Loan.getRepayableLoan(member.id);
 
   if (!repayableLoan) {
-    // Distinguish the non-settleable states so the member gets a clear,
+    // Distinguish the non-repayable states so the member gets a clear,
     // actionable message rather than a misleading "no outstanding loan"
     // when they actually have an application in flight.
     const inFlightLoan = await Loan.getActiveLoan(member.id);
@@ -448,7 +449,7 @@ async function handleRepayLoan(phoneNumber, steps, sessionId) {
     if (inFlightLoan && inFlightLoan.status === 'disbursing') {
       return 'END Your loan is being disbursed to your M-Pesa right now. You will receive an SMS once the funds arrive.';
     }
-    return 'END You have no active loan to settle.';
+    return 'END You have no active loan to repay.';
   }
 
   if (remaining.length === 0) {
@@ -470,7 +471,7 @@ async function handleRepayLoan(phoneNumber, steps, sessionId) {
       });
       return 'END An M-Pesa prompt has been sent to your phone. Enter your PIN to complete the payment.';
     } catch (err) {
-      console.error('USSD loan settlement STK push failed:', err.message);
+      console.error('USSD loan repayment STK push failed:', err.message);
       return 'END We could not process your payment right now. Please try again shortly.';
     }
   }
@@ -567,95 +568,18 @@ async function handleChangePin(phoneNumber, steps) {
 }
 
 // ============================================================
-// 8. WITHDRAW (PIN required)
+// 8. (RETIRED) WITHDRAW
 // ============================================================
-// Withdrawals support two payout paths, selected by amount:
+// 2026-10-09: Withdrawal feature retired per board instruction. The
+// handleWithdraw function was removed here in full, along with the
+// `Withdrawal` and `DisbursementService` imports at the top of this file.
 //
-//   ≤ INSTANT_WITHDRAWAL_LIMIT (KES 5,000 by default)
-//     Attempts an immediate M-Pesa B2C payout. If B2C accepts, the
-//     withdrawal moves to 'disbursing' and resolves via webhook callback.
+// Historical withdrawal records are preserved in the `withdrawals` table
+// (archive CSV exported 2026-10-09). The model file models/Withdrawal.js
+// and route file routes/withdrawals.js remain on disk but are no longer
+// mounted. See AdminLayout.jsx / App.jsx for the parallel frontend changes.
 //
-//   > INSTANT_WITHDRAWAL_LIMIT
-//     Queued as a pending request for staff processing.
-//
-// The word "balance" in this section refers to the member's SAVINGS
-// balance (their own money), which is correct — this is not a loan.
-async function handleWithdraw(phoneNumber, steps, sessionId) {
-  const member = await Member.findByPhone(phoneNumber);
-  if (!member) {
-    return 'END You are not registered. Dial and select option 1 to register first.';
-  }
-
-  const pinCheck = await requirePin(member, steps, sessionId);
-  if (!pinCheck.authenticated) return pinCheck.response;
-  const remaining = pinCheck.remainingSteps;
-
-  const existingPending = await Withdrawal.getPendingForMember(member.id);
-  if (existingPending) {
-    return `END You already have a withdrawal of KES ${Number(existingPending.amount).toLocaleString()} in progress. Please wait for it to complete.`;
-  }
-
-  const savingsBalance = await Payment.getMemberBalance(member.id);
-
-  if (remaining.length === 0) {
-    return `CON Savings balance: KES ${savingsBalance.toLocaleString()}\nEnter amount to withdraw`;
-  }
-
-  if (remaining.length === 1) {
-    const amount = Number(remaining[0]);
-    if (!amount || amount <= 0) {
-      return 'END Invalid amount. Please dial again.';
-    }
-    if (amount > savingsBalance) {
-      return `END Insufficient funds. Your savings balance is KES ${savingsBalance.toLocaleString()}.`;
-    }
-
-    const withdrawal = await Withdrawal.create({ member_id: member.id, amount });
-    if (!withdrawal) {
-      return 'END You already have a withdrawal request in progress. Please wait for it to complete.';
-    }
-
-    const isInstantEligible = amount <= DisbursementService.INSTANT_WITHDRAWAL_LIMIT;
-
-    if (isInstantEligible) {
-      const instantResult = await DisbursementService.disburseWithdrawal(withdrawal.id);
-
-      if (instantResult.success) {
-        // Withdrawal is now 'disbursing'. The B2C result callback sends
-        // the member their completion SMS with the M-Pesa receipt.
-        return `END Instant withdrawal of KES ${amount.toLocaleString()} initiated. Funds will reach your M-Pesa shortly.`;
-      }
-
-      // Instant attempt failed at request time — the withdrawal is still
-      // 'pending'. Log the reason and fall through to the queue path so
-      // the member's request isn't lost.
-      console.warn(
-        `Instant withdrawal attempt failed for member ${member.id}, withdrawal ${withdrawal.id}: ${instantResult.message}`
-      );
-    }
-
-    // Queue path — either the amount is above the threshold, or the
-    // instant attempt failed at request time.
-    try {
-      await smsService.sendSMS(phoneNumber, smsService.templates.withdrawalRequested(member.full_name, amount));
-    } catch (smsErr) {
-      console.error('USSD withdrawal request SMS failed (request still recorded):', smsErr.message);
-    }
-
-    try {
-      await smsService.notifyStaff(smsService.templates.staffWithdrawalRequest(member.full_name, amount));
-    } catch (staffSmsErr) {
-      console.error('Staff withdrawal-request SMS failed (request still recorded):', staffSmsErr.message);
-    }
-
-    const closingMessage = isInstantEligible
-      ? `We could not complete your instant withdrawal right now. Your request of KES ${amount.toLocaleString()} is queued - our team will process it shortly.`
-      : `Withdrawal request of KES ${amount.toLocaleString()} received. We will process it and contact you once complete.`;
-
-    return `END ${closingMessage}`;
-  }
-
-  return 'END Invalid input. Please dial again.';
-}
+// If the board ever reinstates withdrawals, the deleted handler is
+// recoverable from git history immediately before this commit.
 
 module.exports = { handleUssd };

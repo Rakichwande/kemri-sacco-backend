@@ -34,6 +34,12 @@ const Member = require('./models/Member');
 const Payment = require('./models/Payment');
 const Loan = require('./models/Loan');
 const Repayment = require('./models/Repayment');
+// 2026-10-09: Withdrawal feature retired per board instruction.
+// The model import is retained so Withdrawal.init() below still ensures the
+// `withdrawals` table exists (CREATE TABLE IF NOT EXISTS) - the table is
+// kept as an archive of the two historical records. Do not remove this
+// import unless you also remove Withdrawal.init() from start() and accept
+// that a fresh DB deploy will no longer include the archive table.
 const Withdrawal = require('./models/Withdrawal');
 // Add these lines
 const authRoutes = require('./routes/auth');
@@ -113,8 +119,14 @@ app.use('/api/repayments', require('./routes/repayments'));
 app.use('/api/reports', require('./routes/reports'));
 app.use('/api/system-health', require('./routes/systemHealth'));
 
-// ----- WITHDRAWAL ROUTES (NEW) -----
-app.use('/api/withdrawals', require('./routes/withdrawals'));
+// ----- WITHDRAWAL ROUTES (RETIRED 2026-10-09) -----
+// Removed per board instruction. The route file `routes/withdrawals.js`
+// and model `models/Withdrawal.js` remain on disk, unmounted, so the code
+// is recoverable if the board ever reinstates the feature. The
+// `withdrawals` table itself is retained as an archive - see the
+// Withdrawal import note above.
+//
+// app.use('/api/withdrawals', require('./routes/withdrawals'));
 
 // ----- INTERNAL ROUTES (scheduled jobs) -----
 // Called by GitHub Actions, not by users. Auth is a shared-secret header
@@ -137,6 +149,12 @@ async function start() {
     await Loan.init();
     await Payment.init();
     await Repayment.init();
+    // 2026-10-09: Withdrawal.init() is deliberately retained even though
+    // the feature is retired. It runs CREATE TABLE IF NOT EXISTS - a no-op
+    // on the live DB (table already exists), but it ensures a fresh deploy
+    // against a new database still provisions the archive table so
+    // historical records have a home. Remove this line only if you are
+    // also dropping the archive.
     await Withdrawal.init();
     await UssdSession.init();
     await StaffInvite.init();
