@@ -63,9 +63,6 @@ async function getMemberPerformance(memberId) {
 
   const savingsBalance = Number(savingsResult.rows[0].total);
 
-  // Map split rows by loan_id for O(1) lookup in the loan mapping below.
-  // Loans with no repayments yet (pending, rejected, disbursed-not-yet-paid)
-  // simply aren't in the map, so the split defaults to zeros.
   const splitsByLoan = new Map(
     splitsResult.rows.map((r) => [
       r.loan_id,
@@ -83,11 +80,9 @@ async function getMemberPerformance(memberId) {
     let daysToRepay = null;
     let onTime = null;
 
-    // Only a fully-repaid loan has a duration. A disbursed-but-not-repaid
-    // loan has no end date yet, so on_time stays null.
     if (disbursed && repaid) {
       daysToRepay = Math.round((repaid - disbursed) / (1000 * 60 * 60 * 24));
-      const tenureDays = loan.tenure_months * 30 + 7; // +7-day grace
+      const tenureDays = loan.tenure_months * 30 + 7;
       onTime = daysToRepay <= tenureDays;
     }
 
@@ -101,7 +96,6 @@ async function getMemberPerformance(memberId) {
       total_interest: Number(loan.total_interest),
       outstanding_balance: Number(loan.outstanding_balance),
       amount_paid: Number(loan.amount_paid),
-      // 2026-10-09 (Phase 4): split of amount_paid.
       principal_paid: split.principal_paid,
       interest_paid: split.interest_paid,
       monthly_installment: Number(loan.monthly_installment),
@@ -123,12 +117,17 @@ async function getMemberPerformance(memberId) {
   ).length;
   const loansRejected = enrichedLoans.filter((l) => l.status === 'rejected').length;
 
-  const totalBorrowed = enrichedLoans.reduce((s, l) => s + l.principal, 0);
+  // 2026-10-09: Total Borrowed now counts only loans where money actually
+  // left the SACCO — disbursed or repaid. Previously this summed every
+  // loan row, so a rejected or pending application inflated the figure
+  // even though no cash ever moved. James Karithi's report was correct
+  // (his only loan was disbursed), but members with rejected applications
+  // saw a phantom number.
+  const totalBorrowed = enrichedLoans
+    .filter((l) => ['disbursed', 'repaid'].includes(l.status))
+    .reduce((s, l) => s + l.principal, 0);
+
   const totalRepaid = enrichedLoans.reduce((s, l) => s + l.amount_paid, 0);
-  // 2026-10-09 (Phase 4): lifetime split totals. principal + interest
-  // should equal totalRepaid for every member with clean data; if they
-  // ever diverge, it means a repayment row is missing its split — worth
-  // an alarm but never a crash, so we just sum what's there.
   const totalPrincipalPaid = enrichedLoans.reduce((s, l) => s + l.principal_paid, 0);
   const totalInterestPaid = enrichedLoans.reduce((s, l) => s + l.interest_paid, 0);
   const currentOutstanding = Number(member.total_outstanding_balance || 0);
@@ -159,7 +158,6 @@ async function getMemberPerformance(memberId) {
       loans_rejected: loansRejected,
       total_borrowed: totalBorrowed,
       total_repaid: totalRepaid,
-      // 2026-10-09 (Phase 4): split of total_repaid.
       total_principal_paid: totalPrincipalPaid,
       total_interest_paid: totalInterestPaid,
       current_outstanding: currentOutstanding,
