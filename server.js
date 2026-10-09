@@ -119,6 +119,12 @@ app.use('/api/repayments', require('./routes/repayments'));
 app.use('/api/reports', require('./routes/reports'));
 app.use('/api/system-health', require('./routes/systemHealth'));
 
+// ----- LOAN INCOME REPORT (Phase 4, 2026-10-09) -----
+// Per-loan breakdown of principal, expected interest, and amount repaid
+// to date. Powers the admin portal's Loan Income page (sidebar: Loans).
+// Read-only, gated on members:read inside the route file.
+app.use('/api/income', require('./routes/income'));
+
 // ----- WITHDRAWAL ROUTES (RETIRED 2026-10-09) -----
 // Removed per board instruction. The route file `routes/withdrawals.js`
 // and model `models/Withdrawal.js` remain on disk, unmounted, so the code
