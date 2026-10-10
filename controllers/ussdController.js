@@ -411,20 +411,18 @@ async function handleRepayLoan(phoneNumber, steps, sessionId) {
 // 6. TRANSACTIONS (PIN required)
 // ============================================================
 // Shows the member their 5 most recent M-Pesa movements — deposits (money
-// in) and loan repayments (money out, reducing a loan).
+// in) and loan repayments (money out, reducing a loan) — each labelled
+// with its type.
 //
-// 2026-10-09: Previous output was "07 Oct: KES 40 (completed)" — the
-// member couldn't tell what each line represented, and "(completed)"
-// was redundant because only completed rows are worth showing. New
-// format replaces the status with the transaction type so each line
-// says what actually happened:
-//   07 Oct: Deposit KES 40
-//   06 Oct: Repay KES 227
+// 2026-10-10: A previous change filtered the list to status='completed'
+// only. That was a mistake — a member with a pending deposit would be
+// told "no completed transactions yet", which reads as "your deposit
+// failed" right when they're checking whether it went through. Now all
+// 5 recent rows are shown; only non-completed ones are annotated.
 //
 // Scope note: loan DISBURSEMENTS live in the loans table, not payments,
 // so they don't appear here. The member portal statement shows the full
-// money-movement picture including disbursements. This USSD view is
-// deliberately just the M-Pesa movements a member initiated.
+// money-movement picture including disbursements.
 async function handleTransactions(phoneNumber, steps, sessionId) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) {
@@ -436,23 +434,20 @@ async function handleTransactions(phoneNumber, steps, sessionId) {
 
   const transactions = await Payment.findRecentByMember(member.id, 5);
 
-  // Filter to completed only. A pending STK push the member abandoned,
-  // or a failed attempt, shouldn't clutter the history.
-  const completed = transactions.filter((t) => t.status === 'completed');
-
-  if (completed.length === 0) {
-    return 'END You have no completed transactions yet.';
+  if (transactions.length === 0) {
+    return 'END You have no transactions yet.';
   }
 
-  const lines = completed.map((t) => {
+  const lines = transactions.map((t) => {
     const date = new Date(t.created_at).toLocaleDateString('en-GB', {
       day: '2-digit', month: 'short',
     });
-    // loan_id NULL = savings deposit (money in); set = loan repayment
-    // (money out). Same distinction used across the entire platform —
-    // see models/Payment.js and models/Dashboard.js.
+    // loan_id NULL = savings deposit (money in); set = loan repayment.
     const label = t.loan_id === null ? 'Deposit' : 'Repay';
-    return `${date}: ${label} KES ${Number(t.amount).toLocaleString()}`;
+    // Only annotate when the status is NOT the expected 'completed' —
+    // a completed row stays clean, pending/failed rows get a marker.
+    const suffix = t.status === 'completed' ? '' : ` (${t.status})`;
+    return `${date}: ${label} KES ${Number(t.amount).toLocaleString()}${suffix}`;
   });
 
   return `END Recent transactions:\n${lines.join('\n')}`;
