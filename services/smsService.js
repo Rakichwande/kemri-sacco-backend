@@ -2,24 +2,7 @@ require('dotenv').config();
 const axios = require('axios');
 
 // SMS TRANSPORT: KEMRI SACCO's own provider (Infinity Tech, powered by Tiara).
-//
-// This service used to send SMS via Africa's Talking. It now sends via
-// Infinity Tech's HTTP API, using KEMRI's approved sender ID (Kemri_Sacco).
-// Africa's Talking remains the USSD gateway — that path is unaffected and
-// still requires AT_USSD_SHARED_SECRET in the environment.
-//
-// What did NOT change:
-//   - The sendSMS(phoneNumber, message) signature
-//   - The { sent, reason } return shape
-//   - The "never throws" contract
-//   - The notifyStaff(message) function
-//
-// Callers are unaffected by the template overhaul below — every template
-// keeps its existing signature. Only the message text is clearer.
-
-// ─────────────────────────────────────────────────────────────────────────
-//  PROVIDER CONFIGURATION
-// ─────────────────────────────────────────────────────────────────────────
+// (unchanged header comment)
 
 const SMS_API_URL = process.env.SMS_PROVIDER_API_URL;
 const SMS_API_KEY = process.env.SMS_PROVIDER_API_KEY;
@@ -28,16 +11,6 @@ const SMS_SENDER_ID = process.env.SMS_PROVIDER_SENDER_ID;
 function isConfigured() {
   return !!(SMS_API_URL && SMS_API_KEY && SMS_SENDER_ID);
 }
-
-// ─────────────────────────────────────────────────────────────────────────
-//  PHONE NORMALISATION
-//
-//  Infinity Tech / Tiara requires the format 2547XXXXXXXXX — 12 digits,
-//  country code, no leading + and no leading 0. This is the same canonical
-//  form the Daraja normaliser produces, so a member registered with any of
-//  the accepted local formats (0722..., 722..., +254722..., 254 722...)
-//  resolves to the same outgoing value.
-// ─────────────────────────────────────────────────────────────────────────
 
 function normalizePhone(phoneNumber) {
   if (!phoneNumber) return null;
@@ -57,102 +30,49 @@ function normalizePhone(phoneNumber) {
   return cleaned;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-//  SMS TEMPLATES
-//
-//  Conventions followed by every message in this file:
-//
-//  1. GSM-7 characters ONLY. No em dashes, smart quotes, or special
-//     symbols. They force the message into UCS-2 encoding, which splits
-//     it into multiple segments and triples the per-message cost. Use
-//     plain hyphens and standard characters.
-//
-//  2. Member messages start with "KEMRI SACCO:" so the brand is visible
-//     even if the carrier truncates the sender name in a preview.
-//
-//  3. Staff messages start with "KEMRI SACCO Admin:" and are dense —
-//     name, amount, reference — so staff can triage from the notification
-//     preview without opening the portal.
-//
-//  4. Aim for under 160 characters. Any message longer than that splits
-//     into 2 segments and doubles the cost.
-//
-//  5. Members are addressed by first word of their full name where the
-//     template has access to it. Full name is used where the reference
-//     matters (staff notifications).
-//
-//  6. LOAN TERMINOLOGY — loans are now 1-month term (board decision,
-//     7 Oct 2026) and messages use standard SACCO/accounting vocabulary:
-//
-//       Principal            — the amount the member borrowed
-//       Interest             — the charge for the loan term
-//       Total amount payable — principal + interest (what the member owes)
-//       Amount outstanding   — remaining balance after partial payments
-//       Settle               — pay off in full (preferred over "clear")
-//
-//     Avoid: "monthly instalment" (no longer applicable with a 1-month
-//     term), "repayment" as a noun for individual payments (use "payment"),
-//     "loan balance" (use "amount outstanding" — more precise).
-// ─────────────────────────────────────────────────────────────────────────
-
 const formatKES = (amount) => `KES ${Number(amount).toLocaleString()}`;
 
-// First word of a full name — "Joshua Rakich Odhiambo" -> "Joshua".
-// Falls back to the full string if no space is present.
 function firstName(fullName) {
   if (!fullName) return '';
   return String(fullName).trim().split(/\s+/)[0];
 }
 
 const templates = {
-  // ───────────────────────────────────────────────────────────────────────
-  //  MEMBER-FACING — REGISTRATION
-  // ───────────────────────────────────────────────────────────────────────
-
+  // ─── MEMBER-FACING — REGISTRATION ───
   applicationReceived: (name) =>
     `Welcome to KEMRI SACCO, ${firstName(name)}. Your account is active. Dial *483*4444# to save, check balance, or apply for a loan.`,
 
-  // ───────────────────────────────────────────────────────────────────────
-  //  MEMBER-FACING — DEPOSITS
-  // ───────────────────────────────────────────────────────────────────────
-
+  // ─── MEMBER-FACING — DEPOSITS ───
   paymentConfirmed: (name, amount, reference, receipt) =>
     `KEMRI SACCO: Hi ${firstName(name)}, we received your deposit of ${formatKES(amount)}. Receipt: ${receipt}. Your savings balance is updated. Ref: ${reference}.`,
 
   paymentFailed: (name) =>
     `KEMRI SACCO: Hi ${firstName(name)}, your deposit did not go through. Nothing was deducted. Please try again or visit our office.`,
 
-  // ───────────────────────────────────────────────────────────────────────
-  //  MEMBER-FACING — LOANS
-  //
-  //  1-month term, accountant terminology. Signature changes are noted
-  //  per template — the caller (LoanService) passes the matching args.
-  // ───────────────────────────────────────────────────────────────────────
-
-  // Args: (name, principal, ref)
-  // Note: this argument is the principal, not the total repayment.
+  // ─── MEMBER-FACING — LOANS ───
   loanApplicationReceived: (name, principal, ref) =>
     `KEMRI SACCO: Hi ${firstName(name)}, we received your loan application for a principal of ${formatKES(principal)}. Ref: ${ref}. We'll review it and SMS you the decision shortly.`,
 
-  // Args: (name, principal, interest, totalPayable)
-  // Renamed from (name, amount, installment, tenure) — the 6-month
-  // instalment concept no longer applies.
   loanApproved: (name, principal, interest, totalPayable) =>
     `KEMRI SACCO: Hi ${firstName(name)}, your loan is approved. Principal: ${formatKES(principal)}. Interest: ${formatKES(interest)}. Total amount payable: ${formatKES(totalPayable)}. Funds will be sent to your M-Pesa shortly.`,
 
+  // 2026-10-10: Rewritten per board feedback. The previous wording was
+  // ambiguous about which date the member was looking at — and the CALLER
+  // was passing today's date instead of next_payment_due, so every loan
+  // showed its disbursement date as the due date. Both fixed in the same
+  // commit. See disbursementService._handleLoanB2CResult for the caller.
+  //
+  // 194 chars at typical values = 2 SMS segments. Same cost as the manual
+  // version the board approved. Do NOT add asterisks expecting bold —
+  // SMS is plain text and they render literally.
+  //
   // Args: (name, principal, totalPayable, dueDate)
-  // Renamed from (name, amount, totalOutstanding, date) — clearer what
-  // each figure represents. `totalPayable` should be the member's running
-  // amount outstanding after this disbursement (from
-  // members.total_outstanding_balance), which for a fresh 1-month loan
-  // equals principal + interest on this loan.
+  //   totalPayable = member's running amount outstanding AFTER this
+  //                  disbursement (from members.total_outstanding_balance)
+  //   dueDate      = disbursement date + 1 month, formatted DD Mon YYYY
   loanDisbursed: (name, principal, totalPayable, dueDate) =>
-    `KEMRI SACCO: Hi ${firstName(name)}, ${formatKES(principal)} principal has been disbursed to your M-Pesa. Total amount payable by ${dueDate}: ${formatKES(totalPayable)}.`,
+    `KEMRI SACCO: Hi ${firstName(name)}, ${formatKES(principal)} has been disbursed to your M-Pesa. Total amount payable: ${formatKES(totalPayable)}, due ${dueDate}. Please settle on or before the due date. Thank you for choosing KEMRI SACCO.`,
 
-  // Args: (name, amountPaid, amountOutstanding, receipt)
-  // Renamed the third arg conceptually from "newBalance" to
-  // "amountOutstanding" — with a 1-month loan and partial payments, the
-  // figure represents principal + interest still owed.
   loanRepaymentConfirmed: (name, amountPaid, amountOutstanding, receipt) =>
     `KEMRI SACCO: Hi ${firstName(name)}, we received your payment of ${formatKES(amountPaid)}. Amount outstanding: ${formatKES(amountOutstanding)}. Receipt: ${receipt}.`,
 
@@ -162,10 +82,7 @@ const templates = {
   loanDisbursementFailed: (name) =>
     `KEMRI SACCO: Hi ${firstName(name)}, we could not complete your loan disbursement right now. Our team will contact you shortly.`,
 
-  // ───────────────────────────────────────────────────────────────────────
-  //  MEMBER-FACING — WITHDRAWALS
-  // ───────────────────────────────────────────────────────────────────────
-
+  // ─── MEMBER-FACING — WITHDRAWALS (dormant — feature retired) ───
   withdrawalRequested: (name, amount) =>
     `KEMRI SACCO: Hi ${firstName(name)}, we received your withdrawal request of ${formatKES(amount)}. Our team will process it and SMS you once the funds are sent.`,
 
@@ -175,18 +92,7 @@ const templates = {
   withdrawalInstantFailed: (name, amount) =>
     `KEMRI SACCO: Hi ${firstName(name)}, we could not complete your instant withdrawal right now. Your KES ${Number(amount).toLocaleString()} request is queued - our team will process it shortly.`,
 
-  // ───────────────────────────────────────────────────────────────────────
-  //  MEMBER-FACING — LOAN REMINDERS
-  //
-  //  Sent by services/reminderService.js on the cadence described there.
-  //  With a 1-month tenure there is only ONE payment due, so the "on
-  //  track / behind schedule" concept from the 6-month era is narrower:
-  //  the member has either settled or they haven't.
-  //
-  //  Wording updated to "amount outstanding" and "settle" for
-  //  consistency with the rest of the loan vocabulary.
-  // ───────────────────────────────────────────────────────────────────────
-
+  // ─── MEMBER-FACING — LOAN REMINDERS ───
   loanReminderMidMonth: (name, amountOutstanding, amountPaid) =>
     `KEMRI SACCO: Hi ${firstName(name)}, amount outstanding on your loan: ${formatKES(amountOutstanding)}. Amount paid so far: ${formatKES(amountPaid)}. Settle anytime via *483*4444#.`,
 
@@ -199,23 +105,13 @@ const templates = {
   loanOverdueDay3: (name, amountBehind) =>
     `KEMRI SACCO: You are ${formatKES(amountBehind)} behind on your loan settlement. Please settle via *483*4444# to avoid further reminders.`,
 
-  // ───────────────────────────────────────────────────────────────────────
-  //  STAFF-FACING — MEMBERS
-  // ───────────────────────────────────────────────────────────────────────
-
+  // ─── STAFF-FACING ───
   staffNewMember: (name) =>
     `KEMRI SACCO Admin: New member registered - ${name}.`,
 
-  // ───────────────────────────────────────────────────────────────────────
-  //  STAFF-FACING — LOANS
-  //  Updated to match the accountant terminology used on the member side.
-  // ───────────────────────────────────────────────────────────────────────
-
-  // Args: (name, principal, ref) — amount is now explicitly principal.
   staffLoanApplication: (name, principal, ref) =>
     `KEMRI SACCO Admin: Loan application, principal ${formatKES(principal)}, from ${name}. Ref: ${ref}. Awaiting review.`,
 
-  // Args: (name, principal, ref, opts)
   staffLoanAutoApproved: (name, principal, ref, opts = {}) => {
     const { status } = opts;
     let closing;
@@ -238,21 +134,11 @@ const templates = {
   staffLoanDisbursementTimedOut: (name, reference) =>
     `KEMRI SACCO Admin: Loan ${reference} for ${name} - B2C TIMED OUT. Verify on M-Pesa and disburse manually if needed.`,
 
-  // ───────────────────────────────────────────────────────────────────────
-  //  STAFF-FACING — PAYMENTS AND REPAYMENTS
-  // ───────────────────────────────────────────────────────────────────────
-
-  // "Payment" instead of "Repayment" — matches the member-facing vocabulary
-  // above, where we no longer use "repayment" for individual transactions.
   staffRepayment: (name, amount) =>
     `KEMRI SACCO Admin: Payment of ${formatKES(amount)} received from ${name}.`,
 
   staffDeposit: (name, amount) =>
     `KEMRI SACCO Admin: Deposit of ${formatKES(amount)} received from ${name}.`,
-
-  // ───────────────────────────────────────────────────────────────────────
-  //  STAFF-FACING — WITHDRAWALS
-  // ───────────────────────────────────────────────────────────────────────
 
   staffWithdrawalRequest: (name, amount) =>
     `KEMRI SACCO Admin: Withdrawal request of ${formatKES(amount)} from ${name}. Awaiting processing.`,
@@ -266,10 +152,6 @@ const templates = {
   staffWithdrawalInstantTimedOut: (name, amount) =>
     `KEMRI SACCO Admin: Instant withdrawal TIMED OUT for ${name} (${formatKES(amount)}). Queued for manual processing.`,
 
-  // ───────────────────────────────────────────────────────────────────────
-  //  STAFF-FACING — REMINDERS
-  // ───────────────────────────────────────────────────────────────────────
-
   staffLoanOverdueAlert: (name, reference, amountBehind) =>
     `KEMRI SACCO Admin: ${name} is ${formatKES(amountBehind)} behind on loan ${reference}. 6 days past month-end - consider calling.`,
 
@@ -282,10 +164,6 @@ const templates = {
     return `KEMRI SACCO Admin: ${parts}. Log in to the portal for details.`;
   },
 };
-
-// ─────────────────────────────────────────────────────────────────────────
-//  TRANSPORT — Infinity Tech / Tiara SMS Gateway
-// ─────────────────────────────────────────────────────────────────────────
 
 async function sendViaProvider(cleanPhone, message) {
   const payload = {
@@ -321,10 +199,6 @@ async function sendViaProvider(cleanPhone, message) {
   };
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-//  PUBLIC sendSMS — the API every caller in the platform depends on
-// ─────────────────────────────────────────────────────────────────────────
-
 async function sendSMS(phoneNumber, message) {
   if (!isConfigured()) {
     console.warn('SMS not sent: provider is not configured (SMS_PROVIDER_API_URL / SMS_PROVIDER_API_KEY / SMS_PROVIDER_SENDER_ID missing)');
@@ -357,10 +231,6 @@ async function sendSMS(phoneNumber, message) {
     return { sent: false, reason: err.message };
   }
 }
-
-// ─────────────────────────────────────────────────────────────────────────
-//  notifyStaff — unchanged
-// ─────────────────────────────────────────────────────────────────────────
 
 async function notifyStaff(message) {
   const Admin = require('../models/Admin');

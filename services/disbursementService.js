@@ -147,6 +147,11 @@ class DisbursementService {
   // On failure at ANY stage, the withdrawal stays (or returns) to
   // 'pending' so it appears in the staff queue. The member never loses
   // their request — worst case, staff process it a few minutes later.
+  //
+  // 2026-10-10: DORMANT — the USSD withdrawal option was retired on
+  // 2026-10-09 per board instruction, so this method has no live caller.
+  // Kept on disk (with the corresponding withdrawal SMS templates) so
+  // the code is recoverable if the board ever reinstates the feature.
   static async disburseWithdrawal(withdrawalId) {
     // 1. Load and check state
     const withdrawal = await Withdrawal.findById(withdrawalId);
@@ -313,18 +318,40 @@ class DisbursementService {
 
     console.log(`✅ B2C disbursement confirmed for loan ${loan.id}, receipt ${receipt}`);
 
-    // Notify the member. The running outstanding balance is read fresh
-    // from the DB — the markDisbursed() call above just incremented it,
-    // so this reflects reality at the moment of confirmation.
+    // Notify the member.
+    //
+    // 2026-10-10: Fixed the due-date source. Previously the fourth
+    // argument was `new Date().toLocaleDateString(...)` — i.e. TODAY's
+    // date, evaluated at the moment of the callback. Every loan
+    // disbursed via B2C was showing its disbursement date as the due
+    // date, so a loan disbursed on 8 Oct reported "due 08 Oct" when the
+    // correct date was 8 Nov. Now reads disbursed.next_payment_due,
+    // which Loan.markDisbursed() sets correctly to
+    // (NOW() + INTERVAL '1 month').
+    //
+    // The outstanding balance is re-read from the DB because markDisbursed
+    // just incremented members.total_outstanding_balance — the `member`
+    // object above predates that write. Pulled out of the argument list
+    // into named variables to keep the SMS call readable.
     if (member) {
+      const updatedMember = await Member.findById(loan.member_id);
+      const amountOutstanding =
+        updatedMember?.total_outstanding_balance || loan.total_repayment;
+
+      const dueDateFormatted = disbursed.next_payment_due
+        ? new Date(disbursed.next_payment_due).toLocaleDateString('en-GB', {
+            day: '2-digit', month: 'short', year: 'numeric',
+          })
+        : '—';
+
       try {
         await smsService.sendSMS(
           member.phone_number,
           smsService.templates.loanDisbursed(
             member.full_name,
             loan.principal,
-            (await Member.findById(loan.member_id))?.total_outstanding_balance || loan.total_repayment,
-            new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+            amountOutstanding,
+            dueDateFormatted
           )
         );
       } catch (err) {
