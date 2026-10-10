@@ -53,8 +53,17 @@ const templates = {
   loanApplicationReceived: (name, principal, ref) =>
     `KEMRI SACCO: Hi ${firstName(name)}, we received your loan application for a principal of ${formatKES(principal)}. Ref: ${ref}. We'll review it and SMS you the decision shortly.`,
 
+    // Args: (name, principal, interest, totalPayable)
+  //
+  // 2026-10-10: wording updated. Previously ended with "Funds will be sent
+  // to your M-Pesa shortly" — a passive phrasing that reads as automatic.
+  // In reality, a regular member's approved loan sits in 'approved' until
+  // staff click Disburse. Board/staff loans skip this SMS entirely now
+  // (see loanService.apply), so this template is only ever sent to regular
+  // members going through manual review. "Our team will send" reflects
+  // that a human action is pending.
   loanApproved: (name, principal, interest, totalPayable) =>
-    `KEMRI SACCO: Hi ${firstName(name)}, your loan is approved. Principal: ${formatKES(principal)}. Interest: ${formatKES(interest)}. Total amount payable: ${formatKES(totalPayable)}. Funds will be sent to your M-Pesa shortly.`,
+    `KEMRI SACCO: Hi ${firstName(name)}, your loan is approved. Principal: ${formatKES(principal)}. Interest: ${formatKES(interest)}. Total amount payable: ${formatKES(totalPayable)}. Our team will send the funds to your M-Pesa shortly.`,
 
   // 2026-10-10: Rewritten per board feedback. The previous wording was
   // ambiguous about which date the member was looking at — and the CALLER

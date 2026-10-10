@@ -96,18 +96,20 @@ class LoanService {
   // away, receive M-Pesa funds shortly after. No staff click required at
   // any step — SACCO policy agreed 25 Sept 2026.
   //
-  // Safety: if the B2C request fails at any point, the loan stays in the
-  // 'approved' state and staff are notified to disburse manually. The
-  // member is never left with a phantom disbursement.
+  // MESSAGING (2026-10-10): board/staff no longer receive the
+  // 'loanApproved' SMS. Previously they got TWO SMS within ~30 seconds:
+  // one from approveLoan() ("approved, funds shortly") and one from the
+  // B2C callback ("disbursed, due X"). Both said roughly the same thing.
   //
-  // The auto-approval uses approveLoan() — the same method staff call —
-  // rather than setting status directly, so every side effect of approval
-  // (member SMS, audit trail) lives in one place.
+  // Now:
+  //   - On B2C success: the callback's 'loanDisbursed' SMS is the single
+  //     message the member receives. No duplicate.
+  //   - On B2C request-time failure: no callback will fire, so we send
+  //     the 'loanApproved' SMS here instead — otherwise the member would
+  //     be left in silence.
   //
-  // MESSAGING: all member SMS and staff notifications for a loan
-  // application are sent from here. This function is the only place that
-  // knows whether the loan was auto-approved or went to manual review, so
-  // it is the only place that can send exactly one, consistent message.
+  // The approveLoan() method gained a { skipSms } option to make this
+  // possible; it is used only from the auto-approval path below.
   static async apply(memberId, requestedAmount) {
     const amount = Number(requestedAmount);
     if (!Number.isFinite(amount) || amount <= 0) {
@@ -157,9 +159,15 @@ class LoanService {
     }
 
     // --- Board/staff: auto-approval path ---
+    //
+    // skipSms: true — the B2C callback will send 'loanDisbursed' shortly.
+    // If B2C fails at request time (no callback will fire), the failure
+    // branch below sends the 'loanApproved' SMS instead so the member
+    // isn't left without any notification.
     const approval = await this.approveLoan(
       loan.id,
-      'Auto-approved: board/staff (SACCO policy, 25 Sept 2026)'
+      'Auto-approved: board/staff (SACCO policy, 25 Sept 2026)',
+      { skipSms: true }
     );
 
     if (!approval.success) {
@@ -196,6 +204,26 @@ class LoanService {
       // so this is a defensive catch for the impossible case.
       console.error(`Auto-disburse threw unexpectedly for loan ${loan.id}:`, err.message);
       disbursement = { success: false, message: err.message };
+    }
+
+    // 2026-10-10: If B2C failed at request time, no callback will fire.
+    // Send the 'loanApproved' SMS now so the member knows the loan is
+    // approved and staff will follow up. On success, we stay silent here
+    // and let the callback's 'loanDisbursed' SMS be the single message.
+    if (!disbursement.success && member) {
+      try {
+        await smsService.sendSMS(
+          member.phone_number,
+          smsService.templates.loanApproved(
+            member.full_name,
+            approval.loan.principal,
+            approval.loan.total_interest,
+            approval.loan.total_repayment
+          )
+        );
+      } catch (smsErr) {
+        console.error('Board/staff fallback approval SMS failed:', smsErr.message);
+      }
     }
 
     // Notify staff with an accurate status: either the disbursement is
@@ -269,17 +297,25 @@ class LoanService {
 
   // Approve a pending loan.
   //
+  // 2026-10-10: gained a third `opts` argument with a `skipSms` flag.
+  // Used by the auto-approval path in apply() to suppress the member
+  // 'loanApproved' SMS when the loan is about to be B2C-disbursed — the
+  // callback's 'loanDisbursed' SMS is the single message the member
+  // should see in that case. Manual approval (staff clicking Approve in
+  // the queue) never passes skipSms, so the SMS fires as before.
+  //
   // Member SMS uses standard SACCO accounting terminology:
   //   Principal             — the amount borrowed
   //   Interest              — the charge for the 1-month term
   //   Total amount payable  — principal + interest
-  //   Due date              — the date the full amount is due
   //
   // The due date is NOT included in this SMS because next_payment_due is
   // only set when the loan is actually disbursed (see Loan.markDisbursed).
   // The disbursement SMS carries the date; the approval SMS just
   // communicates the terms.
-  static async approveLoan(loanId, adminNotes = '') {
+  static async approveLoan(loanId, adminNotes = '', opts = {}) {
+    const { skipSms = false } = opts;
+
     const loan = await Loan.approve(loanId, adminNotes);
     if (!loan) {
       return { success: false, message: 'Loan not found or not in a pending state.' };
@@ -290,24 +326,30 @@ class LoanService {
       return { success: false, message: 'Member not found.' };
     }
 
-    try {
-      await smsService.sendSMS(
-        member.phone_number,
-        smsService.templates.loanApproved(
-          member.full_name,
-          loan.principal,
-          loan.total_interest,
-          loan.total_repayment
-        )
-      );
-    } catch (smsErr) {
-      console.error('Loan approval SMS failed (loan still approved):', smsErr.message);
+    if (!skipSms) {
+      try {
+        await smsService.sendSMS(
+          member.phone_number,
+          smsService.templates.loanApproved(
+            member.full_name,
+            loan.principal,
+            loan.total_interest,
+            loan.total_repayment
+          )
+        );
+      } catch (smsErr) {
+        console.error('Loan approval SMS failed (loan still approved):', smsErr.message);
+      }
     }
 
     return {
       success: true,
       loan,
-      message: 'Loan approved. Disbursement is manual until M-Pesa B2C is approved by Safaricom.',
+      // 2026-10-10: previous wording said "Disbursement is manual until
+      // M-Pesa B2C is approved by Safaricom" — B2C has been live in
+      // production since 5 Oct 2026 and that message was misleading
+      // anyone reading the admin portal's approve response.
+      message: 'Loan approved. Ready for disbursement.',
     };
   }
 
