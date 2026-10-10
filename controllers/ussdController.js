@@ -410,19 +410,23 @@ async function handleRepayLoan(phoneNumber, steps, sessionId) {
 // ============================================================
 // 6. TRANSACTIONS (PIN required)
 // ============================================================
-// Shows the member their 5 most recent M-Pesa movements — deposits (money
-// in) and loan repayments (money out, reducing a loan) — each labelled
-// with its type.
+// Shows the member their 5 most recent money movements — deposits,
+// loan repayments, AND loan disbursements — each labelled with its type.
 //
-// 2026-10-10: A previous change filtered the list to status='completed'
-// only. That was a mistake — a member with a pending deposit would be
-// told "no completed transactions yet", which reads as "your deposit
-// failed" right when they're checking whether it went through. Now all
-// 5 recent rows are shown; only non-completed ones are annotated.
+// 2026-10-10: Loan disbursements were previously invisible here. A
+// member who received a loan but never deposited or repaid anything
+// (like Kennedy Odongo) would dial Option 6 and be told "no
+// transactions yet" — denying a money movement the SACCO just
+// performed. Disbursements live in the `loans` table, not `payments`,
+// so the two sources are now merged for this view.
 //
-// Scope note: loan DISBURSEMENTS live in the loans table, not payments,
-// so they don't appear here. The member portal statement shows the full
-// money-movement picture including disbursements.
+// Data sources merged:
+//   payments  — deposits (loan_id NULL) and loan repayments (loan_id set)
+//   loans     — loan disbursements (disbursed_at IS NOT NULL)
+//
+// Sorted by date DESC, top 5 across both sources. Non-completed rows
+// (pending/failed/processing) get a status marker; completed rows stay
+// clean since that's the expected state.
 async function handleTransactions(phoneNumber, steps, sessionId) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) {
@@ -432,22 +436,49 @@ async function handleTransactions(phoneNumber, steps, sessionId) {
   const pinCheck = await requirePin(member, steps, sessionId);
   if (!pinCheck.authenticated) return pinCheck.response;
 
-  const transactions = await Payment.findRecentByMember(member.id, 5);
+  // Fetch both sources in parallel. 10 rows each so the merge has enough
+  // to pick a true top-5 from; the visible list stays 5 to keep the USSD
+  // screen within length limits.
+  const [payments, loans] = await Promise.all([
+    Payment.findRecentByMember(member.id, 10),
+    Loan.getHistory(member.id, 10),
+  ]);
 
-  if (transactions.length === 0) {
+  // Normalise both into a common shape. Dates differ by source:
+  // payments use created_at, loans use disbursed_at.
+  const fromPayments = payments.map((p) => ({
+    date: p.created_at,
+    type: p.loan_id === null ? 'Deposit' : 'Repay',
+    amount: p.amount,
+    status: p.status,
+  }));
+
+  // Only loans where money actually moved. Pending/approved/disbursing/
+  // rejected loans have disbursed_at NULL and are correctly excluded —
+  // the member hasn't received funds for them yet.
+  const fromLoans = loans
+    .filter((l) => l.disbursed_at)
+    .map((l) => ({
+      date: l.disbursed_at,
+      type: 'Loan',
+      amount: l.principal,
+      status: 'completed',
+    }));
+
+  const merged = [...fromPayments, ...fromLoans]
+    .sort((a, b) => new Date(b.date) - new Date(a.date))
+    .slice(0, 5);
+
+  if (merged.length === 0) {
     return 'END You have no transactions yet.';
   }
 
-  const lines = transactions.map((t) => {
-    const date = new Date(t.created_at).toLocaleDateString('en-GB', {
+  const lines = merged.map((t) => {
+    const date = new Date(t.date).toLocaleDateString('en-GB', {
       day: '2-digit', month: 'short',
     });
-    // loan_id NULL = savings deposit (money in); set = loan repayment.
-    const label = t.loan_id === null ? 'Deposit' : 'Repay';
-    // Only annotate when the status is NOT the expected 'completed' —
-    // a completed row stays clean, pending/failed rows get a marker.
     const suffix = t.status === 'completed' ? '' : ` (${t.status})`;
-    return `${date}: ${label} KES ${Number(t.amount).toLocaleString()}${suffix}`;
+    return `${date}: ${t.type} KES ${Number(t.amount).toLocaleString()}${suffix}`;
   });
 
   return `END Recent transactions:\n${lines.join('\n')}`;
