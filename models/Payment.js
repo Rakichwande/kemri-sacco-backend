@@ -23,6 +23,16 @@ async function init() {
   await pool.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();`);
   await pool.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS loan_id INTEGER REFERENCES loans(id);`);
 
+  // 2026-10-12: contribution channel. Repayments have tracked this since
+  // they were introduced (`repayments.channel`); the payments table never
+  // did — every deposit was implicitly M-Pesa by omission. Adding the
+  // column now, defaulted to 'mpesa', so historical rows are correctly
+  // labelled and future non-M-Pesa channels (cash, bank transfer, in-
+  // office deposit) can be recorded without another schema change. Does
+  // not affect any existing query: getMemberBalance, findAllAdmin, and
+  // the statement lines all filter by status and loan_id, not by channel.
+  await pool.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS channel VARCHAR(20) DEFAULT 'mpesa';`);
+
   await pool.query(`
     DO $$
     BEGIN
@@ -39,13 +49,26 @@ async function init() {
   await pool.query(`ALTER TABLE payments ALTER COLUMN status SET NOT NULL;`);
 }
 
-async function create({ member_id, amount, phone, account_reference, description, checkout_request_id, loan_id = null }) {
+async function create({
+  member_id,
+  amount,
+  phone,
+  account_reference,
+  description,
+  checkout_request_id,
+  loan_id = null,
+  // 2026-10-12: channel defaults to 'mpesa' because every existing caller
+  // (paymentService.initiatePayment) initiates via STK Push. Any future
+  // caller for a cash or bank deposit can pass a different value; no
+  // caller today needs to.
+  channel = 'mpesa',
+}) {
   const result = await pool.query(
     `INSERT INTO payments 
-      (member_id, amount, phone_number, account_reference, description, checkout_request_id, loan_id, status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
+      (member_id, amount, phone_number, account_reference, description, checkout_request_id, loan_id, channel, status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')
      RETURNING *`,
-    [member_id, amount, phone, account_reference, description, checkout_request_id, loan_id]
+    [member_id, amount, phone, account_reference, description, checkout_request_id, loan_id, channel]
   );
   return result.rows[0];
 }
