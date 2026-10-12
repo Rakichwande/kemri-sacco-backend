@@ -35,6 +35,14 @@ router.get('/financial', authenticate, requirePermission('reports:read'), async 
 
 // Hand-built CSV - no library needed for something this simple, and it
 // avoids adding a new dependency just for one export button.
+//
+// 2026-10-12: extended with the interest-split columns so the board's
+// accountant gets the same numbers the page shows — principal recovered
+// vs interest earned, plus accrued interest on new disbursements.
+//
+// Column order: identity, then activity flow (contributions / loans out /
+// money in), then the profit view, then the split. That reads left-to-right
+// as "what happened, then what it earned."
 router.get('/financial/export', authenticate, requirePermission('reports:read'), async (req, res) => {
   try {
     const params = validatePeriodParams(req, res);
@@ -42,13 +50,44 @@ router.get('/financial/export', authenticate, requirePermission('reports:read'),
     const summary = await Report.getFinancialSummary(params);
 
     const escapeCsv = (val) => `"${String(val).replace(/"/g, '""')}"`;
+
+    const header = [
+      'Month',
+      'Contributions (KES)',
+      'Loans Disbursed (KES)',
+      'Interest Accrued (KES)',
+      'Repayments Received (KES)',
+      'Principal Repaid (KES)',
+      'Interest Collected (KES)',
+    ];
+
     const lines = [
-      ['Month', 'Contributions (KES)', 'Loans Disbursed (KES)', 'Repayments (KES)'].map(escapeCsv).join(','),
+      header.map(escapeCsv).join(','),
       ...summary.breakdown.map((row) =>
-        [row.month, row.contributions, row.disbursed, row.repayments].map(escapeCsv).join(',')
+        [
+          row.month,
+          row.contributions,
+          row.disbursed,
+          row.interestAccrued,
+          row.repayments,
+          row.principalRepaid,
+          row.interestCollected,
+        ]
+          .map(escapeCsv)
+          .join(',')
       ),
       '',
-      ['Total', summary.contributionsCollected, summary.loansDisbursed, summary.repaymentsReceived].map(escapeCsv).join(','),
+      [
+        'Total',
+        summary.contributionsCollected,
+        summary.loansDisbursed,
+        summary.interestAccrued,
+        summary.repaymentsReceived,
+        summary.principalRepaid,
+        summary.interestCollected,
+      ]
+        .map(escapeCsv)
+        .join(','),
     ];
 
     res.setHeader('Content-Type', 'text/csv');
