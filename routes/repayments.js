@@ -1,9 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const Repayment = require('../models/Repayment');
-const { authenticate, requireAdmin } = require('../middleware/auth');
+const { authenticate, requirePermission } = require('../middleware/auth');
 
-router.get('/', authenticate, requireAdmin, async (req, res) => {
+// 2026-10-17: Changed from `requireAdmin` to `requirePermission('loans:read')`.
+// This allows roles like Finance Officer and Loans Officer to view the 
+// repayment ledger, while still blocking unauthorized roles.
+router.get('/', authenticate, requirePermission('loans:read'), async (req, res) => {
   try {
     const { search, from, to, channel, limit, offset } = req.query;
     const repayments = await Repayment.findAll({

@@ -2,14 +2,18 @@ const express = require('express');
 const router = express.Router();
 const db = require('../config/database');
 const UssdSession = require('../models/UssdSession');
-const { authenticate, requireAdmin } = require('../middleware/auth');
+const { authenticate, requirePermission } = require('../middleware/auth'); // <-- Changed import
 
 // Only reports on integrations this system actually has. Base44's mock
 // included generic SaaS-template cards (File Storage, Email Service, AI/LLM
 // Service) that don't correspond to anything this backend actually runs -
 // left out entirely rather than showing fake "Operational" badges for
 // services that don't exist here.
-router.get('/', authenticate, requireAdmin, async (req, res) => {
+//
+// 2026-10-17: Changed from `requireAdmin` to `requirePermission('system:configure')`.
+// This allows roles like Finance Officer to view the page (since they now
+// have the system:configure permission), while keeping it locked down for others.
+router.get('/', authenticate, requirePermission('system:configure'), async (req, res) => {
   const checks = {};
 
   // Database - a real query, timed for real
