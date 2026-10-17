@@ -62,6 +62,12 @@ const PERMISSIONS = {
     'payments:read', 'payments:write',
     'withdrawals:read', 'withdrawals:write',
     'reports:read',
+    // 2026-10-17: Added so Finance can view loan ledgers, repayments, and aging.
+    'loans:read', 
+    // 2026-10-17: Added so Finance can see the Staff Directory (UI hides edit buttons)
+    'staff:manage',
+    // 2026-10-17: Added so Finance can view System Health
+    'system:configure',
   ],
   [ROLES.LOANS_OFFICER]: [
     'members:read',
