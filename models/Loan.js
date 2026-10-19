@@ -348,13 +348,12 @@ async function applyRepayment(loan_id, amount, externalClient = null) {
     );
 
     if (isFullyRepaid) {
+      // 2026-10-19: Board policy dictates the credit limit is capped at 
+      // 10,000 for everyone, regardless of repayment history.
       await client.query(
         `UPDATE members 
          SET successful_repayments = successful_repayments + 1,
-             credit_limit = CASE 
-               WHEN successful_repayments + 1 >= 1 THEN 20000 
-               ELSE 10000 
-             END
+             credit_limit = 10000
          WHERE id = $1`,
         [loan.member_id]
       );

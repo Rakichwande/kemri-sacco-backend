@@ -4,27 +4,17 @@ const smsService = require('./smsService');
 const notificationService = require('./notificationService');
 const emailService = require('./emailService');
 
-const MAX_ABSOLUTE_LIMIT = 20000;
+// 2026-10-19: Board policy dictates that the maximum loan limit is strictly
+// KES 10,000 for ALL members (board/staff and regular alike).
+const MAX_ABSOLUTE_LIMIT = 10000;
 const MIN_LOAN_AMOUNT = 1000;
 const INTEREST_RATE = 6.0;
-
-// Loan tenure. Changed from 6 months to 1 month on 7 October 2026 by SACCO
-// board decision. Interest rate remains 6% flat — for a 1-month loan this
-// means total interest = principal × 6% × 1. Any existing loan rows are
-// recalculated by a one-off SQL migration deployed alongside this change;
-// only NEW loans created after this deploy will default to the new tenure
-// through this constant.
-//
-// If tenure ever changes again, the same pattern applies: update this
-// constant, update the SMS/email templates if the wording assumes a
-// specific term, and run a matching SQL migration for existing loans.
 const TENURE_MONTHS = 1;
 
 class LoanService {
   static calculateCreditLimit(successfulRepayments) {
-    if (successfulRepayments === 0) {
-      return 10000;
-    }
+    // The limit no longer increases after successful repayments.
+    // Everyone is capped at 10,000.
     return MAX_ABSOLUTE_LIMIT;
   }
 
@@ -59,19 +49,10 @@ class LoanService {
     return { allowed: true, creditLimit, member, reason: 'Eligible to apply.' };
   }
 
-  // Standard SACCO 1-month loan repayment schedule:
-  //   interest        = principal × (rate / 100) × tenure
-  //   total payable   = principal + interest
-  //
-  // The field `monthlyInstallment` is retained for database and code
-  // compatibility (the loans table has a NOT NULL column by that name),
-  // but with a 1-month tenure it is semantically the SAME as
-  // totalRepayment — there is only one payment due. Treat it as
-  // "amount payable" in all messaging.
   static calculateRepaymentSchedule(principal) {
     const totalInterest = Math.round(principal * (INTEREST_RATE / 100) * TENURE_MONTHS);
     const totalRepayment = principal + totalInterest;
-    const amountPayable = totalRepayment; // single payment, no division by tenure
+    const amountPayable = totalRepayment; 
 
     return {
       principal,
@@ -83,33 +64,6 @@ class LoanService {
     };
   }
 
-  // Apply for a loan.
-  //
-  // TWO PATHS, chosen by the member's is_board_staff flag:
-  //
-  //   Regular member  → create as 'pending' → staff review (unchanged)
-  //   Board/staff     → create as 'pending' → auto-approve → auto-disburse
-  //                     via M-Pesa B2C, all within this single call
-  //
-  // The board/staff path exists so a board or staff member dialing USSD
-  // gets a genuinely instant loan: dial *483*4444#, enter amount, walk
-  // away, receive M-Pesa funds shortly after. No staff click required at
-  // any step — SACCO policy agreed 25 Sept 2026.
-  //
-  // MESSAGING (2026-10-10): board/staff no longer receive the
-  // 'loanApproved' SMS. Previously they got TWO SMS within ~30 seconds:
-  // one from approveLoan() ("approved, funds shortly") and one from the
-  // B2C callback ("disbursed, due X"). Both said roughly the same thing.
-  //
-  // Now:
-  //   - On B2C success: the callback's 'loanDisbursed' SMS is the single
-  //     message the member receives. No duplicate.
-  //   - On B2C request-time failure: no callback will fire, so we send
-  //     the 'loanApproved' SMS here instead — otherwise the member would
-  //     be left in silence.
-  //
-  // The approveLoan() method gained a { skipSms } option to make this
-  // possible; it is used only from the auto-approval path below.
   static async apply(memberId, requestedAmount) {
     const amount = Number(requestedAmount);
     if (!Number.isFinite(amount) || amount <= 0) {
@@ -159,11 +113,6 @@ class LoanService {
     }
 
     // --- Board/staff: auto-approval path ---
-    //
-    // skipSms: true — the B2C callback will send 'loanDisbursed' shortly.
-    // If B2C fails at request time (no callback will fire), the failure
-    // branch below sends the 'loanApproved' SMS instead so the member
-    // isn't left without any notification.
     const approval = await this.approveLoan(
       loan.id,
       'Auto-approved: board/staff (SACCO policy, 25 Sept 2026)',
@@ -171,11 +120,6 @@ class LoanService {
     );
 
     if (!approval.success) {
-      // Should not happen — we just created the loan as 'pending', and
-      // approveLoan() only fails when the loan isn't pending or isn't
-      // found. If it ever does, fall back to the manual review path so
-      // the member gets a clear "we'll review" SMS and the loan appears
-      // in the staff queue.
       console.error(
         `Auto-approval failed for board/staff member ${memberId} on loan ${loan.id}: ${approval.message}`
       );
@@ -188,28 +132,16 @@ class LoanService {
       };
     }
 
-    // --- Board/staff: attempt immediate B2C disbursement ---
-    //
-    // Required here (in-process require) rather than at the top of the
-    // file, because disbursementService requires smsService and
-    // notificationService — both of which loanService already loads.
-    // A top-level require would create a load-order dependency.
     const DisbursementService = require('./disbursementService');
 
     let disbursement = { success: false, message: 'B2C not attempted' };
     try {
       disbursement = await DisbursementService.disburseLoan(loan.id);
     } catch (err) {
-      // disburseLoan() catches its own errors and returns a result object,
-      // so this is a defensive catch for the impossible case.
       console.error(`Auto-disburse threw unexpectedly for loan ${loan.id}:`, err.message);
       disbursement = { success: false, message: err.message };
     }
 
-    // 2026-10-10: If B2C failed at request time, no callback will fire.
-    // Send the 'loanApproved' SMS now so the member knows the loan is
-    // approved and staff will follow up. On success, we stay silent here
-    // and let the callback's 'loanDisbursed' SMS be the single message.
     if (!disbursement.success && member) {
       try {
         await smsService.sendSMS(
@@ -226,8 +158,6 @@ class LoanService {
       }
     }
 
-    // Notify staff with an accurate status: either the disbursement is
-    // in flight, or it failed and needs manual attention.
     await this._notifyAutoApprovedStaff(member, approval.loan, ref, {
       disbursementStatus: disbursement.success ? 'disbursing' : 'failed',
       failureReason: disbursement.success ? null : disbursement.message,
@@ -272,9 +202,6 @@ class LoanService {
     }
   }
 
-  // Staff notification for the board/staff auto-approval path. Called
-  // AFTER the B2C disbursement attempt so the message reflects what
-  // actually happened, rather than firing optimistically before we know.
   static async _notifyAutoApprovedStaff(member, loan, ref, opts = {}) {
     const { disbursementStatus, failureReason } = opts;
     try {
@@ -295,24 +222,6 @@ class LoanService {
     }
   }
 
-  // Approve a pending loan.
-  //
-  // 2026-10-10: gained a third `opts` argument with a `skipSms` flag.
-  // Used by the auto-approval path in apply() to suppress the member
-  // 'loanApproved' SMS when the loan is about to be B2C-disbursed — the
-  // callback's 'loanDisbursed' SMS is the single message the member
-  // should see in that case. Manual approval (staff clicking Approve in
-  // the queue) never passes skipSms, so the SMS fires as before.
-  //
-  // Member SMS uses standard SACCO accounting terminology:
-  //   Principal             — the amount borrowed
-  //   Interest              — the charge for the 1-month term
-  //   Total amount payable  — principal + interest
-  //
-  // The due date is NOT included in this SMS because next_payment_due is
-  // only set when the loan is actually disbursed (see Loan.markDisbursed).
-  // The disbursement SMS carries the date; the approval SMS just
-  // communicates the terms.
   static async approveLoan(loanId, adminNotes = '', opts = {}) {
     const { skipSms = false } = opts;
 
@@ -345,10 +254,6 @@ class LoanService {
     return {
       success: true,
       loan,
-      // 2026-10-10: previous wording said "Disbursement is manual until
-      // M-Pesa B2C is approved by Safaricom" — B2C has been live in
-      // production since 5 Oct 2026 and that message was misleading
-      // anyone reading the admin portal's approve response.
       message: 'Loan approved. Ready for disbursement.',
     };
   }
@@ -390,10 +295,6 @@ class LoanService {
       return { success: false, message: 'No active loan found.' };
     }
 
-    // With a 1-month loan, the "due amount" is really "the remaining
-    // principal balance you owe". Using min(monthly, outstanding) still
-    // works — both are the same figure when nothing has been paid, and
-    // min picks outstanding when a partial payment was made.
     const dueAmount = Math.min(Number(activeLoan.monthly_installment), Number(activeLoan.outstanding_balance));
 
     return {
