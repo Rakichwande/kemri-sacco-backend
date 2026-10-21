@@ -53,7 +53,7 @@ const templates = {
   loanApplicationReceived: (name, principal, ref) =>
     `KEMRI SACCO: Hi ${firstName(name)}, we received your loan application for a principal of ${formatKES(principal)}. Ref: ${ref}. We'll review it and SMS you the decision shortly.`,
 
-    // Args: (name, principal, interest, totalPayable)
+  // Args: (name, principal, interest, totalPayable)
   //
   // 2026-10-10: wording updated. Previously ended with "Funds will be sent
   // to your M-Pesa shortly" — a passive phrasing that reads as automatic.
@@ -172,6 +172,13 @@ const templates = {
     const parts = [duePart, overduePart].filter(Boolean).join(' | ');
     return `KEMRI SACCO Admin: ${parts}. Log in to the portal for details.`;
   },
+
+  // ─── STAFF-FACING — ACCOUNT MANAGEMENT (2026-10-21) ───
+  staffWelcome: (name, role) =>
+    `KEMRI SACCO Admin: Welcome ${name}. Your account has been created. Role: ${role.replace('_', ' ').toUpperCase()}. You can now log in to the portal.`,
+
+  staffRemoved: (name) =>
+    `KEMRI SACCO Admin: Hello ${name}, your staff account has been removed by a Super Administrator. You no longer have access to the portal.`,
 };
 
 async function sendViaProvider(cleanPhone, message) {
@@ -251,7 +258,7 @@ async function notifyStaff(message) {
     );
     const failed = results.filter((r) => r.status === 'rejected').length;
     if (failed > 0) {
-      console.warn(`notifyStaff: ${failed} of ${withPhone.length} staff SMS deliveries failed.`);
+      console.warn(`notifyStaff: ${failed} of ${withPhone.length} staff deliveries failed.`);
     }
   } catch (err) {
     console.error('notifyStaff failed to look up staff accounts:', err.message);

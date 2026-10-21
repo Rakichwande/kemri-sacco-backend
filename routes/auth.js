@@ -8,6 +8,7 @@ const { JWT_SECRET } = require('../config/env');
 const AuditLog = require('../models/AuditLog');
 const StaffInvite = require('../models/StaffInvite');
 const emailService = require('../services/emailService');
+const smsService = require('../services/smsService'); // <-- ADDED
 const crypto = require('crypto');
 const {
   loginLimiter,
@@ -30,12 +31,6 @@ function issueSessionToken(admin) {
       id: admin.id,
       username: admin.username,
       role: admin.role,
-      // Encoded in the JWT so authenticate() can enforce it without a DB
-      // lookup on every request. After a successful password change the
-      // client is expected to log in again, which issues a fresh token
-      // with this flag cleared. Until then, any token minted before the
-      // change still carries must_change_password: true and continues to
-      // be restricted to the /change-password and /me routes.
       must_change_password: !!admin.must_change_password,
     },
     JWT_SECRET,
@@ -57,12 +52,6 @@ function generateOtpCode() {
   return String(crypto.randomInt(100000, 999999)); // 6 digits
 }
 
-// All role values this app currently recognizes. 'admin' (Super
-// Administrator) and 'staff' (legacy) are the original two; the rest are
-// the board-approved roles added on top of them. See
-// middleware/permissions.js for what each can actually do, and for
-// canAssignRole(), which restricts who is allowed to grant which of these
-// to someone else.
 const VALID_ROLES = [
   ROLES.SUPER_ADMIN,
   ROLES.SACCO_ADMIN,
@@ -131,10 +120,6 @@ router.post('/verify-otp', otpLimiter, async (req, res) => {
       return res.status(401).json({ error: 'Invalid verification session.' });
     }
 
-    // findByIdWithAuthFields returns the full row (including otp_code,
-    // otp_expires_at, otp_attempts). The narrower findById() omits those on
-    // purpose for routes that return admin data to the browser - see
-    // models/Admin.js.
     const admin = await Admin.findByIdWithAuthFields(payload.id);
     if (!admin || !admin.otp_code) {
       return res.status(401).json({ error: 'No pending verification. Please log in again.' });
@@ -170,8 +155,6 @@ router.post('/resend-otp', emailActionLimiter, emailPerAddressLimiter, async (re
     } catch (err) {
       return res.status(401).json({ error: 'This verification session has expired. Please log in again.' });
     }
-    // Same reasoning as verify-otp above - we need the full row to read
-    // admin.email safely and to be consistent with the findById narrowing.
     const admin = await Admin.findByIdWithAuthFields(payload.id);
     if (!admin || !admin.email) {
       return res.status(401).json({ error: 'No pending verification. Please log in again.' });
@@ -201,7 +184,6 @@ router.post('/forgot-password', emailActionLimiter, emailPerAddressLimiter, asyn
     if (admin && admin.email && emailService.isConfigured()) {
       const token = crypto.randomBytes(24).toString('base64url');
       const expiresAt = new Date(Date.now() + RESET_EXPIRY_MINUTES * 60 * 1000);
-      // Stores the hash. The raw `token` is only used in the link below.
       await Admin.setResetToken(admin.id, token, expiresAt);
 
       const resetLink = `${FRONTEND_URL}/reset-password/${token}`;
@@ -218,9 +200,6 @@ router.post('/forgot-password', emailActionLimiter, emailPerAddressLimiter, asyn
   }
 });
 
-// Precheck the link before showing the reset form. Kept as its own route
-// because it's a read-only "is this still valid?" check the frontend needs
-// when the user lands on the page.
 router.get('/reset-password/:token', async (req, res) => {
   try {
     const admin = await Admin.findByResetToken(req.params.token);
@@ -232,10 +211,6 @@ router.get('/reset-password/:token', async (req, res) => {
   }
 });
 
-// Completion - atomic. resetPasswordWithToken hashes the incoming token,
-// matches it against the stored hash, verifies it hasn't expired, and
-// updates the password in a single UPDATE. Two concurrent requests with the
-// same token cannot both succeed.
 router.post('/reset-password/:token', resetPasswordLimiter, async (req, res) => {
   try {
     const { newPassword } = req.body;
@@ -257,8 +232,6 @@ router.post('/reset-password/:token', resetPasswordLimiter, async (req, res) => 
 
 router.get('/me', authenticate, async (req, res) => {
   try {
-    // Narrow findById is intentional here - this data is returned to the
-    // browser, so it must not include otp_code or reset_token.
     const admin = await Admin.findById(req.user.id);
     if (!admin) return res.status(404).json({ error: 'Account not found' });
     res.json({ user: admin });
@@ -279,10 +252,6 @@ router.patch('/me/notifications', authenticate, async (req, res) => {
   }
 });
 
-// Note: this route is exempt from the must_change_password block in
-// middleware/auth.js. After a successful change, the client is expected to
-// log in again - the current JWT still carries must_change_password: true
-// (it was encoded at issue time) and would continue to be restricted.
 router.post('/change-password', authenticate, passwordChangeLimiter, async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
@@ -375,8 +344,6 @@ router.post('/invites', authenticate, requirePermission('staff:manage'), async (
       });
     }
 
-    // IMPORTANT: use invite.rawToken, not invite.token. token is the SHA-256
-    // hash stored in the DB; rawToken is the only place the plaintext exists.
     const inviteLink = `${FRONTEND_URL}/accept-invite/${invite.rawToken}`;
 
     const { subject, html, text } = emailService.inviteEmailContent({
@@ -407,9 +374,6 @@ router.post('/invites', authenticate, requirePermission('staff:manage'), async (
   }
 });
 
-// Admin-facing: list currently pending invites so they can be reviewed or
-// revoked. Must be declared BEFORE /invites/:token, otherwise Express would
-// match "pending" as a token value.
 router.get('/invites/pending', authenticate, requirePermission('staff:manage'), async (req, res) => {
   try {
     const invites = await StaffInvite.findPendingForAdmin();
@@ -433,11 +397,6 @@ router.get('/invites/:token', async (req, res) => {
   }
 });
 
-// Accept flow is atomic: claimForAcceptance reserves the invite BEFORE any
-// account is created. If account creation then fails, revertToPending
-// releases the claim so the invite can be retried. Two concurrent requests
-// with the same token cannot both create an account - the second loses the
-// claim and sees 400.
 router.post('/invites/:token/accept', async (req, res) => {
   try {
     const invite = await StaffInvite.findByToken(req.params.token);
@@ -458,9 +417,6 @@ router.post('/invites/:token/accept', async (req, res) => {
       return res.status(409).json({ error: 'This username is already taken' });
     }
 
-    // Reserve the invite first. This is the ONLY reliable guard against two
-    // concurrent accept requests - the pre-checks above (read + status
-    // compare) are TOCTOU-racy on their own.
     const claimed = await StaffInvite.claimForAcceptance(invite.id);
     if (!claimed) {
       return res.status(400).json({ error: 'This invite has already been used' });
@@ -485,10 +441,20 @@ router.post('/invites/:token/accept', async (req, res) => {
         details: `Accepted invite as "${username}" (${invite.role}), invited to ${invite.email}.`,
       });
 
+      // 2026-10-21: Send Welcome SMS
+      try {
+        if (newAccount.phone) {
+          await smsService.sendSMS(
+            newAccount.phone,
+            smsService.templates.staffWelcome(newAccount.full_name, newAccount.role)
+          );
+        }
+      } catch (smsErr) {
+        console.error('Staff welcome SMS failed:', smsErr.message);
+      }
+
       res.status(201).json({ message: 'Account created. You can now log in.' });
     } catch (err) {
-      // Release the claim so the invite can be retried (e.g. transient DB
-      // error, or the username-taken race above got past the pre-check).
       await StaffInvite.revertToPending(invite.id);
       throw err;
     }
@@ -498,8 +464,6 @@ router.post('/invites/:token/accept', async (req, res) => {
   }
 });
 
-// Admin cancellation of a pending invite. Uses the same
-// requirePermission('staff:manage') gate as invite creation.
 router.delete('/invites/:id', authenticate, requirePermission('staff:manage'), async (req, res) => {
   try {
     const invite = await StaffInvite.revoke(req.params.id);
@@ -543,9 +507,6 @@ router.patch('/users/:id/role', authenticate, requirePermission('staff:manage'),
       return res.status(403).json({ error: `Your role is not permitted to assign "${role}".` });
     }
 
-    // Narrow findById is intentional here - we only need id/role/username
-    // for the guardrails, and this endpoint returns the updated account to
-    // the browser.
     const target = await Admin.findById(req.params.id);
     if (!target) return res.status(404).json({ error: 'Account not found' });
 
@@ -585,8 +546,6 @@ router.delete('/users/:id', authenticate, requirePermission('staff:manage'), asy
       return res.status(400).json({ error: 'You cannot remove your own account.' });
     }
 
-    // Narrow findById is intentional here - same reasoning as the role
-    // change endpoint above.
     const target = await Admin.findById(targetId);
     if (!target) return res.status(404).json({ error: 'Account not found' });
 
@@ -612,6 +571,19 @@ router.delete('/users/:id', authenticate, requirePermission('staff:manage'), asy
       targetLabel: target.full_name,
       details: `Removed account "${target.username}" (${target.role}).`,
     });
+
+    // 2026-10-21: Send Removal SMS
+    try {
+      if (target.phone) {
+        await smsService.sendSMS(
+          target.phone,
+          smsService.templates.staffRemoved(target.full_name)
+        );
+      }
+    } catch (smsErr) {
+      console.error('Staff removal SMS failed:', smsErr.message);
+    }
+
     res.json({ message: 'Account removed.' });
   } catch (err) {
     console.error('Account removal error:', err);
