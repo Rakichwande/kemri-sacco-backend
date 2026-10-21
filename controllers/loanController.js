@@ -135,20 +135,18 @@ exports.repayLoan = async (req, res) => {
             return res.status(400).json({ error: repaymentInfo.message });
         }
 
-        // Get member's phone number to trigger STK push
         const member = await Member.findById(memberId);
         if (!member) {
             return res.status(404).json({ error: 'Member not found' });
         }
 
-        // Reuse your existing Daraja STK Push logic from paymentService
         const { initiatePayment } = require('../services/paymentService');
         
         const paymentResult = await initiatePayment({
             memberId: member.id,
             phoneNumber: member.phone_number,
             amount: repaymentInfo.dueAmount,
-            loanId: repaymentInfo.loan.id, // Pass loanId for repayment tracking
+            loanId: repaymentInfo.loan.id,
             description: 'Loan repayment for KEMRI SACCO'
         });
 
@@ -167,11 +165,6 @@ exports.repayLoan = async (req, res) => {
 // ============================================================
 // 6. Admin: Mark loan as manually disbursed (Phase 1)
 // ============================================================
-// This is the MANUAL path: a staff member sends the money to the member
-// themselves (via M-Pesa app, bank, whatever), then records the receipt
-// here to close the loan out and trigger the member SMS. It stays in
-// place after B2C is live because B2C can fail or be unavailable — see
-// disburseLoan() below for the automatic path.
 exports.markDisbursed = async (req, res) => {
     try {
         const { loanId } = req.params;
@@ -181,18 +174,12 @@ exports.markDisbursed = async (req, res) => {
             return res.status(400).json({ error: 'Loan ID required' });
         }
 
-        // 1. Mark loan as disbursed
         const loan = await Loan.markDisbursed(loanId, mpesaReceipt || null);
         
         if (!loan) {
             return res.status(404).json({ error: 'Loan not found' });
         }
 
-        // 2. Get member details for SMS. Fetched AFTER markDisbursed()
-        //    above, so member.total_outstanding_balance already includes
-        //    this loan's contribution — that's the number the SMS should
-        //    show, because it's what the member actually owes across all
-        //    their loans.
         const member = await Member.findById(loan.member_id);
         if (!member) {
             return res.status(404).json({ error: 'Member not found' });
@@ -200,25 +187,22 @@ exports.markDisbursed = async (req, res) => {
 
         // 3. Send loan disbursed SMS
         try {
-            const disbursementDate = new Date().toLocaleDateString('en-GB', {
-                day: '2-digit',
-                month: 'short',
-                year: 'numeric'
-            });
-            
-            // Third argument is the member's running outstanding total,
-            // NOT this loan's total_repayment. The two are the same only
-            // for a member with a single lifetime loan; for anyone with
-            // history, sending loan.total_repayment understated what they
-            // owe. Matches the B2C path (disbursementService.handleB2CResult),
-            // which already re-read the member for the same reason.
+            // 2026-10-21: Fixed the due date. Previously used today's date.
+            // Now uses the actual next_payment_due (set to 1 month from now
+            // by Loan.markDisbursed).
+            const dueDateFormatted = loan.next_payment_due
+                ? new Date(loan.next_payment_due).toLocaleDateString('en-GB', {
+                    day: '2-digit', month: 'short', year: 'numeric',
+                })
+                : '—';
+
             await smsService.sendSMS(
                 member.phone_number,
                 smsService.templates.loanDisbursed(
                     member.full_name,
                     loan.principal,
                     member.total_outstanding_balance,
-                    disbursementDate
+                    dueDateFormatted
                 )
             );
         } catch (smsErr) {
@@ -250,22 +234,6 @@ exports.markDisbursed = async (req, res) => {
 // ============================================================
 // 6b. Admin: Disburse loan automatically via M-Pesa B2C (Phase 2)
 // ============================================================
-// Distinct from markDisbursed() above. This triggers the automatic payout
-// through Safaricom's B2C API — no staff member sends money manually.
-//
-// IMPORTANT: this endpoint is ASYNCHRONOUS. A 200 response here means
-// "Safaricom accepted the request", not "the member has the money". The
-// loan moves to 'disbursing' and sits there for 5–30 seconds while
-// Safaricom processes the transfer. The real outcome arrives at
-// /webhooks/daraja/b2c/result and resolves the loan — either to
-// 'disbursed' (success, balance incremented, member SMS sent) or back to
-// 'approved' (failure, staff notified).
-//
-// The frontend should show a "Disbursing…" state on the row after this
-// returns, and poll (or wait for the next fetch) until the loan resolves.
-// A staff member clicking Disburse again while the loan is already
-// disbursing will get a 400 explaining that — the service checks the
-// current status before initiating.
 exports.disburseLoan = async (req, res) => {
     try {
         const { loanId } = req.params;
@@ -273,10 +241,6 @@ exports.disburseLoan = async (req, res) => {
         const result = await DisbursementService.disburseLoan(loanId);
 
         if (!result.success) {
-            // Log the failed attempt. A failed disbursement is as much a
-            // business event as a successful one — if a member complains
-            // they never received their loan, the audit trail needs to
-            // show that staff tried and why it didn't work.
             await AuditLog.log({
                 actorId: req.user.id,
                 actorUsername: req.user.username,
@@ -290,7 +254,6 @@ exports.disburseLoan = async (req, res) => {
             return res.status(400).json({ error: result.message });
         }
 
-        // Accepted by Safaricom — loan is now in 'disbursing'
         const member = await Member.findById(result.loan.member_id);
         await AuditLog.log({
             actorId: req.user.id,
@@ -318,24 +281,6 @@ exports.disburseLoan = async (req, res) => {
 // ============================================================
 // 6c. Admin: Resolve a stuck B2C disbursement
 // ============================================================
-// A loan sits in 'disbursing' when Safaricom accepted the B2C request
-// but the result callback never arrived (or failed to match). The admin
-// console surfaces a "Resolve" action on any disbursing row older than
-// 5 minutes; this endpoint handles the outcome.
-//
-// Body: { outcome: 'received' | 'not_received', receipt?, reason? }
-//
-//   outcome='received'       Staff verified on M-Pesa that the member
-//                            received the funds. Requires a receipt.
-//                            Loan → disbursed, balance incremented,
-//                            member SMS fired.
-//
-//   outcome='not_received'   Staff verified on M-Pesa that the funds
-//                            never moved. Loan → approved, ready to
-//                            retry from the portal. No balance change.
-//
-// Both paths audit-log the actor, the choice, the original ConversationID
-// (preserved in admin_notes for reconciliation), and the timestamp.
 exports.resolveStuckDisbursement = async (req, res) => {
     try {
         const { loanId } = req.params;
@@ -357,10 +302,6 @@ exports.resolveStuckDisbursement = async (req, res) => {
             });
         }
 
-        // Require a receipt when confirming the member received funds.
-        // Without it, we have no proof the payout actually happened —
-        // the whole point of this override path is a human confirming
-        // against M-Pesa with the receipt as evidence.
         if (outcome === 'received' && (!receipt || !receipt.trim())) {
             return res.status(400).json({
                 error: 'An M-Pesa receipt is required when confirming the member received the funds.',
@@ -371,10 +312,6 @@ exports.resolveStuckDisbursement = async (req, res) => {
 
         let result;
         if (outcome === 'received') {
-            // markDisbursed() moves the loan to 'disbursed' and increments
-            // the member's running outstanding total in one transaction.
-            // source='manual' produces the standard "Manually disbursed"
-            // note; the audit log records that this was a stuck-resolution.
             result = await Loan.markDisbursed(loanId, receipt.trim(), 'manual');
         } else {
             const rollbackReason = reason && reason.trim()
@@ -402,21 +339,25 @@ exports.resolveStuckDisbursement = async (req, res) => {
                 : `Rolled back to approved. Reason: ${reason || 'callback never arrived'}. Original ConversationID: ${loan.b2c_conversation_id || 'unknown'}`,
         });
 
-        // Send member SMS on the "received" path — the money moved and the
-        // member needs to know their new outstanding balance and the
-        // receipt. The "not received" path doesn't send an SMS, because
-        // from the member's perspective nothing has changed; their loan
-        // is still approved and awaiting disbursement.
         if (outcome === 'received' && member) {
             try {
                 const updatedMember = await Member.findById(loan.member_id);
+                
+                // 2026-10-21: Fixed the due date here too. Uses next_payment_due
+                // from the updated result instead of today's date.
+                const dueDateFormatted = result.next_payment_due
+                    ? new Date(result.next_payment_due).toLocaleDateString('en-GB', {
+                        day: '2-digit', month: 'short', year: 'numeric',
+                      })
+                    : '—';
+
                 await smsService.sendSMS(
                     member.phone_number,
                     smsService.templates.loanDisbursed(
                         member.full_name,
                         loan.principal,
                         updatedMember?.total_outstanding_balance || loan.total_repayment,
-                        new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+                        dueDateFormatted
                     )
                 );
             } catch (err) {
