@@ -33,11 +33,6 @@ const smsService = require('./smsService');
 class ReminderService {
   // Entry point. Returns a summary of what was sent, which the endpoint
   // returns to GitHub Actions for logging.
-  //
-  //   today — the effective date for scheduling. Defaults to real now;
-  //           overridable via ?testDate= for cadence verification.
-  //   opts  — { dryRun: boolean }. When true, everything computes but
-  //           nothing sends.
   static async runDaily(today = new Date(), opts = {}) {
     const { dryRun = false } = opts;
 
@@ -62,9 +57,6 @@ class ReminderService {
 
     const loans = await Loan.findAllDisbursedForReminders();
 
-    // Precompute the weekly digest content in a single pass so we only
-    // send it if there's something to report. Doing this before the loop
-    // avoids a second iteration.
     let weeklyDueCount = 0;
     let weeklyDueTotal = 0;
     let weeklyOverdueCount = 0;
@@ -122,8 +114,6 @@ class ReminderService {
           }
         }
       } catch (err) {
-        // Per-loan isolation: one member's SMS failing must not abort the
-        // rest of the batch. Logged, counted, and the loop continues.
         console.error(`Reminder failed for loan ${loan.id} (${loan.reference}):`, err.message);
         summary.errors.push({ loanId: loan.id, reference: loan.reference, error: err.message });
       }
@@ -142,15 +132,10 @@ class ReminderService {
     return summary;
   }
 
-  // Compute the loan's status as of today. The single source of truth for
-  // "is this member behind?" — used by every reminder path.
   static computeStatus(loan, today) {
     const disbursed = new Date(loan.disbursed_at);
     const monthsElapsed = monthsBetween(disbursed, today);
     const instalmentsDue = monthsElapsed;
-    // 1-instalment tolerance. At 0 or 1 instalments due, threshold is 0 —
-    // nobody is behind. From 2 onwards, the member must have paid
-    // (instalmentsDue - 1) × monthly_installment.
     const threshold = Math.max(0, (instalmentsDue - 1) * Number(loan.monthly_installment));
     const amountPaid = Number(loan.amount_paid);
     const outstanding = Number(loan.outstanding_balance);
@@ -160,27 +145,32 @@ class ReminderService {
     return { monthsElapsed, instalmentsDue, threshold, amountPaid, outstanding, behind, amountBehind };
   }
 
+  // 2026-10-21: All member reminders now use the board-approved unified
+  // template. They all pass full name, outstanding balance, and amount paid.
+
   static async sendMidMonth(loan, status, dryRun) {
-    const message = smsService.templates.loanReminderMidMonth(
+    const message = smsService.templates.loanReminderBoardApproved(
       loan.full_name, status.outstanding, status.amountPaid
     );
     await this.deliver({ dryRun, to: loan.phone_number, message, logLabel: `mid-month → ${loan.reference}` });
   }
 
   static async sendEndOfMonth(loan, status, dryRun) {
-    const message = status.behind
-      ? smsService.templates.loanReminderEndMonthBehind(loan.full_name, status.outstanding, status.amountBehind)
-      : smsService.templates.loanReminderEndMonthOnTrack(loan.full_name, status.outstanding);
+    const message = smsService.templates.loanReminderBoardApproved(
+      loan.full_name, status.outstanding, status.amountPaid
+    );
     await this.deliver({
       dryRun,
       to: loan.phone_number,
       message,
-      logLabel: `end-of-month (${status.behind ? 'behind' : 'on-track'}) → ${loan.reference}`,
+      logLabel: `end-of-month → ${loan.reference}`,
     });
   }
 
   static async sendDay3Overdue(loan, status, dryRun) {
-    const message = smsService.templates.loanOverdueDay3(loan.full_name, status.amountBehind);
+    const message = smsService.templates.loanReminderBoardApproved(
+      loan.full_name, status.outstanding, status.amountPaid
+    );
     await this.deliver({ dryRun, to: loan.phone_number, message, logLabel: `day-3 overdue → ${loan.reference}` });
   }
 
@@ -196,13 +186,6 @@ class ReminderService {
     await this.deliver({ dryRun, to: 'STAFF', message, logLabel: 'weekly digest', isStaff: true });
   }
 
-  // Single dispatch helper. Handles both member and staff sends, and the
-  // dry-run branch that short-circuits before smsService is called.
-  //
-  // The dry-run log line deliberately spells out the intended SMS so it
-  // can be eyeballed in the Render logs without needing to match
-  // template functions back to their templates — the whole message text
-  // is on one line.
   static async deliver({ dryRun, to, message, logLabel, isStaff = false }) {
     if (dryRun) {
       console.log(`[DRY RUN] would send (${logLabel}) to ${to}: ${message}`);
@@ -214,13 +197,6 @@ class ReminderService {
     return smsService.sendSMS(to, message);
   }
 
-  // Has a reminder of the given kind already been sent today? Null-safe:
-  // a loan that has never had a reminder sent returns false, and the
-  // reminder fires normally.
-  //
-  // In dry-run mode this still executes — the check reads existing data,
-  // it doesn't write. So a dry-run correctly skips a loan that a real
-  // reminder already touched today.
   static alreadySentToday(timestamp, today) {
     if (!timestamp) return false;
     const sent = new Date(timestamp);
@@ -231,11 +207,6 @@ class ReminderService {
     );
   }
 
-  // Is this loan's next payment due within the current calendar week?
-  // Used only for the Monday digest. A loan is "due this week" if its
-  // next_payment_due falls within 7 days of today. Bounded below by today
-  // so an already-overdue loan doesn't appear as "due" in the digest —
-  // it appears in the overdue count instead.
   static isDueThisWeek(loan, today) {
     if (!loan.next_payment_due) return false;
     const due = new Date(loan.next_payment_due);
@@ -244,19 +215,12 @@ class ReminderService {
   }
 }
 
-// Full calendar months between two dates. Not the same as
-// (now - then) / 30 — the length varies by month. A loan disbursed on the
-// 6th advances to "1 month" exactly on the 6th of the next month, not 30
-// days later. This is what makes "monthsElapsed" line up with the
-// instalment schedule the member agreed to.
 function monthsBetween(from, to) {
   let months = (to.getFullYear() - from.getFullYear()) * 12 + (to.getMonth() - from.getMonth());
   if (to.getDate() < from.getDate()) months -= 1;
   return Math.max(0, months);
 }
 
-// True if today is the last calendar day of its month. Handles 28/29/30/31
-// without a lookup table — tomorrow is always the 1st of the next month.
 function isLastDayOfMonth(date) {
   const tomorrow = new Date(date);
   tomorrow.setDate(tomorrow.getDate() + 1);

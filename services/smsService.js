@@ -102,17 +102,19 @@ const templates = {
     `KEMRI SACCO: Hi ${firstName(name)}, we could not complete your instant withdrawal right now. Your KES ${Number(amount).toLocaleString()} request is queued - our team will process it shortly.`,
 
   // ─── MEMBER-FACING — LOAN REMINDERS ───
-  loanReminderMidMonth: (name, amountOutstanding, amountPaid) =>
-    `KEMRI SACCO: Hi ${firstName(name)}, amount outstanding on your loan: ${formatKES(amountOutstanding)}. Amount paid so far: ${formatKES(amountPaid)}. Settle anytime via *483*4444#.`,
+  // 2026-10-21: Replaced the four distinct cadence templates (Mid-month, 
+  // End-of-month, etc.) with the unified wording requested by the board.
+  // Note: This is ~240 chars, so it will send as 2 SMS segments.
+  loanReminderBoardApproved: (name, amountOutstanding, amountPaid) => {
+    // Check if they have made any payments at all
+    const hasPaid = Number(amountPaid) > 0;
+    
+    const paymentStatus = hasPaid
+      ? `and you have paid ${formatKES(amountPaid)} to date`
+      : 'and no repayments have been received to date';
 
-  loanReminderEndMonthOnTrack: (name, amountOutstanding) =>
-    `KEMRI SACCO: End-of-month check-in. Amount outstanding: ${formatKES(amountOutstanding)}. You are on track - thank you for keeping up with your payments.`,
-
-  loanReminderEndMonthBehind: (name, amountOutstanding, amountBehind) =>
-    `KEMRI SACCO: End-of-month check-in. Amount outstanding: ${formatKES(amountOutstanding)}. You are ${formatKES(amountBehind)} behind schedule. Please settle via *483*4444#.`,
-
-  loanOverdueDay3: (name, amountBehind) =>
-    `KEMRI SACCO: You are ${formatKES(amountBehind)} behind on your loan settlement. Please settle via *483*4444# to avoid further reminders.`,
+    return `KEMRI SACCO: Dear ${firstName(name)}, your current outstanding loan balance is ${formatKES(amountOutstanding)}, ${paymentStatus}. Kindly make your repayment at your earliest convenience by dialling *483*4444#. Thank you for saving with KEMRI SACCO.`;
+  },
 
   // ─── STAFF-FACING ───
   staffNewMember: (name) =>
