@@ -10,6 +10,7 @@ const emailService = require('../services/emailService');
 
 // 2026-10-09: Withdrawal feature retired per board instruction.
 // Removed imports: models/Withdrawal, services/disbursementService.
+// 2026-10-23: Re-imported disbursementService to handle Wallet B2C payouts.
 
 const FAILURE_PHRASES = [
   'invalid', 'wrong', 'failed', 'error', 'something went wrong', 'not found',
@@ -51,7 +52,7 @@ async function handleUssd(req, res) {
           response = await handleRegister(phoneNumber, steps);
           break;
         case '2':
-          response = await handleBalance(phoneNumber, steps, sessionId);
+          response = await handleWallet(phoneNumber, steps, sessionId);
           break;
         case '3':
           response = await handleDeposit(phoneNumber, steps);
@@ -98,7 +99,7 @@ function mainMenu() {
   return (
     'CON Welcome to KEMRI SACCO\n' +
     '1. Register\n' +
-    '2. Balance\n' +
+    '2. My Wallet\n' +       // Changed from 'Balance'
     '3. Deposit\n' +
     '4. Loan\n' +
     '5. Loan Repayment\n' +
@@ -232,9 +233,9 @@ async function handleRegister(phoneNumber, steps) {
 }
 
 // ============================================================
-// 2. BALANCE (PIN required)
+// 2. MY WALLET (M-Shwari Style)
 // ============================================================
-async function handleBalance(phoneNumber, steps, sessionId) {
+async function handleWallet(phoneNumber, steps, sessionId) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) {
     return 'END You are not registered. Dial and select option 1 to register first.';
@@ -242,17 +243,69 @@ async function handleBalance(phoneNumber, steps, sessionId) {
 
   const pinCheck = await requirePin(member, steps, sessionId);
   if (!pinCheck.authenticated) return pinCheck.response;
+  const remaining = pinCheck.remainingSteps;
 
-  const balance = await Payment.getMemberBalance(member.id);
-  const balanceText = `Your KEMRI SACCO savings balance is KES ${balance.toLocaleString()}.`;
+  // Refresh member data to get latest wallet balance
+  const currentMember = await Member.findById(member.id);
+  const walletBalance = Number(currentMember.wallet_balance || 0);
+  const savingsBalance = await Payment.getMemberBalance(member.id);
 
-  try {
-    await smsService.sendSMS(phoneNumber, balanceText);
-  } catch (smsErr) {
-    console.error('USSD balance SMS failed (still shown on screen):', smsErr.message);
+  if (remaining.length === 0) {
+    return `CON My Wallet\n` +
+           `Wallet: KES ${walletBalance.toLocaleString()}\n` +
+           `Savings: KES ${savingsBalance.toLocaleString()}\n` +
+           `1. Withdraw Wallet to M-Pesa\n` +
+           `2. Back`;
   }
 
-  return `END ${balanceText}`;
+  if (remaining.length === 1) {
+    const choice = remaining[0];
+    if (choice === '1') {
+      if (walletBalance <= 0) {
+        return 'END You have no funds in your wallet to withdraw.';
+      }
+      return `CON Enter amount to withdraw (Max KES ${walletBalance.toLocaleString()}):`;
+    }
+    if (choice === '2') {
+      return 'END Thank you for using KEMRI SACCO.';
+    }
+    return 'END Invalid choice.';
+  }
+
+  if (remaining.length === 2) {
+    const amount = Number(remaining[1]);
+    
+    if (!amount || amount <= 0) {
+      return 'END Invalid amount. Please dial again.';
+    }
+    if (amount > walletBalance) {
+      return `END Insufficient wallet funds. Your balance is KES ${walletBalance.toLocaleString()}.`;
+    }
+
+    try {
+      // 1. Debit the wallet immediately to prevent double-withdrawal
+      await Member.debitWallet(member.id, amount, 'withdrawal', 'Pending B2C');
+
+      // 2. Trigger the Safaricom B2C transfer
+      const DisbursementService = require('../services/disbursementService');
+      await DisbursementService.disburseWalletToMpesa(member, amount);
+
+      return `END A withdrawal of KES ${amount.toLocaleString()} has been initiated to your M-Pesa. You will receive a confirmation SMS shortly.`;
+    } catch (err) {
+      console.error('Wallet withdrawal failed:', err.message);
+      
+      // If B2C fails immediately, refund the wallet balance
+      try {
+        await Member.creditWallet(member.id, amount, 'withdrawal_refund', 'B2C Failed');
+      } catch (refundErr) {
+        console.error('Failed to refund wallet after B2C failure:', refundErr.message);
+      }
+
+      return 'END We could not process your withdrawal right now. Your funds have been returned to your wallet.';
+    }
+  }
+
+  return 'END Invalid input.';
 }
 
 // ============================================================
@@ -325,7 +378,10 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
 
     let opening;
     let closing;
-    if (result.disbursing) {
+    if (result.walletCredited) {
+      opening = 'Loan approved';
+      closing = 'Funds credited to your Wallet. Dial *483*4444# to withdraw.';
+    } else if (result.disbursing) {
       opening = 'Loan approved';
       closing = 'Funds on the way to your M-Pesa.';
     } else if (result.disbursementFailed) {
@@ -410,23 +466,6 @@ async function handleRepayLoan(phoneNumber, steps, sessionId) {
 // ============================================================
 // 6. TRANSACTIONS (PIN required)
 // ============================================================
-// Shows the member their 5 most recent money movements — deposits,
-// loan repayments, AND loan disbursements — each labelled with its type.
-//
-// 2026-10-10: Loan disbursements were previously invisible here. A
-// member who received a loan but never deposited or repaid anything
-// (like Kennedy Odongo) would dial Option 6 and be told "no
-// transactions yet" — denying a money movement the SACCO just
-// performed. Disbursements live in the `loans` table, not `payments`,
-// so the two sources are now merged for this view.
-//
-// Data sources merged:
-//   payments  — deposits (loan_id NULL) and loan repayments (loan_id set)
-//   loans     — loan disbursements (disbursed_at IS NOT NULL)
-//
-// Sorted by date DESC, top 5 across both sources. Non-completed rows
-// (pending/failed/processing) get a status marker; completed rows stay
-// clean since that's the expected state.
 async function handleTransactions(phoneNumber, steps, sessionId) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) {
@@ -436,16 +475,11 @@ async function handleTransactions(phoneNumber, steps, sessionId) {
   const pinCheck = await requirePin(member, steps, sessionId);
   if (!pinCheck.authenticated) return pinCheck.response;
 
-  // Fetch both sources in parallel. 10 rows each so the merge has enough
-  // to pick a true top-5 from; the visible list stays 5 to keep the USSD
-  // screen within length limits.
   const [payments, loans] = await Promise.all([
     Payment.findRecentByMember(member.id, 10),
     Loan.getHistory(member.id, 10),
   ]);
 
-  // Normalise both into a common shape. Dates differ by source:
-  // payments use created_at, loans use disbursed_at.
   const fromPayments = payments.map((p) => ({
     date: p.created_at,
     type: p.loan_id === null ? 'Deposit' : 'Repay',
@@ -453,9 +487,6 @@ async function handleTransactions(phoneNumber, steps, sessionId) {
     status: p.status,
   }));
 
-  // Only loans where money actually moved. Pending/approved/disbursing/
-  // rejected loans have disbursed_at NULL and are correctly excluded —
-  // the member hasn't received funds for them yet.
   const fromLoans = loans
     .filter((l) => l.disbursed_at)
     .map((l) => ({
@@ -550,16 +581,6 @@ async function handleChangePin(phoneNumber, steps) {
 // ============================================================
 // 8. (RETIRED) WITHDRAW
 // ============================================================
-// 2026-10-09: Withdrawal feature retired per board instruction. The
-// handleWithdraw function was removed here in full, along with the
-// `Withdrawal` and `DisbursementService` imports at the top of this file.
-//
-// Historical withdrawal records are preserved in the `withdrawals` table
-// (archive CSV exported 2026-10-09). The model file models/Withdrawal.js
-// and route file routes/withdrawals.js remain on disk but are no longer
-// mounted. See AdminLayout.jsx / App.jsx for the parallel frontend changes.
-//
-// If the board ever reinstates withdrawals, the deleted handler is
-// recoverable from git history immediately before this commit.
+// 2026-10-09: Withdrawal feature retired per board instruction.
 
 module.exports = { handleUssd };

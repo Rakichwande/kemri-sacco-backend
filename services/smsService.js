@@ -53,34 +53,16 @@ const templates = {
   loanApplicationReceived: (name, principal, ref) =>
     `KEMRI SACCO: Hi ${firstName(name)}, we received your loan application for a principal of ${formatKES(principal)}. Ref: ${ref}. We'll review it and SMS you the decision shortly.`,
 
-  // Args: (name, principal, interest, totalPayable)
-  //
-  // 2026-10-10: wording updated. Previously ended with "Funds will be sent
-  // to your M-Pesa shortly" — a passive phrasing that reads as automatic.
-  // In reality, a regular member's approved loan sits in 'approved' until
-  // staff click Disburse. Board/staff loans skip this SMS entirely now
-  // (see loanService.apply), so this template is only ever sent to regular
-  // members going through manual review. "Our team will send" reflects
-  // that a human action is pending.
   loanApproved: (name, principal, interest, totalPayable) =>
     `KEMRI SACCO: Hi ${firstName(name)}, your loan is approved. Principal: ${formatKES(principal)}. Interest: ${formatKES(interest)}. Total amount payable: ${formatKES(totalPayable)}. Our team will send the funds to your M-Pesa shortly.`,
 
-  // 2026-10-10: Rewritten per board feedback. The previous wording was
-  // ambiguous about which date the member was looking at — and the CALLER
-  // was passing today's date instead of next_payment_due, so every loan
-  // showed its disbursement date as the due date. Both fixed in the same
-  // commit. See disbursementService._handleLoanB2CResult for the caller.
-  //
-  // 194 chars at typical values = 2 SMS segments. Same cost as the manual
-  // version the board approved. Do NOT add asterisks expecting bold —
-  // SMS is plain text and they render literally.
-  //
-  // Args: (name, principal, totalPayable, dueDate)
-  //   totalPayable = member's running amount outstanding AFTER this
-  //                  disbursement (from members.total_outstanding_balance)
-  //   dueDate      = disbursement date + 1 month, formatted DD Mon YYYY
   loanDisbursed: (name, principal, totalPayable, dueDate) =>
     `KEMRI SACCO: Hi ${firstName(name)}, ${formatKES(principal)} has been disbursed to your M-Pesa. Total amount payable: ${formatKES(totalPayable)}, due ${dueDate}. Please settle on or before the due date. Thank you for choosing KEMRI SACCO.`,
+
+  // 2026-10-23: New template for the Wallet system.
+  // When a loan is approved, it goes to the wallet instead of B2C.
+  loanWalletCredited: (name, principal, totalRepayment) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, your loan of ${formatKES(principal)} has been approved and credited to your SACCO Wallet. Total amount payable: ${formatKES(totalRepayment)}. Dial *483*4444# and select '2. My Wallet' to withdraw to M-Pesa.`,
 
   loanRepaymentConfirmed: (name, amountPaid, amountOutstanding, receipt) =>
     `KEMRI SACCO: Hi ${firstName(name)}, we received your payment of ${formatKES(amountPaid)}. Amount outstanding: ${formatKES(amountOutstanding)}. Receipt: ${receipt}.`,
@@ -91,24 +73,9 @@ const templates = {
   loanDisbursementFailed: (name) =>
     `KEMRI SACCO: Hi ${firstName(name)}, we could not complete your loan disbursement right now. Our team will contact you shortly.`,
 
-  // ─── MEMBER-FACING — WITHDRAWALS (dormant — feature retired) ───
-  withdrawalRequested: (name, amount) =>
-    `KEMRI SACCO: Hi ${firstName(name)}, we received your withdrawal request of ${formatKES(amount)}. Our team will process it and SMS you once the funds are sent.`,
-
-  withdrawalInstantConfirmed: (name, amount, receipt) =>
-    `KEMRI SACCO: Hi ${firstName(name)}, ${formatKES(amount)} has been sent to your M-Pesa. Receipt: ${receipt}. Thank you.`,
-
-  withdrawalInstantFailed: (name, amount) =>
-    `KEMRI SACCO: Hi ${firstName(name)}, we could not complete your instant withdrawal right now. Your KES ${Number(amount).toLocaleString()} request is queued - our team will process it shortly.`,
-
   // ─── MEMBER-FACING — LOAN REMINDERS ───
-  // 2026-10-21: Replaced the four distinct cadence templates (Mid-month, 
-  // End-of-month, etc.) with the unified wording requested by the board.
-  // Note: This is ~240 chars, so it will send as 2 SMS segments.
   loanReminderBoardApproved: (name, amountOutstanding, amountPaid) => {
-    // Check if they have made any payments at all
     const hasPaid = Number(amountPaid) > 0;
-    
     const paymentStatus = hasPaid
       ? `and you have paid ${formatKES(amountPaid)} to date`
       : 'and no repayments have been received to date';
@@ -127,7 +94,7 @@ const templates = {
     const { status } = opts;
     let closing;
     if (status === 'disbursing') {
-      closing = 'B2C initiated - no action needed.';
+      closing = 'B2C initiated - no action needed.'; // Or Wallet credited
     } else if (status === 'failed') {
       closing = 'B2C FAILED - manual disbursement required.';
     } else {
@@ -151,18 +118,6 @@ const templates = {
   staffDeposit: (name, amount) =>
     `KEMRI SACCO Admin: Deposit of ${formatKES(amount)} received from ${name}.`,
 
-  staffWithdrawalRequest: (name, amount) =>
-    `KEMRI SACCO Admin: Withdrawal request of ${formatKES(amount)} from ${name}. Awaiting processing.`,
-
-  staffWithdrawalInstantSuccess: (name, amount, receipt) =>
-    `KEMRI SACCO Admin: Withdrawal of ${formatKES(amount)} paid instantly to ${name}. Receipt: ${receipt || 'N/A'}.`,
-
-  staffWithdrawalInstantFailed: (name, amount) =>
-    `KEMRI SACCO Admin: Instant withdrawal FAILED for ${name} (${formatKES(amount)}). Queued for manual processing.`,
-
-  staffWithdrawalInstantTimedOut: (name, amount) =>
-    `KEMRI SACCO Admin: Instant withdrawal TIMED OUT for ${name} (${formatKES(amount)}). Queued for manual processing.`,
-
   staffLoanOverdueAlert: (name, reference, amountBehind) =>
     `KEMRI SACCO Admin: ${name} is ${formatKES(amountBehind)} behind on loan ${reference}. 6 days past month-end - consider calling.`,
 
@@ -175,7 +130,7 @@ const templates = {
     return `KEMRI SACCO Admin: ${parts}. Log in to the portal for details.`;
   },
 
-  // ─── STAFF-FACING — ACCOUNT MANAGEMENT (2026-10-21) ───
+  // ─── STAFF-FACING — ACCOUNT MANAGEMENT ───
   staffWelcome: (name, role) =>
     `KEMRI SACCO Admin: Welcome ${name}. Your account has been created. Role: ${role.replace('_', ' ').toUpperCase()}. You can now log in to the portal.`,
 

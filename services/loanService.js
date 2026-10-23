@@ -3,6 +3,7 @@ const Loan = require('../models/Loan');
 const smsService = require('./smsService');
 const notificationService = require('./notificationService');
 const emailService = require('./emailService');
+const db = require('../config/database'); // Added for transactions
 
 // 2026-10-19: Board policy dictates that the maximum loan limit is strictly
 // KES 10,000 for ALL members (board/staff and regular alike).
@@ -132,53 +133,59 @@ class LoanService {
       };
     }
 
-    const DisbursementService = require('./disbursementService');
-
-    let disbursement = { success: false, message: 'B2C not attempted' };
+    // --- Credit the Wallet Instead of B2C (M-Shwari Model) ---
+    // 2026-10-23: CEO approved M-Shwari style. Loans go to the wallet first.
+    let loanResult = approval.loan;
     try {
-      disbursement = await DisbursementService.disburseLoan(loan.id);
-    } catch (err) {
-      console.error(`Auto-disburse threw unexpectedly for loan ${loan.id}:`, err.message);
-      disbursement = { success: false, message: err.message };
-    }
-
-    if (!disbursement.success && member) {
+      const client = await db.pool.connect();
       try {
-        await smsService.sendSMS(
-          member.phone_number,
-          smsService.templates.loanApproved(
-            member.full_name,
-            approval.loan.principal,
-            approval.loan.total_interest,
-            approval.loan.total_repayment
-          )
-        );
-      } catch (smsErr) {
-        console.error('Board/staff fallback approval SMS failed:', smsErr.message);
+        await client.query('BEGIN');
+        
+        // 1. Mark the loan as disbursed (updates total_outstanding_balance)
+        loanResult = await Loan.markDisbursed(loan.id, 'Wallet Credit', 'manual', client);
+        
+        // 2. Credit the member's wallet
+        await Member.creditWallet(memberId, loan.principal, 'loan_credit', ref, client);
+        
+        await client.query('COMMIT');
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
       }
-    }
-
-    await this._notifyAutoApprovedStaff(member, approval.loan, ref, {
-      disbursementStatus: disbursement.success ? 'disbursing' : 'failed',
-      failureReason: disbursement.success ? null : disbursement.message,
-    });
-
-    if (!disbursement.success) {
-      return {
-        success: true,
-        message: 'Loan automatically approved. Disbursement is pending — our team will complete it shortly.',
-        loan: approval.loan,
-        autoApproved: true,
-        disbursementFailed: true,
+    } catch (dbErr) {
+      console.error(`Failed to credit wallet for loan ${loan.id}:`, dbErr.message);
+      return { 
+        success: false, 
+        message: 'Loan approved, but wallet credit failed. Please contact support.' 
       };
     }
 
+    // 3. Send the member the Wallet SMS
+    if (member) {
+      try {
+        await smsService.sendSMS(
+          member.phone_number,
+          smsService.templates.loanWalletCredited(member.full_name, loan.principal, loan.total_repayment)
+        );
+      } catch (smsErr) {
+        console.error('Wallet credit SMS failed:', smsErr.message);
+      }
+    }
+
+    // 4. Notify staff that the wallet was credited
+    await this._notifyAutoApprovedStaff(member, approval.loan, ref, {
+      disbursementStatus: 'wallet_credited',
+      failureReason: null,
+    });
+
     return {
       success: true,
-      message: 'Loan automatically approved and disbursement initiated. Funds will reach your M-Pesa shortly.',
-      loan: disbursement.loan || approval.loan,
+      message: 'Loan approved and credited to your SACCO Wallet. Dial *483*4444# to withdraw.',
+      loan: loanResult,
       autoApproved: true,
-      disbursing: true,
+      walletCredited: true,
     };
   }
 

@@ -4,6 +4,7 @@ const Member = require('../models/Member');
 const Loan = require('../models/Loan');
 const smsService = require('../services/smsService');
 const AuditLog = require('../models/AuditLog');
+const db = require('../config/database'); // Added for transactions
 
 // ============================================================
 // 1. Apply for a loan (Web or USSD)
@@ -163,21 +164,44 @@ exports.repayLoan = async (req, res) => {
 };
 
 // ============================================================
-// 6. Admin: Mark loan as manually disbursed (Phase 1)
+// 6. Admin: Credit Loan to Member's Wallet (M-Shwari Model)
 // ============================================================
+// 2026-10-23: This replaces manual and B2C direct disbursements.
+// When staff approves a loan and clicks "Credit to Wallet", this function
+// marks the loan as disbursed and adds the principal to the member's wallet.
 exports.markDisbursed = async (req, res) => {
     try {
         const { loanId } = req.params;
-        const { mpesaReceipt } = req.body;
-
         if (!loanId) {
             return res.status(400).json({ error: 'Loan ID required' });
         }
 
-        const loan = await Loan.markDisbursed(loanId, mpesaReceipt || null);
-        
-        if (!loan) {
-            return res.status(404).json({ error: 'Loan not found' });
+        const client = await db.pool.connect();
+        let loan;
+
+        try {
+            await client.query('BEGIN');
+            
+            // 1. Mark loan as disbursed (updates outstanding balance)
+            // We pass 'wallet' as the source to create a clear audit note.
+            loan = await Loan.markDisbursed(loanId, 'Wallet Credit', 'wallet', client);
+            
+            if (!loan) {
+                await client.query('ROLLBACK');
+                return res.status(404).json({ error: 'Loan not found or not in approved state.' });
+            }
+
+            // 2. Credit the member's wallet
+            const ref = `LN-${String(loan.id).padStart(5, '0')}`;
+            await Member.creditWallet(loan.member_id, loan.principal, 'loan_credit', ref, client);
+            
+            await client.query('COMMIT');
+        } catch (dbErr) {
+            await client.query('ROLLBACK');
+            console.error('Database error crediting wallet:', dbErr);
+            return res.status(500).json({ error: 'Failed to credit wallet due to database error.' });
+        } finally {
+            client.release();
         }
 
         const member = await Member.findById(loan.member_id);
@@ -185,102 +209,57 @@ exports.markDisbursed = async (req, res) => {
             return res.status(404).json({ error: 'Member not found' });
         }
 
-        // 3. Send loan disbursed SMS
+        // 3. Send the Wallet Credit SMS
         try {
-            // 2026-10-21: Fixed the due date. Previously used today's date.
-            // Now uses the actual next_payment_due (set to 1 month from now
-            // by Loan.markDisbursed).
-            const dueDateFormatted = loan.next_payment_due
-                ? new Date(loan.next_payment_due).toLocaleDateString('en-GB', {
-                    day: '2-digit', month: 'short', year: 'numeric',
-                })
-                : '—';
-
             await smsService.sendSMS(
                 member.phone_number,
-                smsService.templates.loanDisbursed(
+                smsService.templates.loanWalletCredited(
                     member.full_name,
                     loan.principal,
-                    member.total_outstanding_balance,
-                    dueDateFormatted
+                    loan.total_repayment
                 )
             );
         } catch (smsErr) {
-            console.error('Loan disbursement SMS failed (loan still disbursed):', smsErr.message);
+            console.error('Loan wallet credit SMS failed:', smsErr.message);
         }
 
         await AuditLog.log({
             actorId: req.user.id,
             actorUsername: req.user.username,
-            action: 'Disbursed loan',
+            action: 'Credited loan to wallet',
             category: 'loan_decision',
             targetType: 'loan',
             targetId: loanId,
             targetLabel: `${member.full_name} (loan #${loanId})`,
-            details: `Disbursed KES ${loan.principal} to ${member.full_name}.${mpesaReceipt ? ' Receipt: ' + mpesaReceipt : ''}`,
+            details: `Credited KES ${loan.principal} to SACCO Wallet for ${member.full_name}.`,
         });
 
         res.json({
             success: true,
-            message: 'Loan marked as manually disbursed. SMS sent to member.',
+            message: 'Loan credited to member SACCO Wallet. SMS sent to member.',
             loan,
         });
     } catch (err) {
-        console.error('Manual disbursement error:', err);
+        console.error('Wallet credit error:', err);
         res.status(500).json({ error: 'Server error' });
     }
 };
 
 // ============================================================
-// 6b. Admin: Disburse loan automatically via M-Pesa B2C (Phase 2)
+// 6b. Admin: Disburse loan automatically (Now disabled/routed to Wallet)
 // ============================================================
+// 2026-10-23: Since all loans now go to the wallet first, this endpoint
+// simply forwards to the markDisbursed function above. This prevents staff
+// from accidentally bypassing the wallet and sending money straight to M-Pesa.
 exports.disburseLoan = async (req, res) => {
-    try {
-        const { loanId } = req.params;
-
-        const result = await DisbursementService.disburseLoan(loanId);
-
-        if (!result.success) {
-            await AuditLog.log({
-                actorId: req.user.id,
-                actorUsername: req.user.username,
-                action: 'Attempted B2C disbursement',
-                category: 'loan_decision',
-                targetType: 'loan',
-                targetId: loanId,
-                targetLabel: `loan #${loanId}`,
-                details: `B2C disbursement failed: ${result.message}`,
-            });
-            return res.status(400).json({ error: result.message });
-        }
-
-        const member = await Member.findById(result.loan.member_id);
-        await AuditLog.log({
-            actorId: req.user.id,
-            actorUsername: req.user.username,
-            action: 'Initiated B2C disbursement',
-            category: 'loan_decision',
-            targetType: 'loan',
-            targetId: loanId,
-            targetLabel: member ? `${member.full_name} (loan #${loanId})` : `loan #${loanId}`,
-            details: `Initiated B2C disbursement of KES ${result.loan.principal}. ConversationID: ${result.conversationId}. Awaiting Safaricom confirmation.`,
-        });
-
-        res.json({
-            success: true,
-            message: result.message,
-            loan: result.loan,
-            conversationId: result.conversationId,
-        });
-    } catch (err) {
-        console.error('B2C disbursement error:', err);
-        res.status(500).json({ error: 'Server error' });
-    }
+    return exports.markDisbursed(req, res);
 };
 
 // ============================================================
 // 6c. Admin: Resolve a stuck B2C disbursement
 // ============================================================
+// Note: With the Wallet model, direct B2C to members is deprecated for loans.
+// However, this is kept to resolve historical loans that got stuck in 'disbursing'.
 exports.resolveStuckDisbursement = async (req, res) => {
     try {
         const { loanId } = req.params;
@@ -343,8 +322,6 @@ exports.resolveStuckDisbursement = async (req, res) => {
             try {
                 const updatedMember = await Member.findById(loan.member_id);
                 
-                // 2026-10-21: Fixed the due date here too. Uses next_payment_due
-                // from the updated result instead of today's date.
                 const dueDateFormatted = result.next_payment_due
                     ? new Date(result.next_payment_due).toLocaleDateString('en-GB', {
                         day: '2-digit', month: 'short', year: 'numeric',

@@ -234,23 +234,32 @@ async function rollbackDisbursing(loan_id, reason = '') {
   return result.rows[0];
 }
 
-async function markDisbursed(loan_id, mpesa_receipt = null, source = 'manual') {
-  const client = await db.pool.connect();
+// 2026-10-23: Updated to accept an optional externalClient. This is critical
+// for the M-Shwari Wallet flow. When a loan is auto-approved, we must mark
+// the loan as disbursed AND credit the member's wallet balance atomically.
+// If we don't share the transaction, a server crash could mark the loan as
+// disbursed without actually putting the money in their wallet.
+async function markDisbursed(loan_id, mpesa_receipt = null, source = 'manual', externalClient = null) {
+  const client = externalClient || (await db.pool.connect());
+  const ownsTransaction = !externalClient;
+
   try {
-    await client.query('BEGIN');
+    if (ownsTransaction) await client.query('BEGIN');
 
     const loanRes = await client.query(
       "SELECT * FROM loans WHERE id = $1 AND status IN ('approved', 'disbursing') FOR UPDATE",
       [loan_id]
     );
     if (loanRes.rows.length === 0) {
-      await client.query('ROLLBACK');
+      if (ownsTransaction) await client.query('ROLLBACK');
       return undefined;
     }
     const loan = loanRes.rows[0];
 
     const noteLine = source === 'b2c'
       ? ' | Auto-disbursed via B2C. Receipt: '
+      : source === 'wallet'
+      ? ' | Disbursed to SACCO Wallet. Ref: '
       : ' | Manually disbursed. Receipt: ';
 
     const updateRes = await client.query(
@@ -271,31 +280,17 @@ async function markDisbursed(loan_id, mpesa_receipt = null, source = 'manual') {
       [Math.round(Number(loan.total_repayment)), loan.member_id]
     );
 
-    await client.query('COMMIT');
+    if (ownsTransaction) await client.query('COMMIT');
     return updateRes.rows[0];
   } catch (err) {
-    await client.query('ROLLBACK');
+    if (ownsTransaction) await client.query('ROLLBACK');
     throw err;
   } finally {
-    client.release();
+    if (ownsTransaction) client.release();
   }
 }
 
 // Applies a repayment to a loan.
-//
-// 2026-10-09: Now computes and returns the principal/interest split using
-// the interest-first rule. The caller (paymentService.handleCallback)
-// passes this result straight into Repayment.create, both inside the same
-// transaction, so the loan balance and the ledger's split can never
-// disagree.
-//
-// Rules:
-//   - The loan's total_interest is a fixed charge for the whole loan.
-//   - Every repayment pays off remaining interest first.
-//   - Any amount left over after interest goes to principal.
-//   - Already-paid interest is read from the repayments ledger. Because the
-//     loans row is locked FOR UPDATE above, two concurrent repayments on the
-//     same loan are serialised - the second reads the first's committed row.
 async function applyRepayment(loan_id, amount, externalClient = null) {
   const client = externalClient || (await db.pool.connect());
   const ownsTransaction = !externalClient;
@@ -337,9 +332,6 @@ async function applyRepayment(loan_id, amount, externalClient = null) {
       [newBalance, newAmountPaid, newStatus, isFullyRepaid, loan_id]
     );
 
-    // Update member's outstanding balance. total_outstanding_balance is
-    // INTEGER and amount is a NUMERIC string ("227.00") - see commit
-    // 196e5f4 for why Math.round(Number(...)) is required.
     await client.query(
       `UPDATE members 
        SET total_outstanding_balance = total_outstanding_balance - $1 
@@ -348,8 +340,6 @@ async function applyRepayment(loan_id, amount, externalClient = null) {
     );
 
     if (isFullyRepaid) {
-      // 2026-10-19: Board policy dictates the credit limit is capped at 
-      // 10,000 for everyone, regardless of repayment history.
       await client.query(
         `UPDATE members 
          SET successful_repayments = successful_repayments + 1,

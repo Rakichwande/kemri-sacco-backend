@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS members (
   credit_limit INTEGER DEFAULT 10000,
   total_outstanding_balance INTEGER DEFAULT 0,
   successful_repayments INTEGER DEFAULT 0,
+  wallet_balance INTEGER DEFAULT 0,
   -- Board/Staff flag. TRUE for the 17 board and staff members who are
   -- auto-approved for loans under SACCO policy agreed 25 Sept 2026.
   -- Defaults to FALSE for everyone else — including any member who
@@ -57,6 +58,8 @@ async function init() {
   await pool.query(`ALTER TABLE members ALTER COLUMN phone_number DROP NOT NULL;`);
 
   await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS is_board_staff BOOLEAN NOT NULL DEFAULT FALSE;`);
+
+  await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS wallet_balance INTEGER DEFAULT 0;`); 
 
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_members_board_staff ON members (id) WHERE is_board_staff;`);
 
@@ -523,6 +526,47 @@ async function remove(memberId) {
   }
 }
 
+// --- Wallet Operations ---
+
+async function creditWallet(memberId, amount, type, reference, client = null) {
+  const dbClient = client || pool;
+  
+  // 1. Add to balance
+  await dbClient.query(
+    `UPDATE members SET wallet_balance = wallet_balance + $1 WHERE id = $2`,
+    [amount, memberId]
+  );
+  
+  // 2. Log the transaction
+  await dbClient.query(
+    `INSERT INTO wallet_transactions (member_id, amount, transaction_type, reference) 
+     VALUES ($1, $2, $3, $4)`,
+    [memberId, amount, type, reference]
+  );
+}
+
+async function debitWallet(memberId, amount, type, reference, client = null) {
+  const dbClient = client || pool;
+  
+  // 1. Deduct from balance (Only if they have enough)
+  const res = await dbClient.query(
+    `UPDATE members SET wallet_balance = wallet_balance - $1 
+     WHERE id = $2 AND wallet_balance >= $1 RETURNING wallet_balance`,
+    [amount, memberId]
+  );
+  
+  if (res.rows.length === 0) {
+    throw new Error('Insufficient wallet balance');
+  }
+  
+  // 2. Log the transaction (as a negative amount)
+  await dbClient.query(
+    `INSERT INTO wallet_transactions (member_id, amount, transaction_type, reference) 
+     VALUES ($1, $2, $3, $4)`,
+    [memberId, -amount, type, reference]
+  );
+}
+
 module.exports = {
   init,
   create,
@@ -545,5 +589,7 @@ module.exports = {
   setBoardStaffStatus,
   setBoardStaffByReferences,
   isBoardStaff,
+  creditWallet,
+  debitWallet,
   remove,
 };
