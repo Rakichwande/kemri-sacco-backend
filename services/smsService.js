@@ -59,8 +59,6 @@ const templates = {
   loanDisbursed: (name, principal, totalPayable, dueDate) =>
     `KEMRI SACCO: Hi ${firstName(name)}, ${formatKES(principal)} has been disbursed to your M-Pesa. Total amount payable: ${formatKES(totalPayable)}, due ${dueDate}. Please settle on or before the due date. Thank you for choosing KEMRI SACCO.`,
 
-  // 2026-10-23: New template for the Wallet system.
-  // When a loan is approved, it goes to the wallet instead of B2C.
   loanWalletCredited: (name, principal, totalRepayment) =>
     `KEMRI SACCO: Hi ${firstName(name)}, your loan of ${formatKES(principal)} has been approved and credited to your SACCO Wallet. Total amount payable: ${formatKES(totalRepayment)}. Dial *483*4444# and select '2. My Wallet' to withdraw to M-Pesa.`,
 
@@ -93,12 +91,12 @@ const templates = {
   staffLoanAutoApproved: (name, principal, ref, opts = {}) => {
     const { status } = opts;
     let closing;
-    if (status === 'disbursing') {
-      closing = 'B2C initiated - no action needed.'; // Or Wallet credited
+    if (status === 'wallet_credited' || status === 'disbursing') {
+      closing = 'Funds credited to wallet - no action needed.';
     } else if (status === 'failed') {
-      closing = 'B2C FAILED - manual disbursement required.';
+      closing = 'Disbursement FAILED - manual action required.';
     } else {
-      closing = 'Awaiting disbursement.';
+      closing = 'Awaiting action.';
     }
     return `KEMRI SACCO Admin: Board/Staff loan, principal ${formatKES(principal)}, for ${name} (Ref: ${ref}). Auto-approved. ${closing}`;
   },
@@ -106,11 +104,15 @@ const templates = {
   staffLoanDisbursed: (name, reference, receipt) =>
     `KEMRI SACCO Admin: Loan ${reference} for ${name} disbursed via B2C. Receipt: ${receipt || 'N/A'}.`,
 
+  // 2026-10-26: New template to notify admins when a loan is credited to a wallet.
+  staffWalletCredited: (name, amount, ref) =>
+    `KEMRI SACCO Admin: Credited KES ${Number(amount).toLocaleString()} to ${name}'s Wallet (Ref: ${ref}).`,
+
   staffLoanDisbursementFailed: (name, reference, reason) =>
-    `KEMRI SACCO Admin: Loan ${reference} for ${name} - B2C FAILED (${reason}). Manual disbursement required.`,
+    `KEMRI SACCO Admin: Loan ${reference} for ${name} - FAILED (${reason}). Manual disbursement required.`,
 
   staffLoanDisbursementTimedOut: (name, reference) =>
-    `KEMRI SACCO Admin: Loan ${reference} for ${name} - B2C TIMED OUT. Verify on M-Pesa and disburse manually if needed.`,
+    `KEMRI SACCO Admin: Loan ${reference} for ${name} - TIMED OUT. Verify and disburse manually if needed.`,
 
   staffRepayment: (name, amount) =>
     `KEMRI SACCO Admin: Payment of ${formatKES(amount)} received from ${name}.`,

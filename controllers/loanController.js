@@ -3,8 +3,9 @@ const DisbursementService = require('../services/disbursementService');
 const Member = require('../models/Member');
 const Loan = require('../models/Loan');
 const smsService = require('../services/smsService');
+const notificationService = require('../services/notificationService'); // <-- ADDED for staff SMS
 const AuditLog = require('../models/AuditLog');
-const db = require('../config/database'); // Added for transactions
+const db = require('../config/database'); 
 
 // ============================================================
 // 1. Apply for a loan (Web or USSD)
@@ -166,9 +167,6 @@ exports.repayLoan = async (req, res) => {
 // ============================================================
 // 6. Admin: Credit Loan to Member's Wallet (M-Shwari Model)
 // ============================================================
-// 2026-10-23: This replaces manual and B2C direct disbursements.
-// When staff approves a loan and clicks "Credit to Wallet", this function
-// marks the loan as disbursed and adds the principal to the member's wallet.
 exports.markDisbursed = async (req, res) => {
     try {
         const { loanId } = req.params;
@@ -183,7 +181,6 @@ exports.markDisbursed = async (req, res) => {
             await client.query('BEGIN');
             
             // 1. Mark loan as disbursed (updates outstanding balance)
-            // We pass 'wallet' as the source to create a clear audit note.
             loan = await Loan.markDisbursed(loanId, 'Wallet Credit', 'wallet', client);
             
             if (!loan) {
@@ -209,7 +206,9 @@ exports.markDisbursed = async (req, res) => {
             return res.status(404).json({ error: 'Member not found' });
         }
 
-        // 3. Send the Wallet Credit SMS
+        const ref = `LN-${String(loan.id).padStart(5, '0')}`;
+
+        // 3. Send the Wallet Credit SMS to Member
         try {
             await smsService.sendSMS(
                 member.phone_number,
@@ -221,6 +220,20 @@ exports.markDisbursed = async (req, res) => {
             );
         } catch (smsErr) {
             console.error('Loan wallet credit SMS failed:', smsErr.message);
+        }
+
+        // 4. Send the Wallet Credit SMS to Staff
+        try {
+            await notificationService.notifyStaff({
+                smsText: smsService.templates.staffWalletCredited(
+                    member.full_name,
+                    loan.principal,
+                    ref
+                ),
+                emailContent: null,
+            });
+        } catch (err) {
+            console.error('Staff wallet credit notification failed:', err.message);
         }
 
         await AuditLog.log({
@@ -248,9 +261,6 @@ exports.markDisbursed = async (req, res) => {
 // ============================================================
 // 6b. Admin: Disburse loan automatically (Now disabled/routed to Wallet)
 // ============================================================
-// 2026-10-23: Since all loans now go to the wallet first, this endpoint
-// simply forwards to the markDisbursed function above. This prevents staff
-// from accidentally bypassing the wallet and sending money straight to M-Pesa.
 exports.disburseLoan = async (req, res) => {
     return exports.markDisbursed(req, res);
 };
@@ -258,8 +268,6 @@ exports.disburseLoan = async (req, res) => {
 // ============================================================
 // 6c. Admin: Resolve a stuck B2C disbursement
 // ============================================================
-// Note: With the Wallet model, direct B2C to members is deprecated for loans.
-// However, this is kept to resolve historical loans that got stuck in 'disbursing'.
 exports.resolveStuckDisbursement = async (req, res) => {
     try {
         const { loanId } = req.params;

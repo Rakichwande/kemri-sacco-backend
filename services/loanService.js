@@ -142,7 +142,7 @@ class LoanService {
         await client.query('BEGIN');
         
         // 1. Mark the loan as disbursed (updates total_outstanding_balance)
-        loanResult = await Loan.markDisbursed(loan.id, 'Wallet Credit', 'manual', client);
+        loanResult = await Loan.markDisbursed(loan.id, 'Wallet Credit', 'wallet', client);
         
         // 2. Credit the member's wallet
         await Member.creditWallet(memberId, loan.principal, 'loan_credit', ref, client);
@@ -209,13 +209,24 @@ class LoanService {
     }
   }
 
+  // 2026-10-26: Updated to use the specific staffWalletCredited template
+  // when the status is 'wallet_credited', while keeping the generic one
+  // for standard B2C/manual disbursements (if they ever happen).
   static async _notifyAutoApprovedStaff(member, loan, ref, opts = {}) {
     const { disbursementStatus, failureReason } = opts;
+    
+    let smsText;
+    if (disbursementStatus === 'wallet_credited') {
+      smsText = smsService.templates.staffWalletCredited(member.full_name, loan.principal, ref);
+    } else {
+      smsText = smsService.templates.staffLoanAutoApproved(member.full_name, loan.principal, ref, {
+        status: disbursementStatus,
+      });
+    }
+
     try {
       await notificationService.notifyStaff({
-        smsText: smsService.templates.staffLoanAutoApproved(member.full_name, loan.principal, ref, {
-          status: disbursementStatus,
-        }),
+        smsText,
         emailContent: emailService.staffTemplates.loanAutoApproved(member.full_name, loan.principal, ref, {
           installment: loan.monthly_installment,
           tenureMonths: loan.tenure_months,
