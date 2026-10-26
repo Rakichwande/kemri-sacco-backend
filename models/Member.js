@@ -13,16 +13,10 @@ CREATE TABLE IF NOT EXISTS members (
   employer VARCHAR(150),
   scheme VARCHAR(100) DEFAULT 'holiday_savings',
   status VARCHAR(20) DEFAULT 'active',
-  -- Loan-related fields
   credit_limit INTEGER DEFAULT 10000,
   total_outstanding_balance INTEGER DEFAULT 0,
   successful_repayments INTEGER DEFAULT 0,
   wallet_balance INTEGER DEFAULT 0,
-  -- Board/Staff flag. TRUE for the 17 board and staff members who are
-  -- auto-approved for loans under SACCO policy agreed 25 Sept 2026.
-  -- Defaults to FALSE for everyone else — including any member who
-  -- self-registers via USSD or the portal. Promotion to TRUE happens only
-  -- through setBoardStaffStatus(), never through create() or update().
   is_board_staff BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMP DEFAULT NOW()
 );
@@ -50,19 +44,14 @@ async function init() {
   await pool.query(createTableQuery);
 
   await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS imported_reference VARCHAR(30);`);
-
   await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS pin_hash VARCHAR(255);`);
   await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS pin_failed_attempts INTEGER DEFAULT 0;`);
   await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS pin_locked_until TIMESTAMP;`);
-
   await pool.query(`ALTER TABLE members ALTER COLUMN phone_number DROP NOT NULL;`);
-
   await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS is_board_staff BOOLEAN NOT NULL DEFAULT FALSE;`);
-
-  await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS wallet_balance INTEGER DEFAULT 0;`); 
-
+  await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS wallet_balance INTEGER DEFAULT 0;`);
+  
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_members_board_staff ON members (id) WHERE is_board_staff;`);
-
   await pool.query(`CREATE SEQUENCE IF NOT EXISTS sacco_member_reference_seq;`);
 
   await pool.query(`
@@ -125,8 +114,6 @@ async function findByPhone(phone_number) {
   );
   return result.rows[0];
 }
-
-// --- PIN authentication ---
 
 function hasPinSet(member) {
   return !!member.pin_hash;
@@ -334,8 +321,6 @@ async function update(id, updates) {
   return result.rows[0];
 }
 
-// --- Board/Staff flag ---
-
 async function setBoardStaffStatus(memberId, isBoardStaff) {
   const result = await pool.query(
     `UPDATE members
@@ -367,54 +352,53 @@ async function isBoardStaff(memberId) {
   return result.rows[0]?.is_board_staff === true;
 }
 
-// --- Member deletion ---
+// --- Wallet Operations (2026-10-23) ---
 
-// Permanently delete a member record. Refuses if the member has any
-// FINANCIAL history — completed deposits, repayments, or loans/withdrawals
-// that actually moved money. Records that carry no financial consequence
-// do NOT block deletion; they are removed alongside the member.
-//
-// What blocks deletion (financial history):
-//   - payments with status = 'completed'      real money arrived
-//   - repayments (any row)                    real money arrived
-//   - loans in 'disbursing'/'disbursed'/'repaid'  real money left or is in flight
-//   - withdrawals in 'disbursing'/'processed'     same
-//
-// What does NOT block (no financial consequence):
-//   - payments with status = 'pending' or 'failed'  an STK push was
-//     attempted but never completed. The row is proof of an ATTEMPT,
-//     not of money movement. Counting these blocked deletion of members
-//     who had only tried and failed to deposit, which defeats the
-//     purpose of the rule — protect real records, not abandoned
-//     attempts. (A member whose STK push was cancelled by mistake on
-//     their side should not be undeletable forever.)
-//   - loans in 'pending'/'rejected'           an application, not an obligation
-//   - withdrawals in 'pending'/'rejected'     a request, not a payout
-//
-// Why the distinction matters: a financial record has to survive for
-// audit and reconciliation because reversing it would break reports and
-// remove evidence of real money movement. A pending application or a
-// failed payment attempt carries no such weight — deleting it removes
-// nothing that ever mattered.
-//
-// Reference numbers are NEVER reused. Deleting a member does not roll
-// back sacco_member_reference_seq — the sequence continues, so the next
-// new member never inherits a deleted member's number. Same for loan
-// ids: LN-00010 once issued is retired permanently.
-//
-// Return values:
-//   { deleted: true, member, removedLoans, removedWithdrawals }
-//                                        — deletion succeeded
-//   { deleted: false, code: 'HAS_HISTORY', message, counts }
-//                                        — blocked; member record intact
-//   null                                 — member does not exist
+async function creditWallet(memberId, amount, type, reference, client = null) {
+  const dbClient = client || pool;
+  
+  // 1. Add to balance (Cast to Number and round to prevent NUMERIC -> INTEGER error)
+  await dbClient.query(
+    `UPDATE members SET wallet_balance = wallet_balance + $1 WHERE id = $2`,
+    [Math.round(Number(amount)), memberId]
+  );
+  
+  // 2. Log the transaction
+  await dbClient.query(
+    `INSERT INTO wallet_transactions (member_id, amount, transaction_type, reference) 
+     VALUES ($1, $2, $3, $4)`,
+    [memberId, Math.round(Number(amount)), type, reference]
+  );
+}
+
+async function debitWallet(memberId, amount, type, reference, client = null) {
+  const dbClient = client || pool;
+  const amt = Math.round(Number(amount));
+  
+  // 1. Deduct from balance (Only if they have enough)
+  const res = await dbClient.query(
+    `UPDATE members SET wallet_balance = wallet_balance - $1 
+     WHERE id = $2 AND wallet_balance >= $1 RETURNING wallet_balance`,
+    [amt, memberId]
+  );
+  
+  if (res.rows.length === 0) {
+    throw new Error('Insufficient wallet balance');
+  }
+  
+  // 2. Log the transaction (as a negative amount)
+  await dbClient.query(
+    `INSERT INTO wallet_transactions (member_id, amount, transaction_type, reference) 
+     VALUES ($1, $2, $3, $4)`,
+    [memberId, -amt, type, reference]
+  );
+}
+
 async function remove(memberId) {
   const client = await pool.pool.connect();
   try {
     await client.query('BEGIN');
 
-    // Lock the member row so a concurrent payment insert cannot slip
-    // between the history check and the delete.
     const memberRes = await client.query(
       'SELECT id, full_name, imported_reference FROM members WHERE id = $1 FOR UPDATE',
       [memberId]
@@ -425,11 +409,6 @@ async function remove(memberId) {
     }
     const member = memberRes.rows[0];
 
-    // Count BLOCKING history. Every subquery is filtered to statuses
-    // that represent actual or in-flight money movement. Pending and
-    // failed records (payment attempts, loan applications, withdrawal
-    // requests) are excluded — they carry no financial consequence and
-    // are cleaned up below if present.
     const histRes = await client.query(
       `SELECT
          (SELECT COUNT(*) FROM payments    WHERE member_id = $1
@@ -448,8 +427,6 @@ async function remove(memberId) {
     if (total > 0) {
       await client.query('ROLLBACK');
 
-      // Singular / plural: "1 payment" not "1 payments". Each table name
-      // ends in 's', so stripping a trailing 's' for n===1 is safe.
       const parts = Object.entries(counts)
         .filter(([, n]) => Number(n) > 0)
         .map(([table, n]) => `${n} ${Number(n) === 1 ? table.replace(/s$/, '') : table}`)
@@ -463,19 +440,6 @@ async function remove(memberId) {
       };
     }
 
-    // No blocking history. Now clear the NON-BLOCKING records that
-    // reference this member via foreign key. These carry no financial
-    // consequence but do have FK constraints that would prevent the
-    // member delete:
-    //
-    //   - pending/rejected loans      (applications, not obligations)
-    //   - pending/rejected withdrawals (requests, not payouts)
-    //   - pending/failed payments      (STK attempts, not payments)
-    //
-    // Payments must be removed too, otherwise the FK constraint on
-    // payments.member_id would block the member delete. The order
-    // matters: loans first (payments.loan_id may reference loans), then
-    // payments, then withdrawals, then the member.
     const removedLoansRes = await client.query(
       `DELETE FROM loans WHERE member_id = $1 AND status IN ('pending', 'rejected')
        RETURNING id, status`,
@@ -494,7 +458,6 @@ async function remove(memberId) {
       [memberId]
     );
 
-    // Delete the member itself.
     await client.query('DELETE FROM members WHERE id = $1', [memberId]);
     await client.query('COMMIT');
 
@@ -508,10 +471,6 @@ async function remove(memberId) {
   } catch (err) {
     await client.query('ROLLBACK');
 
-    // FK violation from a table we didn't account for above (e.g.
-    // audit_log with a hard FK, ussd_sessions with a RESTRICT reference).
-    // Treat as "has related records" — same outcome, cleaner message,
-    // no 500.
     if (err.code === '23503') {
       return {
         deleted: false,
@@ -524,47 +483,6 @@ async function remove(memberId) {
   } finally {
     client.release();
   }
-}
-
-// --- Wallet Operations ---
-
-async function creditWallet(memberId, amount, type, reference, client = null) {
-  const dbClient = client || pool;
-  
-  // 1. Add to balance
-  await dbClient.query(
-    `UPDATE members SET wallet_balance = wallet_balance + $1 WHERE id = $2`,
-    [amount, memberId]
-  );
-  
-  // 2. Log the transaction
-  await dbClient.query(
-    `INSERT INTO wallet_transactions (member_id, amount, transaction_type, reference) 
-     VALUES ($1, $2, $3, $4)`,
-    [memberId, amount, type, reference]
-  );
-}
-
-async function debitWallet(memberId, amount, type, reference, client = null) {
-  const dbClient = client || pool;
-  
-  // 1. Deduct from balance (Only if they have enough)
-  const res = await dbClient.query(
-    `UPDATE members SET wallet_balance = wallet_balance - $1 
-     WHERE id = $2 AND wallet_balance >= $1 RETURNING wallet_balance`,
-    [amount, memberId]
-  );
-  
-  if (res.rows.length === 0) {
-    throw new Error('Insufficient wallet balance');
-  }
-  
-  // 2. Log the transaction (as a negative amount)
-  await dbClient.query(
-    `INSERT INTO wallet_transactions (member_id, amount, transaction_type, reference) 
-     VALUES ($1, $2, $3, $4)`,
-    [memberId, -amount, type, reference]
-  );
 }
 
 module.exports = {
