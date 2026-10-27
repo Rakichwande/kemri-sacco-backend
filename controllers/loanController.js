@@ -3,7 +3,7 @@ const DisbursementService = require('../services/disbursementService');
 const Member = require('../models/Member');
 const Loan = require('../models/Loan');
 const smsService = require('../services/smsService');
-const notificationService = require('../services/notificationService'); // <-- ADDED for staff SMS
+const notificationService = require('../services/notificationService');
 const AuditLog = require('../models/AuditLog');
 const db = require('../config/database'); 
 
@@ -30,8 +30,10 @@ exports.applyLoan = async (req, res) => {
 };
 
 // ============================================================
-// 2. Admin: Approve loan (sends SMS)
+// 2. Admin: Approve loan AND Credit to Wallet (1-Click Flow)
 // ============================================================
+// 2026-10-27: Updated to instantly call markDisbursed after approval.
+// This means Super Admins no longer have to click twice.
 exports.approveLoan = async (req, res) => {
     try {
         const { loanId } = req.params;
@@ -55,7 +57,10 @@ exports.approveLoan = async (req, res) => {
             details: `Approved KES ${result.loan.principal} loan.${adminNotes ? ' Notes: ' + adminNotes : ''}`,
         });
 
-        res.json(result);
+        // Forward directly to the wallet credit logic
+        req.params.loanId = loanId;
+        return exports.markDisbursed(req, res);
+
     } catch (err) {
         console.error('Approve loan error:', err);
         res.status(500).json({ error: 'Server error' });
@@ -207,6 +212,11 @@ exports.markDisbursed = async (req, res) => {
         }
 
         const ref = `LN-${String(loan.id).padStart(5, '0')}`;
+        
+        // 2. Format the date for the SMS
+        const today = new Date().toLocaleDateString('en-GB', { 
+            day: '2-digit', month: 'short', year: 'numeric' 
+        });
 
         // 3. Send the Wallet Credit SMS to Member
         try {
@@ -215,7 +225,8 @@ exports.markDisbursed = async (req, res) => {
                 smsService.templates.loanWalletCredited(
                     member.full_name,
                     loan.principal,
-                    loan.total_repayment
+                    loan.total_repayment,
+                    today
                 )
             );
         } catch (smsErr) {

@@ -99,7 +99,7 @@ function mainMenu() {
   return (
     'CON Welcome to KEMRI SACCO\n' +
     '1. Register\n' +
-    '2. My Wallet\n' +       // Changed from 'Balance'
+    '2. My Wallet\n' +
     '3. Deposit\n' +
     '4. Loan\n' +
     '5. Loan Repayment\n' +
@@ -284,13 +284,24 @@ async function handleWallet(phoneNumber, steps, sessionId) {
 
     try {
       // 1. Debit the wallet immediately to prevent double-withdrawal
-      await Member.debitWallet(member.id, amount, 'withdrawal', 'Pending B2C');
+      // and capture the new balance for the SMS.
+      const newBalance = await Member.debitWallet(member.id, amount, 'withdrawal', 'Pending B2C');
 
       // 2. Trigger the Safaricom B2C transfer
       const DisbursementService = require('../services/disbursementService');
       await DisbursementService.disburseWalletToMpesa(member, amount);
 
-      return `END A withdrawal of KES ${amount.toLocaleString()} has been initiated to your M-Pesa. You will receive a confirmation SMS shortly.`;
+      // 3. Send the SMS with the remaining balance
+      try {
+        await smsService.sendSMS(
+          member.phone_number,
+          smsService.templates.walletWithdrawalConfirmed(member.full_name, amount, newBalance)
+        );
+      } catch (smsErr) {
+        console.error('Withdrawal SMS failed:', smsErr.message);
+      }
+
+      return `END KES ${amount.toLocaleString()} sent to M-Pesa.\nNew Wallet Balance: KES ${Number(newBalance).toLocaleString()}`;
     } catch (err) {
       console.error('Wallet withdrawal failed:', err.message);
       

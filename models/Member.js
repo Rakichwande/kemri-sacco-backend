@@ -392,6 +392,9 @@ async function debitWallet(memberId, amount, type, reference, client = null) {
      VALUES ($1, $2, $3, $4)`,
     [memberId, -amt, type, reference]
   );
+
+  // 3. Return the new balance so the caller (USSD) can show it to the member
+  return res.rows[0].wallet_balance;
 }
 
 async function remove(memberId) {

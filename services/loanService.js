@@ -164,10 +164,20 @@ class LoanService {
 
     // 3. Send the member the Wallet SMS
     if (member) {
+      // Format today's date for the SMS
+      const today = new Date().toLocaleDateString('en-GB', { 
+        day: '2-digit', month: 'short', year: 'numeric' 
+      });
+
       try {
         await smsService.sendSMS(
           member.phone_number,
-          smsService.templates.loanWalletCredited(member.full_name, loan.principal, loan.total_repayment)
+          smsService.templates.loanWalletCredited(
+            member.full_name, 
+            loan.principal, 
+            loan.total_repayment,
+            today // <-- Added date argument here
+          )
         );
       } catch (smsErr) {
         console.error('Wallet credit SMS failed:', smsErr.message);
@@ -209,9 +219,6 @@ class LoanService {
     }
   }
 
-  // 2026-10-26: Updated to use the specific staffWalletCredited template
-  // when the status is 'wallet_credited', while keeping the generic one
-  // for standard B2C/manual disbursements (if they ever happen).
   static async _notifyAutoApprovedStaff(member, loan, ref, opts = {}) {
     const { disbursementStatus, failureReason } = opts;
     

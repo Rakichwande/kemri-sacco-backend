@@ -59,8 +59,13 @@ const templates = {
   loanDisbursed: (name, principal, totalPayable, dueDate) =>
     `KEMRI SACCO: Hi ${firstName(name)}, ${formatKES(principal)} has been disbursed to your M-Pesa. Total amount payable: ${formatKES(totalPayable)}, due ${dueDate}. Please settle on or before the due date. Thank you for choosing KEMRI SACCO.`,
 
-  loanWalletCredited: (name, principal, totalRepayment) =>
-    `KEMRI SACCO: Hi ${firstName(name)}, your loan of ${formatKES(principal)} has been approved and credited to your SACCO Wallet. Total amount payable: ${formatKES(totalRepayment)}. Dial *483*4444# and select '2. My Wallet' to withdraw to M-Pesa.`,
+  // 2026-10-27: Added `date` parameter so the member knows when the loan was issued.
+  loanWalletCredited: (name, principal, totalRepayment, date) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, on ${date}, your loan of ${formatKES(principal)} was credited to your SACCO Wallet. Total amount payable: ${formatKES(totalRepayment)}. Dial *483*4444# and select '2. My Wallet' to withdraw to M-Pesa.`,
+
+  // 2026-10-27: New template to confirm wallet withdrawals and show the remaining balance.
+  walletWithdrawalConfirmed: (name, amount, remainingBalance) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, KES ${formatKES(amount)} has been sent to your M-Pesa. Remaining Wallet balance: ${formatKES(remainingBalance)}.`,
 
   loanRepaymentConfirmed: (name, amountPaid, amountOutstanding, receipt) =>
     `KEMRI SACCO: Hi ${firstName(name)}, we received your payment of ${formatKES(amountPaid)}. Amount outstanding: ${formatKES(amountOutstanding)}. Receipt: ${receipt}.`,
@@ -104,7 +109,6 @@ const templates = {
   staffLoanDisbursed: (name, reference, receipt) =>
     `KEMRI SACCO Admin: Loan ${reference} for ${name} disbursed via B2C. Receipt: ${receipt || 'N/A'}.`,
 
-  // 2026-10-26: New template to notify admins when a loan is credited to a wallet.
   staffWalletCredited: (name, amount, ref) =>
     `KEMRI SACCO Admin: Credited KES ${Number(amount).toLocaleString()} to ${name}'s Wallet (Ref: ${ref}).`,
 
