@@ -3,7 +3,7 @@ const Loan = require('../models/Loan');
 const smsService = require('./smsService');
 const notificationService = require('./notificationService');
 const emailService = require('./emailService');
-const db = require('../config/database'); // Added for transactions
+const db = require('../config/database'); 
 
 // 2026-10-19: Board policy dictates that the maximum loan limit is strictly
 // KES 10,000 for ALL members (board/staff and regular alike).
@@ -14,8 +14,6 @@ const TENURE_MONTHS = 1;
 
 class LoanService {
   static calculateCreditLimit(successfulRepayments) {
-    // The limit no longer increases after successful repayments.
-    // Everyone is capped at 10,000.
     return MAX_ABSOLUTE_LIMIT;
   }
 
@@ -65,7 +63,8 @@ class LoanService {
     };
   }
 
-  static async apply(memberId, requestedAmount) {
+  // 2026-10-30: Updated to accept the `purpose` parameter (emergency, school, mobile)
+  static async apply(memberId, requestedAmount, purpose = 'general') {
     const amount = Number(requestedAmount);
     if (!Number.isFinite(amount) || amount <= 0) {
       return { success: false, message: 'Invalid loan amount.' };
@@ -86,13 +85,16 @@ class LoanService {
       };
     }
 
-    const autoApprove = eligibility.member.is_board_staff === true;
+    // Mobile loans are instant for everyone. Emergency/School are instant for board, manual for regular.
+    const isMobile = purpose === 'mobile';
+    const autoApprove = isMobile || (eligibility.member.is_board_staff === true);
 
     const loan = await Loan.create({
       member_id: memberId,
       principal: amount,
       interest_rate: INTEREST_RATE,
       tenure_months: TENURE_MONTHS,
+      purpose: purpose, // Save the loan type
     });
 
     if (!loan) {
@@ -102,7 +104,7 @@ class LoanService {
     const ref = `LN-${String(loan.id).padStart(5, '0')}`;
     const member = eligibility.member;
 
-    // --- Regular member: manual review path ---
+    // --- Regular member: manual review path (Emergency / School) ---
     if (!autoApprove) {
       await this._notifyApplicationReceived(member, loan, ref);
       return {
@@ -113,17 +115,15 @@ class LoanService {
       };
     }
 
-    // --- Board/staff: auto-approval path ---
+    // --- Auto-approval path (Board/Staff OR Mobile Loan) ---
     const approval = await this.approveLoan(
       loan.id,
-      'Auto-approved: board/staff (SACCO policy, 25 Sept 2026)',
+      `Auto-approved: ${isMobile ? 'Mobile' : 'Board/Staff'} (${purpose})`,
       { skipSms: true }
     );
 
     if (!approval.success) {
-      console.error(
-        `Auto-approval failed for board/staff member ${memberId} on loan ${loan.id}: ${approval.message}`
-      );
+      console.error(`Auto-approval failed for loan ${loan.id}: ${approval.message}`);
       await this._notifyApplicationReceived(member, loan, ref);
       return {
         success: true,
@@ -133,70 +133,83 @@ class LoanService {
       };
     }
 
-    // --- Credit the Wallet Instead of B2C (M-Shwari Model) ---
-    // 2026-10-23: CEO approved M-Shwari style. Loans go to the wallet first.
-    let loanResult = approval.loan;
-    try {
-      const client = await db.pool.connect();
+    // --- ROUTING LOGIC: Mobile to B2C, Emergency/School to Wallet ---
+    if (isMobile) {
+      // Mobile Loan: Send directly to M-Pesa via Safaricom B2C
+      const DisbursementService = require('./disbursementService');
+      let disbursement = { success: false, message: 'B2C not attempted' };
+      
       try {
-        await client.query('BEGIN');
-        
-        // 1. Mark the loan as disbursed (updates total_outstanding_balance)
-        loanResult = await Loan.markDisbursed(loan.id, 'Wallet Credit', 'wallet', client);
-        
-        // 2. Credit the member's wallet
-        await Member.creditWallet(memberId, loan.principal, 'loan_credit', ref, client);
-        
-        await client.query('COMMIT');
+        disbursement = await DisbursementService.disburseLoan(loan.id);
       } catch (err) {
-        await client.query('ROLLBACK');
-        throw err;
-      } finally {
-        client.release();
+        disbursement = { success: false, message: err.message };
       }
-    } catch (dbErr) {
-      console.error(`Failed to credit wallet for loan ${loan.id}:`, dbErr.message);
-      return { 
-        success: false, 
-        message: 'Loan approved, but wallet credit failed. Please contact support.' 
-      };
-    }
 
-    // 3. Send the member the Wallet SMS
-    if (member) {
-      // Format today's date for the SMS
-      const today = new Date().toLocaleDateString('en-GB', { 
-        day: '2-digit', month: 'short', year: 'numeric' 
+      if (!disbursement.success) {
+        return {
+          success: true,
+          message: 'Mobile loan approved. Disbursement is pending — our team will complete it shortly.',
+          loan: approval.loan,
+          autoApproved: true,
+          disbursementFailed: true,
+        };
+      }
+
+      return {
+        success: true,
+        message: 'Mobile loan approved. Funds will reach your M-Pesa shortly.',
+        loan: disbursement.loan || approval.loan,
+        autoApproved: true,
+        disbursing: true,
+      };
+    } else {
+      // Emergency/School Loan: Credit to Wallet (M-Shwari Model)
+      let loanResult = approval.loan;
+      try {
+        const client = await db.pool.connect();
+        try {
+          await client.query('BEGIN');
+          loanResult = await Loan.markDisbursed(loan.id, 'Wallet Credit', 'wallet', client);
+          await Member.creditWallet(memberId, loan.principal, 'loan_credit', ref, client);
+          await client.query('COMMIT');
+        } catch (err) {
+          await client.query('ROLLBACK');
+          throw err;
+        } finally {
+          client.release();
+        }
+      } catch (dbErr) {
+        console.error(`Failed to credit wallet for loan ${loan.id}:`, dbErr.message);
+        return { success: false, message: 'Loan approved, but wallet credit failed. Please contact support.' };
+      }
+
+      // Send the member the Wallet SMS
+      if (member) {
+        const today = new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+        try {
+          await smsService.sendSMS(
+            member.phone_number,
+            smsService.templates.loanWalletCredited(member.full_name, loan.principal, loan.total_repayment, today)
+          );
+        } catch (smsErr) {
+          console.error('Wallet credit SMS failed:', smsErr.message);
+        }
+      }
+
+      // Notify staff that the wallet was credited
+      await this._notifyAutoApprovedStaff(member, approval.loan, ref, {
+        disbursementStatus: 'wallet_credited',
+        failureReason: null,
       });
 
-      try {
-        await smsService.sendSMS(
-          member.phone_number,
-          smsService.templates.loanWalletCredited(
-            member.full_name, 
-            loan.principal, 
-            loan.total_repayment,
-            today // <-- Added date argument here
-          )
-        );
-      } catch (smsErr) {
-        console.error('Wallet credit SMS failed:', smsErr.message);
-      }
+      return {
+        success: true,
+        message: 'Loan approved and credited to your SACCO Wallet. Dial *483*4444# to withdraw.',
+        loan: loanResult,
+        autoApproved: true,
+        walletCredited: true,
+      };
     }
-
-    // 4. Notify staff that the wallet was credited
-    await this._notifyAutoApprovedStaff(member, approval.loan, ref, {
-      disbursementStatus: 'wallet_credited',
-      failureReason: null,
-    });
-
-    return {
-      success: true,
-      message: 'Loan approved and credited to your SACCO Wallet. Dial *483*4444# to withdraw.',
-      loan: loanResult,
-      autoApproved: true,
-      walletCredited: true,
-    };
   }
 
   static async _notifyApplicationReceived(member, loan, ref) {

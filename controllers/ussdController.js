@@ -8,10 +8,6 @@ const UssdSession = require('../models/UssdSession');
 const notificationService = require('../services/notificationService');
 const emailService = require('../services/emailService');
 
-// 2026-10-09: Withdrawal feature retired per board instruction.
-// Removed imports: models/Withdrawal, services/disbursementService.
-// 2026-10-23: Re-imported disbursementService to handle Wallet B2C payouts.
-
 const FAILURE_PHRASES = [
   'invalid', 'wrong', 'failed', 'error', 'something went wrong', 'not found',
   'insufficient', 'incorrect', 'locked', 'did not match',
@@ -245,7 +241,6 @@ async function handleWallet(phoneNumber, steps, sessionId) {
   if (!pinCheck.authenticated) return pinCheck.response;
   const remaining = pinCheck.remainingSteps;
 
-  // Refresh member data to get latest wallet balance
   const currentMember = await Member.findById(member.id);
   const walletBalance = Number(currentMember.wallet_balance || 0);
   const savingsBalance = await Payment.getMemberBalance(member.id);
@@ -283,15 +278,11 @@ async function handleWallet(phoneNumber, steps, sessionId) {
     }
 
     try {
-      // 1. Debit the wallet immediately to prevent double-withdrawal
-      // and capture the new balance for the SMS.
       const newBalance = await Member.debitWallet(member.id, amount, 'withdrawal', 'Pending B2C');
 
-      // 2. Trigger the Safaricom B2C transfer
       const DisbursementService = require('../services/disbursementService');
       await DisbursementService.disburseWalletToMpesa(member, amount);
 
-      // 3. Send the SMS with the remaining balance
       try {
         await smsService.sendSMS(
           member.phone_number,
@@ -304,14 +295,11 @@ async function handleWallet(phoneNumber, steps, sessionId) {
       return `END KES ${amount.toLocaleString()} sent to M-Pesa.\nNew Wallet Balance: KES ${Number(newBalance).toLocaleString()}`;
     } catch (err) {
       console.error('Wallet withdrawal failed:', err.message);
-      
-      // If B2C fails immediately, refund the wallet balance
       try {
         await Member.creditWallet(member.id, amount, 'withdrawal_refund', 'B2C Failed');
       } catch (refundErr) {
         console.error('Failed to refund wallet after B2C failure:', refundErr.message);
       }
-
       return 'END We could not process your withdrawal right now. Your funds have been returned to your wallet.';
     }
   }
@@ -340,9 +328,6 @@ async function handleDeposit(phoneNumber, steps) {
       await paymentService.initiatePayment({ memberId: member.id, phoneNumber, amount });
       return 'END An M-Pesa prompt has been sent to your phone. Enter your PIN to complete the deposit.';
     } catch (err) {
-      console.error('USSD deposit STK push failed - status:', err.response?.status);
-      console.error('USSD deposit STK push failed - data:', JSON.stringify(err.response?.data));
-      console.error('USSD deposit STK push failed - message:', err.message);
       return 'END We could not process your deposit right now. Please try again shortly.';
     }
   }
@@ -369,16 +354,30 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
   }
 
   if (remaining.length === 0) {
-    return `CON Enter loan amount (KES)\nCredit limit: KES ${eligibility.creditLimit.toLocaleString()}`;
+    return `CON Select Loan Type:\n1. Emergency (To Wallet)\n2. School (To Wallet)\n3. Mobile (Instant to M-Pesa)`;
   }
 
   if (remaining.length === 1) {
-    const amount = Number(remaining[0]);
+    const typeChoice = remaining[0];
+    if (!['1', '2', '3'].includes(typeChoice)) {
+      return 'END Invalid loan type. Please dial again.';
+    }
+    return `CON Enter loan amount (KES)\nCredit limit: KES ${eligibility.creditLimit.toLocaleString()}`;
+  }
+
+  if (remaining.length === 2) {
+    const typeChoice = remaining[0];
+    const amount = Number(remaining[1]);
+    
+    let purpose = 'emergency';
+    if (typeChoice === '2') purpose = 'school';
+    if (typeChoice === '3') purpose = 'mobile';
+
     if (!amount || amount <= 0) {
       return 'END Invalid amount. Please dial again.';
     }
 
-    const result = await LoanService.apply(member.id, amount);
+    const result = await LoanService.apply(member.id, amount, purpose);
 
     if (!result.success) {
       return `END ${result.message}`;
@@ -431,47 +430,66 @@ async function handleRepayLoan(phoneNumber, steps, sessionId) {
   if (!pinCheck.authenticated) return pinCheck.response;
   const remaining = pinCheck.remainingSteps;
 
-  const repayableLoan = await Loan.getRepayableLoan(member.id);
+  const activeLoans = await Loan.getActiveLoansForRepayment(member.id);
 
-  if (!repayableLoan) {
-    const inFlightLoan = await Loan.getActiveLoan(member.id);
-    if (inFlightLoan && inFlightLoan.status === 'pending') {
-      return 'END Your loan application is still awaiting approval. You will receive an SMS once it is reviewed.';
-    }
-    if (inFlightLoan && inFlightLoan.status === 'approved') {
-      return 'END Your loan has been approved and is awaiting disbursement. You will receive an SMS once funds are sent.';
-    }
-    if (inFlightLoan && inFlightLoan.status === 'disbursing') {
-      return 'END Your loan is being disbursed to your M-Pesa right now. You will receive an SMS once the funds arrive.';
-    }
-    return 'END You have no active loan to repay.';
+  if (activeLoans.length === 0) {
+    return 'END You have no active loans to repay.';
   }
 
-  if (remaining.length === 0) {
-    return `CON Amount outstanding: KES ${Number(repayableLoan.outstanding_balance).toLocaleString()}\nEnter amount to pay`;
+  // If they have exactly 1 loan, skip the menu
+  if (activeLoans.length === 1) {
+    const loan = activeLoans[0];
+    if (remaining.length === 0) {
+      return `CON Repaying ${loan.reference}.\nAmount outstanding: KES ${Number(loan.outstanding_balance).toLocaleString()}\nEnter amount to pay`;
+    }
+    if (remaining.length === 1) {
+      const amount = Number(remaining[0]);
+      if (!amount || amount <= 0) return 'END Invalid amount. Please dial again.';
+      
+      try {
+        await paymentService.initiatePayment({ memberId: member.id, phoneNumber, amount, loanId: loan.id });
+        return 'END An M-Pesa prompt has been sent to your phone. Enter your PIN to complete the payment.';
+      } catch (err) {
+        return 'END We could not process your payment right now. Please try again.';
+      }
+    }
   }
 
-  if (remaining.length === 1) {
-    const amount = Number(remaining[0]);
-    if (!amount || amount <= 0) {
-      return 'END Invalid amount. Please dial again.';
-    }
-
-    try {
-      await paymentService.initiatePayment({
-        memberId: member.id,
-        phoneNumber,
-        amount,
-        loanId: repayableLoan.id,
+  // If they have multiple loans, show the menu
+  if (activeLoans.length > 1) {
+    if (remaining.length === 0) {
+      let menu = 'CON Select loan to repay:\n';
+      activeLoans.forEach((l, index) => {
+        menu += `${index + 1}. ${l.reference} (KES ${Number(l.outstanding_balance).toLocaleString()})\n`;
       });
-      return 'END An M-Pesa prompt has been sent to your phone. Enter your PIN to complete the payment.';
-    } catch (err) {
-      console.error('USSD loan repayment STK push failed:', err.message);
-      return 'END We could not process your payment right now. Please try again shortly.';
+      return menu.trim();
+    }
+
+    if (remaining.length === 1) {
+      const selection = Number(remaining[0]);
+      if (selection < 1 || selection > activeLoans.length) return 'END Invalid selection.';
+      
+      const loan = activeLoans[selection - 1];
+      return `CON Repaying ${loan.reference}.\nAmount outstanding: KES ${Number(loan.outstanding_balance).toLocaleString()}\nEnter amount to pay`;
+    }
+
+    if (remaining.length === 2) {
+      const selection = Number(remaining[0]);
+      const amount = Number(remaining[1]);
+      const loan = activeLoans[selection - 1];
+      
+      if (!amount || amount <= 0) return 'END Invalid amount. Please dial again.';
+
+      try {
+        await paymentService.initiatePayment({ memberId: member.id, amount, phoneNumber, loanId: loan.id });
+        return 'END An M-Pesa prompt has been sent to your phone. Enter your PIN to complete the payment.';
+      } catch (err) {
+        return 'END We could not process your payment right now. Please try again.';
+      }
     }
   }
 
-  return 'END Invalid input. Please dial again.';
+  return 'END Invalid input.';
 }
 
 // ============================================================

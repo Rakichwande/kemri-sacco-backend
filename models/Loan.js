@@ -68,7 +68,7 @@ async function init() {
 
 const UNIQUE_VIOLATION = '23505';
 
-async function create({ member_id, principal, interest_rate, tenure_months }) {
+async function create({ member_id, principal, interest_rate, tenure_months, purpose = 'General loan' }) {
   const totalInterest = Math.round(principal * (interest_rate / 100) * tenure_months);
   const totalRepayment = Number(principal) + totalInterest;
   const monthlyInstallment = Math.round(totalRepayment / tenure_months);
@@ -77,9 +77,9 @@ async function create({ member_id, principal, interest_rate, tenure_months }) {
     const result = await db.query(
       `INSERT INTO loans (
          member_id, principal, interest_rate, tenure_months,
-         total_interest, total_repayment, monthly_installment, outstanding_balance, amount_paid
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-      [member_id, principal, interest_rate, tenure_months, totalInterest, totalRepayment, monthlyInstallment, totalRepayment, 0]
+         total_interest, total_repayment, monthly_installment, outstanding_balance, amount_paid, purpose
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+      [member_id, principal, interest_rate, tenure_months, totalInterest, totalRepayment, monthlyInstallment, totalRepayment, 0, purpose]
     );
     return result.rows[0];
   } catch (err) {
@@ -99,6 +99,18 @@ async function getActiveLoan(member_id) {
     [member_id]
   );
   return result.rows[0];
+}
+
+
+async function getActiveLoansForRepayment(member_id) {
+  const result = await db.query(
+    `SELECT l.*, ${REFERENCE_SQL} AS reference
+     FROM loans l
+     WHERE l.member_id = $1 AND l.status = 'disbursed'
+     ORDER BY l.disbursed_at DESC`,
+    [member_id]
+  );
+  return result.rows;
 }
 
 async function countRepaidByMember(member_id) {
@@ -234,11 +246,6 @@ async function rollbackDisbursing(loan_id, reason = '') {
   return result.rows[0];
 }
 
-// 2026-10-23: Updated to accept an optional externalClient. This is critical
-// for the M-Shwari Wallet flow. When a loan is auto-approved, we must mark
-// the loan as disbursed AND credit the member's wallet balance atomically.
-// If we don't share the transaction, a server crash could mark the loan as
-// disbursed without actually putting the money in their wallet.
 async function markDisbursed(loan_id, mpesa_receipt = null, source = 'manual', externalClient = null) {
   const client = externalClient || (await db.pool.connect());
   const ownsTransaction = !externalClient;
@@ -290,7 +297,6 @@ async function markDisbursed(loan_id, mpesa_receipt = null, source = 'manual', e
   }
 }
 
-// Applies a repayment to a loan.
 async function applyRepayment(loan_id, amount, externalClient = null) {
   const client = externalClient || (await db.pool.connect());
   const ownsTransaction = !externalClient;
@@ -302,7 +308,6 @@ async function applyRepayment(loan_id, amount, externalClient = null) {
     if (loanRes.rows.length === 0) throw new Error('Loan not found');
     const loan = loanRes.rows[0];
 
-    // --- Interest-first split ---
     const amountNum = Number(amount);
     const totalInterest = Number(loan.total_interest) || 0;
 
@@ -444,6 +449,7 @@ module.exports = {
   init,
   create,
   getActiveLoan,
+  getActiveLoansForRepayment, // <-- Added for the USSD Repayment menu
   countRepaidByMember,
   getHistory,
   findById,
