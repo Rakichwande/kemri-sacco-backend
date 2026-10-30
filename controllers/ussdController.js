@@ -354,7 +354,7 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
   }
 
   if (remaining.length === 0) {
-    return `CON Select Loan Type:\n1. Emergency (To Wallet)\n2. School (To Wallet)\n3. Mobile (Instant to M-Pesa)`;
+    return `CON Select Loan Type:\n1. Emergency (Coming soon)\n2. School Fees (Coming soon)\n3. Mobile (Instant to M-Pesa)`;
   }
 
   if (remaining.length === 1) {
@@ -370,7 +370,7 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
     const amount = Number(remaining[1]);
     
     let purpose = 'emergency';
-    if (typeChoice === '2') purpose = 'school';
+    if (typeChoice === '2') purpose = 'school fees';
     if (typeChoice === '3') purpose = 'mobile';
 
     if (!amount || amount <= 0) {
