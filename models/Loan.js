@@ -49,11 +49,10 @@ CREATE INDEX IF NOT EXISTS idx_loans_disbursed_due
   ON loans (next_payment_due) WHERE status = 'disbursed';
 `;
 
-const enforceOneActiveLoanPerMemberQuery = `
+// 2026-10-30: Drop the constraint that prevented multiple active loans.
+// We now allow members to have a Mobile loan and an Emergency/School loan concurrently.
+const dropOneActiveLoanConstraint = `
 DROP INDEX IF EXISTS loans_one_active_per_member;
-CREATE UNIQUE INDEX IF NOT EXISTS loans_one_active_per_member
-  ON loans (member_id)
-  WHERE status IN ('pending', 'approved', 'disbursing', 'disbursed');
 `;
 
 const REFERENCE_SQL = `'LN-' || LPAD(l.id::text, 5, '0')`;
@@ -63,31 +62,23 @@ async function init() {
   await db.query(addRejectedAtColumnQuery);
   await db.query(addB2CColumnsQuery);
   await db.query(addReminderColumnsQuery);
-  await db.query(enforceOneActiveLoanPerMemberQuery);
+  await db.query(dropOneActiveLoanConstraint);
 }
-
-const UNIQUE_VIOLATION = '23505';
 
 async function create({ member_id, principal, interest_rate, tenure_months, purpose = 'General loan' }) {
   const totalInterest = Math.round(principal * (interest_rate / 100) * tenure_months);
   const totalRepayment = Number(principal) + totalInterest;
   const monthlyInstallment = Math.round(totalRepayment / tenure_months);
 
-  try {
-    const result = await db.query(
-      `INSERT INTO loans (
-         member_id, principal, interest_rate, tenure_months,
-         total_interest, total_repayment, monthly_installment, outstanding_balance, amount_paid, purpose
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-      [member_id, principal, interest_rate, tenure_months, totalInterest, totalRepayment, monthlyInstallment, totalRepayment, 0, purpose]
-    );
-    return result.rows[0];
-  } catch (err) {
-    if (err.code === UNIQUE_VIOLATION && err.constraint === 'loans_one_active_per_member') {
-      return null;
-    }
-    throw err;
-  }
+  // 2026-10-30: Removed try/catch because the unique constraint is gone.
+  const result = await db.query(
+    `INSERT INTO loans (
+       member_id, principal, interest_rate, tenure_months,
+       total_interest, total_repayment, monthly_installment, outstanding_balance, amount_paid, purpose
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+    [member_id, principal, interest_rate, tenure_months, totalInterest, totalRepayment, monthlyInstallment, totalRepayment, 0, purpose]
+  );
+  return result.rows[0];
 }
 
 async function getActiveLoan(member_id) {
@@ -100,7 +91,6 @@ async function getActiveLoan(member_id) {
   );
   return result.rows[0];
 }
-
 
 async function getActiveLoansForRepayment(member_id) {
   const result = await db.query(
@@ -449,7 +439,7 @@ module.exports = {
   init,
   create,
   getActiveLoan,
-  getActiveLoansForRepayment, // <-- Added for the USSD Repayment menu
+  getActiveLoansForRepayment,
   countRepaidByMember,
   getHistory,
   findById,

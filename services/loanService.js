@@ -23,24 +23,8 @@ class LoanService {
       return { allowed: false, reason: 'Member not found.' };
     }
 
-    const activeLoan = await Loan.getActiveLoan(memberId);
-    if (activeLoan) {
-      const principalText = Number(activeLoan.principal).toLocaleString();
-      let reason;
-
-      if (activeLoan.status === 'pending') {
-        reason = `Your loan application for a principal of KES ${principalText} is awaiting review. You'll receive an SMS once it is approved.`;
-      } else if (activeLoan.status === 'approved') {
-        reason = `Your loan of KES ${principalText} has been approved and is awaiting disbursement. You'll receive an SMS once funds are sent.`;
-      } else if (activeLoan.status === 'disbursing') {
-        reason = `Your loan of KES ${principalText} is being disbursed. You'll receive an SMS once funds are in your M-Pesa.`;
-      } else {
-        const outstandingText = Number(activeLoan.outstanding_balance).toLocaleString();
-        reason = `You have an outstanding balance of KES ${outstandingText} on your current loan. Settle it before applying for another.`;
-      }
-
-      return { allowed: false, reason, activeLoan };
-    }
+    // 2026-10-30: Removed the activeLoan check. Members can now have multiple loans 
+    // (e.g., an Emergency loan while they still have a Mobile loan).
 
     const successfulRepayments = await Loan.countRepaidByMember(memberId);
     const creditLimit = this.calculateCreditLimit(successfulRepayments);
@@ -63,7 +47,6 @@ class LoanService {
     };
   }
 
-  // 2026-10-30: Updated to accept the `purpose` parameter (emergency, school, mobile)
   static async apply(memberId, requestedAmount, purpose = 'general') {
     const amount = Number(requestedAmount);
     if (!Number.isFinite(amount) || amount <= 0) {
@@ -85,26 +68,23 @@ class LoanService {
       };
     }
 
-    // Mobile loans are instant for everyone. Emergency/School are instant for board, manual for regular.
+    // 2026-10-30: ONLY Mobile loans are auto-approved. 
+    // Emergency and School loans for EVERYONE (Board/Staff and Regular) go to the Admin Queue.
     const isMobile = purpose === 'mobile';
-    const autoApprove = isMobile || (eligibility.member.is_board_staff === true);
+    const autoApprove = isMobile; 
 
     const loan = await Loan.create({
       member_id: memberId,
       principal: amount,
       interest_rate: INTEREST_RATE,
       tenure_months: TENURE_MONTHS,
-      purpose: purpose, // Save the loan type
+      purpose: purpose,
     });
-
-    if (!loan) {
-      return { success: false, message: 'You already have an active loan. Settle it before applying again.' };
-    }
 
     const ref = `LN-${String(loan.id).padStart(5, '0')}`;
     const member = eligibility.member;
 
-    // --- Regular member: manual review path (Emergency / School) ---
+    // --- Manual review path (Emergency/School for everyone) ---
     if (!autoApprove) {
       await this._notifyApplicationReceived(member, loan, ref);
       return {
@@ -115,101 +95,41 @@ class LoanService {
       };
     }
 
-    // --- Auto-approval path (Board/Staff OR Mobile Loan) ---
-    const approval = await this.approveLoan(
-      loan.id,
-      `Auto-approved: ${isMobile ? 'Mobile' : 'Board/Staff'} (${purpose})`,
-      { skipSms: true }
-    );
+    // --- Auto-approval path (Mobile Only) ---
+    const approval = await this.approveLoan(loan.id, 'Auto-approved: Mobile Loan', { skipSms: true });
 
     if (!approval.success) {
-      console.error(`Auto-approval failed for loan ${loan.id}: ${approval.message}`);
       await this._notifyApplicationReceived(member, loan, ref);
+      return { success: true, message: 'Loan application submitted successfully.', loan, autoApprovalFailed: true };
+    }
+
+    // --- Mobile Loan Routing: B2C to M-Pesa ---
+    const DisbursementService = require('./disbursementService');
+    let disbursement = { success: false, message: 'B2C not attempted' };
+    
+    try {
+      disbursement = await DisbursementService.disburseLoan(loan.id);
+    } catch (err) {
+      disbursement = { success: false, message: err.message };
+    }
+
+    if (!disbursement.success) {
       return {
         success: true,
-        message: 'Loan application submitted successfully.',
-        loan,
-        autoApprovalFailed: true,
+        message: 'Mobile loan approved. Disbursement is pending — our team will complete it shortly.',
+        loan: approval.loan,
+        autoApproved: true,
+        disbursementFailed: true,
       };
     }
 
-    // --- ROUTING LOGIC: Mobile to B2C, Emergency/School to Wallet ---
-    if (isMobile) {
-      // Mobile Loan: Send directly to M-Pesa via Safaricom B2C
-      const DisbursementService = require('./disbursementService');
-      let disbursement = { success: false, message: 'B2C not attempted' };
-      
-      try {
-        disbursement = await DisbursementService.disburseLoan(loan.id);
-      } catch (err) {
-        disbursement = { success: false, message: err.message };
-      }
-
-      if (!disbursement.success) {
-        return {
-          success: true,
-          message: 'Mobile loan approved. Disbursement is pending — our team will complete it shortly.',
-          loan: approval.loan,
-          autoApproved: true,
-          disbursementFailed: true,
-        };
-      }
-
-      return {
-        success: true,
-        message: 'Mobile loan approved. Funds will reach your M-Pesa shortly.',
-        loan: disbursement.loan || approval.loan,
-        autoApproved: true,
-        disbursing: true,
-      };
-    } else {
-      // Emergency/School Loan: Credit to Wallet (M-Shwari Model)
-      let loanResult = approval.loan;
-      try {
-        const client = await db.pool.connect();
-        try {
-          await client.query('BEGIN');
-          loanResult = await Loan.markDisbursed(loan.id, 'Wallet Credit', 'wallet', client);
-          await Member.creditWallet(memberId, loan.principal, 'loan_credit', ref, client);
-          await client.query('COMMIT');
-        } catch (err) {
-          await client.query('ROLLBACK');
-          throw err;
-        } finally {
-          client.release();
-        }
-      } catch (dbErr) {
-        console.error(`Failed to credit wallet for loan ${loan.id}:`, dbErr.message);
-        return { success: false, message: 'Loan approved, but wallet credit failed. Please contact support.' };
-      }
-
-      // Send the member the Wallet SMS
-      if (member) {
-        const today = new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-        try {
-          await smsService.sendSMS(
-            member.phone_number,
-            smsService.templates.loanWalletCredited(member.full_name, loan.principal, loan.total_repayment, today)
-          );
-        } catch (smsErr) {
-          console.error('Wallet credit SMS failed:', smsErr.message);
-        }
-      }
-
-      // Notify staff that the wallet was credited
-      await this._notifyAutoApprovedStaff(member, approval.loan, ref, {
-        disbursementStatus: 'wallet_credited',
-        failureReason: null,
-      });
-
-      return {
-        success: true,
-        message: 'Loan approved and credited to your SACCO Wallet. Dial *483*4444# to withdraw.',
-        loan: loanResult,
-        autoApproved: true,
-        walletCredited: true,
-      };
-    }
+    return {
+      success: true,
+      message: 'Mobile loan approved. Funds will reach your M-Pesa shortly.',
+      loan: disbursement.loan || approval.loan,
+      autoApproved: true,
+      disbursing: true,
+    };
   }
 
   static async _notifyApplicationReceived(member, loan, ref) {
