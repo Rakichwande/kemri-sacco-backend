@@ -16,16 +16,32 @@ class LoanService {
       return { allowed: false, reason: 'Member not found.' };
     }
 
-    // 2026-10-30: Strictly enforce the database credit limit.
-    // If a member is not highlighted in the CEO's Excel, their limit will be 0,
-    // which blocks them completely.
     const creditLimit = Number(member.credit_limit || 0);
 
+    // 1. Block if limit is 0 (Member not on the 5k list or Board)
     if (creditLimit === 0) {
       return { allowed: false, reason: 'You are currently not eligible to take a loan. Please contact the SACCO office.' };
     }
 
-    return { allowed: true, creditLimit, member, reason: 'Eligible to apply.' };
+    // 2. CRITICAL FIX: Check total outstanding balance across ALL active loans
+    const activeLoansRes = await db.query(
+      `SELECT COALESCE(SUM(outstanding_balance), 0) AS total_owed 
+       FROM loans 
+       WHERE member_id = $1 AND status IN ('pending', 'approved', 'disbursing', 'disbursed')`,
+      [memberId]
+    );
+    const totalOwed = Number(activeLoansRes.rows[0].total_owed);
+    const availableLimit = creditLimit - totalOwed;
+
+    // 3. Block if they have maxed out their limit
+    if (availableLimit <= 0) {
+      return { 
+        allowed: false, 
+        reason: `You have reached your maximum credit limit of KES ${creditLimit.toLocaleString()}. Please clear your outstanding balance before applying for another loan.` 
+      };
+    }
+
+    return { allowed: true, creditLimit: availableLimit, member, reason: 'Eligible to apply.' };
   }
 
   static calculateRepaymentSchedule(principal) {
@@ -57,15 +73,16 @@ class LoanService {
     if (amount < MIN_LOAN_AMOUNT) {
       return { success: false, message: `Minimum loan principal is KES ${MIN_LOAN_AMOUNT}.` };
     }
+    
+    // Check against the AVAILABLE limit, not the raw credit limit
     if (amount > eligibility.creditLimit) {
       return {
         success: false,
-        message: `Your current credit limit is KES ${eligibility.creditLimit.toLocaleString()}. Requested principal of KES ${amount.toLocaleString()} exceeds this.`,
+        message: `Your available credit limit is KES ${eligibility.creditLimit.toLocaleString()}. Requested principal of KES ${amount.toLocaleString()} exceeds this.`,
       };
     }
 
-    // 2026-10-30: ONLY Board/Staff Mobile loans are auto-approved. 
-    // Emergency/School loans for everyone, AND Mobile loans for regular members, go to the Admin Queue.
+    // ONLY Board/Staff Mobile loans are auto-approved. 
     const isMobile = purpose === 'mobile';
     const isBoard = eligibility.member.is_board_staff === true;
     
@@ -85,7 +102,7 @@ class LoanService {
     const ref = `LN-${String(loan.id).padStart(5, '0')}`;
     const member = eligibility.member;
 
-    // --- Manual review path (Regular members, or Emergency/School for everyone) ---
+    // --- Manual review path ---
     if (!autoApprove) {
       await this._notifyApplicationReceived(member, loan, ref);
       return {

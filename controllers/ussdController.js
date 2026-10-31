@@ -354,24 +354,39 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
   }
 
   if (remaining.length === 0) {
+    // Menu with "Coming soon" labels as you requested
     return `CON Select Loan Type:\n1. Emergency (Coming soon)\n2. School Fees (Coming soon)\n3. Mobile (Instant to M-Pesa)`;
   }
 
   if (remaining.length === 1) {
     const typeChoice = remaining[0];
-    if (!['1', '2', '3'].includes(typeChoice)) {
-      return 'END Invalid loan type. Please dial again.';
+    
+    // 2026-10-31: Hard-block the "Coming soon" options so they don't create phantom loans.
+    if (typeChoice === '1') {
+      return 'END Emergency loans are not yet available. Please check back later.';
     }
-    return `CON Enter loan amount (KES)\nCredit limit: KES ${eligibility.creditLimit.toLocaleString()}`;
+    if (typeChoice === '2') {
+      return 'END School Fees loans are not yet available. Please check back later.';
+    }
+    
+    // Only Option 3 (Mobile) proceeds
+    if (typeChoice === '3') {
+      return `CON Enter loan amount (KES)\nCredit limit: KES ${eligibility.creditLimit.toLocaleString()}`;
+    }
+    
+    return 'END Invalid loan type. Please dial again.';
   }
 
   if (remaining.length === 2) {
     const typeChoice = remaining[0];
     const amount = Number(remaining[1]);
     
-    let purpose = 'emergency';
-    if (typeChoice === '2') purpose = 'school fees';
-    if (typeChoice === '3') purpose = 'mobile';
+    // Double-check: Only Mobile loans are allowed to process.
+    if (typeChoice !== '3') {
+      return 'END Invalid loan type. Please dial again.';
+    }
+
+    const purpose = 'mobile';
 
     if (!amount || amount <= 0) {
       return 'END Invalid amount. Please dial again.';
