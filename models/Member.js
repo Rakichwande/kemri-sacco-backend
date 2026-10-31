@@ -387,15 +387,18 @@ async function debitWallet(memberId, amount, type, reference, client = null) {
     throw new Error('Insufficient wallet balance');
   }
   
+  // 2026-10-31: Generate a unique reference so we can track the B2C callback
+  const ref = reference || `WD-${Date.now()}-${memberId}`;
+
   // 2. Log the transaction (as a negative amount)
   await dbClient.query(
     `INSERT INTO wallet_transactions (member_id, amount, transaction_type, reference) 
      VALUES ($1, $2, $3, $4)`,
-    [memberId, -amt, type, reference]
+    [memberId, -amt, type, ref]
   );
 
-  // 3. Return the new balance so the caller (USSD) can show it to the member
-  return res.rows[0].wallet_balance;
+  // 3. Return the new balance AND the reference so the caller can use it
+  return { wallet_balance: res.rows[0].wallet_balance, reference: ref };
 }
 
 async function remove(memberId) {

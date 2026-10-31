@@ -1,9 +1,6 @@
 require('dotenv').config();
 const axios = require('axios');
 
-// SMS TRANSPORT: KEMRI SACCO's own provider (Infinity Tech, powered by Tiara).
-// (unchanged header comment)
-
 const SMS_API_URL = process.env.SMS_PROVIDER_API_URL;
 const SMS_API_KEY = process.env.SMS_PROVIDER_API_KEY;
 const SMS_SENDER_ID = process.env.SMS_PROVIDER_SENDER_ID;
@@ -37,10 +34,15 @@ function firstName(fullName) {
   return String(fullName).trim().split(/\s+/)[0];
 }
 
+function formatLoanType(purpose) {
+  if (!purpose) return 'SACCO';
+  return purpose.charAt(0).toUpperCase() + purpose.slice(1).toLowerCase();
+}
+
 const templates = {
   // ─── MEMBER-FACING — REGISTRATION ───
   applicationReceived: (name) =>
-    `Welcome to KEMRI SACCO, ${firstName(name)}. Your account is active. Dial *483*4444# to save, check balance, or apply for a loan.`,
+    `Welcome to KEMRI SACCO, ${firstName(name)}. Your account is active. Dial *483*4444# to save or apply for a loan. Note: Loan limits are set by the SACCO and may vary by member.`,
 
   // ─── MEMBER-FACING — DEPOSITS ───
   paymentConfirmed: (name, amount, reference, receipt) =>
@@ -50,67 +52,67 @@ const templates = {
     `KEMRI SACCO: Hi ${firstName(name)}, your deposit did not go through. Nothing was deducted. Please try again or visit our office.`,
 
   // ─── MEMBER-FACING — LOANS ───
-  loanApplicationReceived: (name, principal, ref) =>
-    `KEMRI SACCO: Hi ${firstName(name)}, we received your loan application for a principal of ${formatKES(principal)}. Ref: ${ref}. We'll review it and SMS you the decision shortly.`,
+  loanApplicationReceived: (name, principal, ref, purpose) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, we received your ${formatLoanType(purpose)} Loan application for ${formatKES(principal)}. Ref: ${ref}. We'll review it and SMS you shortly.`,
 
-  loanApproved: (name, principal, interest, totalPayable) =>
-    `KEMRI SACCO: Hi ${firstName(name)}, your loan is approved. Principal: ${formatKES(principal)}. Interest: ${formatKES(interest)}. Total amount payable: ${formatKES(totalPayable)}. Our team will send the funds to your M-Pesa shortly.`,
+  loanApproved: (name, principal, interest, totalPayable, purpose) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, your ${formatLoanType(purpose)} Loan is approved. Principal: ${formatKES(principal)}. Interest: ${formatKES(interest)}. Total payable: ${formatKES(totalPayable)}. Our team will process the funds shortly.`,
 
-  loanDisbursed: (name, principal, totalPayable, dueDate) =>
-    `KEMRI SACCO: Hi ${firstName(name)}, ${formatKES(principal)} has been disbursed to your M-Pesa. Total amount payable: ${formatKES(totalPayable)}, due ${dueDate}. Please settle on or before the due date. Thank you for choosing KEMRI SACCO.`,
+  // Used specifically for Mobile Loans (B2C)
+  loanDisbursed: (name, principal, totalPayable, dueDate, ref) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, ${formatKES(principal)} has been sent to your M-Pesa (Ref: ${ref}). Total payable: ${formatKES(totalPayable)}, due ${dueDate}. Please settle on time. Thank you.`,
 
-  // 2026-10-27: Added `date` parameter so the member knows when the loan was issued.
-  loanWalletCredited: (name, principal, totalRepayment, date) =>
-    `KEMRI SACCO: Hi ${firstName(name)}, on ${date}, your loan of ${formatKES(principal)} was credited to your SACCO Wallet. Total amount payable: ${formatKES(totalRepayment)}. Dial *483*4444# and select '2. My Wallet' to withdraw to M-Pesa.`,
+  // Used specifically for Emergency/School Loans (Wallet)
+  loanWalletCredited: (name, principal, totalRepayment, date, ref, purpose) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, on ${date}, your ${formatLoanType(purpose)} Loan of ${formatKES(principal)} was credited to your SACCO Wallet (Ref: ${ref}). Total payable: ${formatKES(totalRepayment)}. Dial *483*4444# and select '2. My Wallet' to withdraw to M-Pesa.`,
 
-  // 2026-10-27: New template to confirm wallet withdrawals and show the remaining balance.
   walletWithdrawalConfirmed: (name, amount, remainingBalance) =>
-    `KEMRI SACCO: Hi ${firstName(name)}, KES ${formatKES(amount)} has been sent to your M-Pesa. Remaining Wallet balance: ${formatKES(remainingBalance)}.`,
+    `KEMRI SACCO: Hi ${firstName(name)}, ${formatKES(amount)} has been sent to your M-Pesa from your Wallet. Remaining Wallet balance: ${formatKES(remainingBalance)}.`,
 
-  loanRepaymentConfirmed: (name, amountPaid, amountOutstanding, receipt) =>
-    `KEMRI SACCO: Hi ${firstName(name)}, we received your payment of ${formatKES(amountPaid)}. Amount outstanding: ${formatKES(amountOutstanding)}. Receipt: ${receipt}.`,
+  loanRepaymentConfirmed: (name, amountPaid, amountOutstanding, receipt, ref) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, we received your payment of ${formatKES(amountPaid)} for Loan ${ref}. Amount outstanding: ${formatKES(amountOutstanding)}. Receipt: ${receipt}.`,
 
-  loanRejected: (name, reason) =>
-    `KEMRI SACCO: Hi ${firstName(name)}, your loan application was not approved.${reason ? ' Reason: ' + reason + '.' : ''} Contact our office for details.`,
+  loanRejected: (name, reason, purpose) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, your ${formatLoanType(purpose)} Loan application was not approved.${reason ? ' Reason: ' + reason + '.' : ''} Contact our office for details.`,
 
   loanDisbursementFailed: (name) =>
     `KEMRI SACCO: Hi ${firstName(name)}, we could not complete your loan disbursement right now. Our team will contact you shortly.`,
 
   // ─── MEMBER-FACING — LOAN REMINDERS ───
-  loanReminderBoardApproved: (name, amountOutstanding, amountPaid) => {
+  loanReminderBoardApproved: (name, amountOutstanding, amountPaid, ref, purpose) => {
     const hasPaid = Number(amountPaid) > 0;
     const paymentStatus = hasPaid
       ? `and you have paid ${formatKES(amountPaid)} to date`
       : 'and no repayments have been received to date';
 
-    return `KEMRI SACCO: Dear ${firstName(name)}, your current outstanding loan balance is ${formatKES(amountOutstanding)}, ${paymentStatus}. Kindly make your repayment at your earliest convenience by dialling *483*4444#. Thank you for saving with KEMRI SACCO.`;
+    return `KEMRI SACCO: Dear ${firstName(name)}, your current outstanding balance for ${formatLoanType(purpose)} Loan (${ref}) is ${formatKES(amountOutstanding)}, ${paymentStatus}. Kindly repay by dialling *483*4444#. Thank you.`;
   },
 
   // ─── STAFF-FACING ───
   staffNewMember: (name) =>
-    `KEMRI SACCO Admin: New member registered - ${name}.`,
+    `KEMRI SACCO Admin: New member registered - ${name}. Note: Credit limit defaults to 0.`,
 
-  staffLoanApplication: (name, principal, ref) =>
-    `KEMRI SACCO Admin: Loan application, principal ${formatKES(principal)}, from ${name}. Ref: ${ref}. Awaiting review.`,
+  staffLoanApplication: (name, principal, ref, purpose) =>
+    `KEMRI SACCO Admin: New ${formatLoanType(purpose)} Loan application for ${formatKES(principal)} from ${name}. Ref: ${ref}. Awaiting review.`,
 
   staffLoanAutoApproved: (name, principal, ref, opts = {}) => {
-    const { status } = opts;
+    const { status, purpose = 'Mobile' } = opts;
     let closing;
     if (status === 'wallet_credited' || status === 'disbursing') {
-      closing = 'Funds credited to wallet - no action needed.';
+      closing = 'Funds routed successfully - no action needed.';
     } else if (status === 'failed') {
       closing = 'Disbursement FAILED - manual action required.';
     } else {
       closing = 'Awaiting action.';
     }
-    return `KEMRI SACCO Admin: Board/Staff loan, principal ${formatKES(principal)}, for ${name} (Ref: ${ref}). Auto-approved. ${closing}`;
+    return `KEMRI SACCO Admin: Board/Staff ${formatLoanType(purpose)} Loan for ${name} (Ref: ${ref}). Auto-approved. ${closing}`;
   },
 
   staffLoanDisbursed: (name, reference, receipt) =>
-    `KEMRI SACCO Admin: Loan ${reference} for ${name} disbursed via B2C. Receipt: ${receipt || 'N/A'}.`,
+    `KEMRI SACCO Admin: Mobile Loan ${reference} for ${name} disbursed via B2C. Receipt: ${receipt || 'N/A'}.`,
 
-  staffWalletCredited: (name, amount, ref) =>
-    `KEMRI SACCO Admin: Credited KES ${Number(amount).toLocaleString()} to ${name}'s Wallet (Ref: ${ref}).`,
+  staffWalletCredited: (name, amount, ref, purpose = 'Emergency/School') =>
+    `KEMRI SACCO Admin: Credited ${formatKES(amount)} to ${name}'s Wallet for ${formatLoanType(purpose)} Loan (Ref: ${ref}).`,
 
   staffLoanDisbursementFailed: (name, reference, reason) =>
     `KEMRI SACCO Admin: Loan ${reference} for ${name} - FAILED (${reason}). Manual disbursement required.`,
@@ -118,8 +120,8 @@ const templates = {
   staffLoanDisbursementTimedOut: (name, reference) =>
     `KEMRI SACCO Admin: Loan ${reference} for ${name} - TIMED OUT. Verify and disburse manually if needed.`,
 
-  staffRepayment: (name, amount) =>
-    `KEMRI SACCO Admin: Payment of ${formatKES(amount)} received from ${name}.`,
+  staffRepayment: (name, amount, ref) =>
+    `KEMRI SACCO Admin: Payment of ${formatKES(amount)} received from ${name} for Loan ${ref}.`,
 
   staffDeposit: (name, amount) =>
     `KEMRI SACCO Admin: Deposit of ${formatKES(amount)} received from ${name}.`,

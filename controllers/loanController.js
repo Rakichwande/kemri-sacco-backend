@@ -241,7 +241,9 @@ exports.markDisbursed = async (req, res) => {
                     member.full_name,
                     loan.principal,
                     loan.total_repayment,
-                    today
+                    today,
+                    ref,
+                    loan.purpose // <--- Added this
                 )
             );
         } catch (smsErr) {
@@ -254,7 +256,8 @@ exports.markDisbursed = async (req, res) => {
                 smsText: smsService.templates.staffWalletCredited(
                     member.full_name,
                     loan.principal,
-                    ref
+                    ref,
+                    loan.purpose // <--- Added this
                 ),
                 emailContent: null,
             });
@@ -407,7 +410,8 @@ exports.resolveStuckDisbursement = async (req, res) => {
                         member.full_name,
                         loan.principal,
                         updatedMember?.total_outstanding_balance || loan.total_repayment,
-                        dueDateFormatted
+                        dueDateFormatted,
+                        loan.reference // <--- Added this
                     )
                 );
             } catch (err) {

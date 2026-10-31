@@ -1,3 +1,4 @@
+const db = require('../config/database');
 const Loan = require('../models/Loan');
 const Withdrawal = require('../models/Withdrawal');
 const Member = require('../models/Member');
@@ -6,15 +7,8 @@ const notificationService = require('./notificationService');
 const emailService = require('./emailService');
 const darajaB2CService = require('./darajaB2CService');
 
-// Maximum withdrawal amount that can be paid out instantly via B2C
-// without staff review. Below this threshold, a USSD withdrawal request
-// triggers an immediate B2C payout. At or above it, the request goes
-// straight to the staff queue as before.
-const INSTANT_WITHDRAWAL_LIMIT = 5000;
-
 class DisbursementService {
-  // Initiate disbursement of an approved loan via B2C. Called by staff
-  // clicking the "Disburse" button in the admin console.
+  
   static async disburseLoan(loanId) {
     const loan = await Loan.findById(loanId);
     if (!loan) return { success: false, message: 'Loan not found.' };
@@ -57,11 +51,7 @@ class DisbursementService {
     return { success: true, loan: updated, conversationId: response.ConversationID, message: 'Disbursement initiated.' };
   }
 
-  // 2026-10-23: New method for M-Shwari Wallet withdrawals.
-  // When a member withdraws from their SACCO Wallet, we trigger this to send
-  // the money to their M-Pesa. Unlike a loan, there is no specific table row
-  // for this payout in our system (the transaction is just logged in the wallet ledger).
-  static async disburseWalletToMpesa(member, amount) {
+  static async disburseWalletToMpesa(member, amount, reference) {
     if (!darajaB2CService.isConfigured()) {
       throw new Error('B2C is not configured. Wallet withdrawals are temporarily unavailable.');
     }
@@ -81,59 +71,15 @@ class DisbursementService {
       throw new Error(`Safaricom rejected the withdrawal: ${response.ResponseDescription || 'unknown reason'}`);
     }
 
+    // 2026-10-31: Save the ConversationID to the wallet transaction so we can track failures.
+    await db.query(
+      `UPDATE wallet_transactions SET reference = $1 WHERE reference = $2`,
+      [response.ConversationID, reference]
+    );
+
     return { success: true, conversationId: response.ConversationID };
   }
 
-  // Initiate an instant withdrawal payout via B2C (DORMANT - legacy withdrawal feature).
-  static async disburseWithdrawal(withdrawalId) {
-    const withdrawal = await Withdrawal.findById(withdrawalId);
-    if (!withdrawal) return { success: false, message: 'Withdrawal not found.' };
-    if (withdrawal.status !== 'pending') {
-      return { success: false, message: `Withdrawal is currently '${withdrawal.status}' — only pending withdrawals can be auto-paid.` };
-    }
-
-    const amount = Number(withdrawal.amount);
-    if (amount > INSTANT_WITHDRAWAL_LIMIT) {
-      return { success: false, message: `Amount KES ${amount.toLocaleString()} exceeds the instant-payout limit. This withdrawal requires staff processing.` };
-    }
-
-    const member = await Member.findById(withdrawal.member_id);
-    if (!member) return { success: false, message: 'Member not found.' };
-    if (!member.phone_number) {
-      return { success: false, message: 'Member has no phone number on file. Withdrawal stays pending for staff processing.' };
-    }
-
-    if (!darajaB2CService.isConfigured()) {
-      return { success: false, message: `B2C is not configured. Withdrawal stays pending.` };
-    }
-
-    let response;
-    try {
-      response = await darajaB2CService.b2cPayment({
-        phoneNumber: member.phone_number,
-        amount,
-        remarks: `KEMRI SACCO Withdrawal #${withdrawal.id}`,
-      });
-    } catch (err) {
-      return { success: false, message: `Could not reach Safaricom: ${err.message}. Withdrawal stays pending for staff processing.` };
-    }
-
-    if (String(response.ResponseCode) !== '0') {
-      return { success: false, message: `Safaricom rejected the instant payout: ${response.ResponseDescription || 'unknown reason'}. Withdrawal stays pending.` };
-    }
-
-    const updated = await Withdrawal.markDisbursing(withdrawalId, response.ConversationID);
-
-    if (!updated) {
-      console.error(`⚠️ Race: withdrawal ${withdrawalId} was not in 'pending' when marking disbursing.`);
-      return { success: false, message: 'Withdrawal was modified during payout. Check the Withdrawal Queue.' };
-    }
-
-    return { success: true, withdrawal: updated, conversationId: response.ConversationID, message: 'Instant withdrawal initiated.' };
-  }
-
-  // Handle the B2C result callback from Safaricom. Routes by ConversationID
-  // against both tables — a ConversationID belongs to exactly one.
   static async handleB2CResult(payload) {
     const result = payload?.Result;
     if (!result || !result.ConversationID) {
@@ -151,10 +97,49 @@ class DisbursementService {
       return this._handleWithdrawalB2CResult(withdrawal, result);
     }
 
-    // Note: If a Wallet withdrawal comes back here, it won't match a loan or legacy withdrawal.
-    // That is expected. We just log it and consider it handled.
-    console.log(`B2C result callback: Wallet withdrawal for ConversationID ${result.ConversationID} processed.`);
-    return { handled: true, reason: 'Wallet Withdrawal' };
+    // 2026-10-31: Check if this is a Wallet Withdrawal
+    const walletTxRes = await db.query(
+      `SELECT * FROM wallet_transactions WHERE reference = $1 AND transaction_type = 'withdrawal'`,
+      [result.ConversationID]
+    );
+    
+    if (walletTxRes.rows.length > 0) {
+      return this._handleWalletWithdrawalB2CResult(walletTxRes.rows[0], result);
+    }
+
+    console.error(`B2C result callback: Unknown ConversationID ${result.ConversationID}`);
+    return { handled: false, reason: 'Unknown ConversationID' };
+  }
+
+  static async _handleWalletWithdrawalB2CResult(tx, result) {
+    const member = await Member.findById(tx.member_id);
+    
+    if (Number(result.ResultCode) !== 0) {
+      // IT FAILED: Refund the wallet
+      const reason = result.ResultDesc || `ResultCode ${result.ResultCode}`;
+      console.error(`B2C Wallet withdrawal failed for member ${tx.member_id}. Refunding KES ${Math.abs(tx.amount)}.`);
+      
+      try {
+        await Member.creditWallet(tx.member_id, Math.abs(tx.amount), 'withdrawal_refund', 'B2C Failed');
+        
+        // Update the original failed transaction so it doesn't show as a pending withdrawal
+        await db.query(`UPDATE wallet_transactions SET transaction_type = 'withdrawal_failed' WHERE id = $1`, [tx.id]);
+
+        if (member) {
+          await smsService.sendSMS(
+            member.phone_number,
+            `KEMRI SACCO: Hi ${member.full_name.split(' ')[0]}, your wallet withdrawal of KES ${Math.abs(tx.amount)} failed. The funds have been returned to your SACCO Wallet.`
+          );
+        }
+      } catch (err) {
+        console.error('Failed to refund wallet after async B2C failure:', err.message);
+      }
+      return { handled: true, failed: true, reason };
+    }
+
+    // SUCCESS
+    console.log(`✅ B2C Wallet withdrawal confirmed for member ${tx.member_id}`);
+    return { handled: true, failed: false };
   }
 
   static async _handleLoanB2CResult(loan, result) {
@@ -168,8 +153,6 @@ class DisbursementService {
     if (Number(result.ResultCode) !== 0) {
       const reason = result.ResultDesc || `ResultCode ${result.ResultCode}`;
       const rolledBack = await Loan.rollbackDisbursing(loan.id, reason);
-
-      console.error(`B2C disbursement failed for loan ${loan.id}: ${reason}`);
 
       if (member) {
         try {
@@ -196,8 +179,6 @@ class DisbursementService {
 
     const disbursed = await Loan.markDisbursed(loan.id, receipt, 'b2c');
 
-    console.log(`✅ B2C disbursement confirmed for loan ${loan.id}, receipt ${receipt}`);
-
     if (member) {
       const updatedMember = await Member.findById(loan.member_id);
       const amountOutstanding = updatedMember?.total_outstanding_balance || loan.total_repayment;
@@ -207,9 +188,10 @@ class DisbursementService {
         : '—';
 
       try {
+        // 2026-10-31: Added loan.reference
         await smsService.sendSMS(
           member.phone_number,
-          smsService.templates.loanDisbursed(member.full_name, loan.principal, amountOutstanding, dueDateFormatted)
+          smsService.templates.loanDisbursed(member.full_name, loan.principal, amountOutstanding, dueDateFormatted, loan.reference)
         );
       } catch (err) {
         console.error('B2C success SMS to member failed:', err.message);
@@ -228,67 +210,6 @@ class DisbursementService {
     return { handled: true, loan: disbursed, failed: false, receipt };
   }
 
-  static async _handleWithdrawalB2CResult(withdrawal, result) {
-    if (withdrawal.status !== 'disbursing') {
-      console.log(`B2C result callback: withdrawal ${withdrawal.id} already ${withdrawal.status}; ignoring duplicate.`);
-      return { handled: true, withdrawal, alreadyResolved: true };
-    }
-
-    const member = await Member.findById(withdrawal.member_id);
-
-    if (Number(result.ResultCode) !== 0) {
-      const reason = result.ResultDesc || `ResultCode ${result.ResultCode}`;
-      const rolledBack = await Withdrawal.rollbackDisbursing(withdrawal.id, reason);
-
-      console.error(`B2C instant withdrawal failed for withdrawal ${withdrawal.id}: ${reason}`);
-
-      if (member) {
-        try {
-          await smsService.sendSMS(member.phone_number, smsService.templates.withdrawalInstantFailed(member.full_name, withdrawal.amount));
-        } catch (err) {
-          console.error('Withdrawal failure SMS to member failed:', err.message);
-        }
-      }
-
-      try {
-        await notificationService.notifyStaff({
-          smsText: smsService.templates.staffWithdrawalInstantFailed(member?.full_name || 'a member', withdrawal.amount),
-          emailContent: null,
-        });
-      } catch (err) {
-        console.error('Withdrawal failure staff notification failed:', err.message);
-      }
-
-      return { handled: true, withdrawal: rolledBack, failed: true, reason };
-    }
-
-    const params = result.ResultParameters?.ResultParameter || [];
-    const receipt = params.find((p) => p.Key === 'TransactionReceipt')?.Value || null;
-
-    const processed = await Withdrawal.markDisbursed(withdrawal.id, receipt);
-
-    console.log(`✅ B2C instant withdrawal confirmed for withdrawal ${withdrawal.id}, receipt ${receipt}`);
-
-    if (member) {
-      try {
-        await smsService.sendSMS(member.phone_number, smsService.templates.withdrawalInstantConfirmed(member.full_name, withdrawal.amount, receipt));
-      } catch (err) {
-        console.error('Withdrawal success SMS to member failed:', err.message);
-      }
-    }
-
-    try {
-      await notificationService.notifyStaff({
-        smsText: smsService.templates.staffWithdrawalInstantSuccess(member?.full_name || 'a member', withdrawal.amount, receipt),
-        emailContent: null,
-      });
-    } catch (err) {
-      console.error('Withdrawal success staff notification failed:', err.message);
-    }
-
-    return { handled: true, withdrawal: processed, failed: false, receipt };
-  }
-
   static async handleB2CTimeout(payload) {
     const conversationId = payload?.Result?.ConversationID || payload?.ConversationID;
     if (!conversationId) {
@@ -302,22 +223,35 @@ class DisbursementService {
     const withdrawal = await Withdrawal.findByB2CConversationId(conversationId);
     if (withdrawal) return this._handleWithdrawalB2CTimeout(withdrawal);
 
-    console.error(`B2C timeout callback: no loan or withdrawal for ConversationID ${conversationId}`);
+    // Check for wallet timeout
+    const walletTxRes = await db.query(
+      `SELECT * FROM wallet_transactions WHERE reference = $1 AND transaction_type = 'withdrawal'`,
+      [conversationId]
+    );
+    if (walletTxRes.rows.length > 0) {
+       const tx = walletTxRes.rows[0];
+       await Member.creditWallet(tx.member_id, Math.abs(tx.amount), 'withdrawal_refund', 'B2C Timeout');
+       await db.query(`UPDATE wallet_transactions SET transaction_type = 'withdrawal_failed' WHERE id = $1`, [tx.id]);
+       return { handled: true, failed: true, reason: 'Timeout' };
+    }
+
+    console.error(`B2C timeout callback: unknown ConversationID ${conversationId}`);
     return { handled: false, reason: 'Unknown ConversationID' };
   }
 
   static async _handleLoanB2CTimeout(loan) {
     if (loan.status !== 'disbursing') {
-      console.log(`B2C timeout callback: loan ${loan.id} already ${loan.status}; ignoring.`);
       return { handled: true, loan, alreadyResolved: true };
     }
 
     const rolledBack = await Loan.rollbackDisbursing(loan.id, 'Safaricom timeout');
     console.warn(`⚠️ B2C disbursement timed out for loan ${loan.id}. Rolled back to approved.`);
 
+    const member = await Member.findById(loan.member_id);
+
     try {
       await notificationService.notifyStaff({
-        smsText: smsService.templates.staffLoanDisbursementTimedOut(loan.member_name || 'a member', loan.reference),
+        smsText: smsService.templates.staffLoanDisbursementTimedOut(member?.full_name || 'a member', loan.reference),
         emailContent: null,
       });
     } catch (err) {
@@ -326,38 +260,8 @@ class DisbursementService {
 
     return { handled: true, loan: rolledBack, failed: true, reason: 'Timeout' };
   }
-
-  static async _handleWithdrawalB2CTimeout(withdrawal) {
-    if (withdrawal.status !== 'disbursing') {
-      console.log(`B2C timeout callback: withdrawal ${withdrawal.id} already ${withdrawal.status}; ignoring.`);
-      return { handled: true, withdrawal, alreadyResolved: true };
-    }
-
-    const rolledBack = await Withdrawal.rollbackDisbursing(withdrawal.id, 'Safaricom timeout');
-    console.warn(`⚠️ B2C instant withdrawal timed out for withdrawal ${withdrawal.id}. Rolled back to pending.`);
-
-    const member = await Member.findById(withdrawal.member_id);
-    if (member) {
-      try {
-        await smsService.sendSMS(member.phone_number, smsService.templates.withdrawalInstantFailed(member.full_name, withdrawal.amount));
-      } catch (err) {
-        console.error('Withdrawal timeout SMS to member failed:', err.message);
-      }
-    }
-
-    try {
-      await notificationService.notifyStaff({
-        smsText: smsService.templates.staffWithdrawalInstantTimedOut(member?.full_name || 'a member', withdrawal.amount),
-        emailContent: null,
-      });
-    } catch (err) {
-      console.error('Withdrawal timeout staff notification failed:', err.message);
-    }
-
-    return { handled: true, withdrawal: rolledBack, failed: true, reason: 'Timeout' };
-  }
 }
 
-DisbursementService.INSTANT_WITHDRAWAL_LIMIT = INSTANT_WITHDRAWAL_LIMIT;
+DisbursementService.INSTANT_WITHDRAWAL_LIMIT = 5000;
 
 module.exports = DisbursementService;

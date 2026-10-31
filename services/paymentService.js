@@ -67,18 +67,20 @@ async function requestWithdrawal({ memberId, amount }) {
 
 async function notifyRepaymentSuccess(member, payment, updatedLoan, mpesaReceipt) {
   try {
+    // 2026-10-31: Added updatedLoan.reference to SMS templates so member/staff know which loan was paid.
     await smsService.sendSMS(
       member.phone_number,
       smsService.templates.loanRepaymentConfirmed(
         member.full_name,
         payment.amount,
         updatedLoan.outstanding_balance,
-        mpesaReceipt
+        mpesaReceipt,
+        updatedLoan.reference
       )
     );
     await notificationService.notifyStaff({
-      smsText: smsService.templates.staffRepayment(member.full_name, payment.amount),
-      emailContent: emailService.staffTemplates.repayment(member.full_name, payment.amount),
+      smsText: smsService.templates.staffRepayment(member.full_name, payment.amount, updatedLoan.reference),
+      emailContent: emailService.staffTemplates.repayment(member.full_name, payment.amount, updatedLoan.reference),
     });
   } catch (notifyErr) {
     console.error('Repayment notification failed (repayment itself still applied):', notifyErr.message);
@@ -107,8 +109,9 @@ async function notifyDepositSuccess(member, payment, mpesaReceipt) {
 
 async function notifyPaymentFailed(member, payment, isRepayment) {
   try {
+    // 2026-10-31: Improved the repayment failure message to include the loan ID
     const message = isRepayment
-      ? `KEMRI SACCO: Your loan repayment of KES ${payment.amount} failed. Please try again or visit our office.`
+      ? `KEMRI SACCO: Hi ${member.full_name.split(' ')[0]}, your repayment for Loan ID ${payment.loan_id} failed. Please try again or visit our office.`
       : smsService.templates.paymentFailed(member.full_name);
     await smsService.sendSMS(member.phone_number, message);
   } catch (notifyErr) {

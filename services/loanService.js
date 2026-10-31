@@ -23,34 +23,24 @@ class LoanService {
       return { allowed: false, reason: 'You are currently not eligible to take a loan. Please contact the SACCO office.' };
     }
 
-    // 2. CRITICAL FIX: Check total exposure across ALL active loans.
-    // For pending/approved loans, count the PRINCIPAL (since outstanding_balance is 0 until disbursed).
-    // For disbursing/disbursed loans, count the OUTSTANDING BALANCE.
+    // 2. SCENARIO B: Strict Block for active loans.
+    // Check if they have ANY active or pending loan.
     const activeLoansRes = await db.query(
-      `SELECT COALESCE(SUM(
-        CASE 
-          WHEN status IN ('pending', 'approved') THEN principal
-          WHEN status IN ('disbursing', 'disbursed') THEN outstanding_balance
-          ELSE 0
-        END
-      ), 0) AS total_exposure 
-       FROM loans 
-       WHERE member_id = $1 AND status IN ('pending', 'approved', 'disbursing', 'disbursed')`,
+      `SELECT id FROM loans 
+       WHERE member_id = $1 AND status IN ('pending', 'approved', 'disbursing', 'disbursed')
+       LIMIT 1`,
       [memberId]
     );
     
-    const totalExposure = Number(activeLoansRes.rows[0].total_exposure);
-    const availableLimit = creditLimit - totalExposure;
-
-    // 3. Block if they have maxed out their limit (including pending applications)
-    if (availableLimit <= 0) {
+    if (activeLoansRes.rows.length > 0) {
       return { 
         allowed: false, 
-        reason: `You have reached your maximum credit limit of KES ${creditLimit.toLocaleString()}. Please clear your outstanding or pending loans before applying for another.` 
+        reason: 'You already have an active or pending loan. Please clear your existing balance before applying for another loan.' 
       };
     }
 
-    return { allowed: true, creditLimit: availableLimit, member, reason: 'Eligible to apply.' };
+    // 3. If no active loans, they are good to apply.
+    return { allowed: true, creditLimit: creditLimit, member, reason: 'Eligible to apply.' };
   }
 
   static calculateRepaymentSchedule(principal) {
@@ -83,7 +73,7 @@ class LoanService {
       return { success: false, message: `Minimum loan principal is KES ${MIN_LOAN_AMOUNT}.` };
     }
     
-    // Check against the AVAILABLE limit, not the raw credit limit
+    // Check against the AVAILABLE limit
     if (amount > eligibility.creditLimit) {
       return {
         success: false,
@@ -163,7 +153,7 @@ class LoanService {
     try {
       await smsService.sendSMS(
         member.phone_number,
-        smsService.templates.loanApplicationReceived(member.full_name, loan.principal, ref)
+        smsService.templates.loanApplicationReceived(member.full_name, loan.principal, ref, loan.purpose)
       );
     } catch (smsErr) {
       console.error('Loan application SMS failed (application still recorded):', smsErr.message);
@@ -171,7 +161,7 @@ class LoanService {
 
     try {
       await notificationService.notifyStaff({
-        smsText: smsService.templates.staffLoanApplication(member.full_name, loan.principal, ref),
+        smsText: smsService.templates.staffLoanApplication(member.full_name, loan.principal, ref, loan.purpose),
         emailContent: emailService.staffTemplates.loanApplication(member.full_name, loan.principal, ref),
       });
     } catch (notifyErr) {
@@ -179,39 +169,10 @@ class LoanService {
     }
   }
 
-  static async _notifyAutoApprovedStaff(member, loan, ref, opts = {}) {
-    const { disbursementStatus, failureReason } = opts;
-    
-    let smsText;
-    if (disbursementStatus === 'wallet_credited') {
-      smsText = smsService.templates.staffWalletCredited(member.full_name, loan.principal, ref);
-    } else {
-      smsText = smsService.templates.staffLoanAutoApproved(member.full_name, loan.principal, ref, {
-        status: disbursementStatus,
-      });
-    }
-
-    try {
-      await notificationService.notifyStaff({
-        smsText,
-        emailContent: emailService.staffTemplates.loanAutoApproved(member.full_name, loan.principal, ref, {
-          installment: loan.monthly_installment,
-          tenureMonths: loan.tenure_months,
-          memberPhone: member.phone_number,
-          status: disbursementStatus,
-          failureReason,
-        }),
-      });
-    } catch (notifyErr) {
-      console.error('Staff notification for auto-approved loan failed:', notifyErr.message);
-    }
-  }
-
   static async approveLoan(loanId, adminNotes = '', opts = {}) {
     const { skipSms = false } = opts;
 
     // --- CRITICAL FIX: Re-verify limits before approval ---
-    // 1. Fetch the pending loan
     const loanCheck = await db.query('SELECT * FROM loans WHERE id = $1', [loanId]);
     if (loanCheck.rows.length === 0) {
       return { success: false, message: 'Loan not found.' };
@@ -221,7 +182,6 @@ class LoanService {
       return { success: false, message: 'Loan is not in a pending state.' };
     }
 
-    // 2. Fetch member and calculate their exposure EXCLUDING this current loan
     const member = await Member.findById(loanData.member_id);
     if (!member) {
       return { success: false, message: 'Member not found.' };
@@ -229,29 +189,27 @@ class LoanService {
 
     const creditLimit = Number(member.credit_limit || 0);
     
+    // Check if they have ANY OTHER active loans (excluding the one being approved)
     const otherLoansRes = await db.query(
-      `SELECT COALESCE(SUM(
-        CASE 
-          WHEN status IN ('pending', 'approved') THEN principal
-          WHEN status IN ('disbursing', 'disbursed') THEN outstanding_balance
-          ELSE 0
-        END
-      ), 0) AS total_exposure 
-       FROM loans 
+      `SELECT id FROM loans 
        WHERE member_id = $1 AND status IN ('pending', 'approved', 'disbursing', 'disbursed') AND id != $2`,
       [loanData.member_id, loanId]
     );
     
-    const otherExposure = Number(otherLoansRes.rows[0].total_exposure);
-
-    // 3. Prevent admin from approving if it exceeds limit
-    if (otherExposure + Number(loanData.principal) > creditLimit) {
+    if (otherLoansRes.rows.length > 0) {
       return { 
         success: false, 
-        message: `ACTION BLOCKED: Member's limit is KES ${creditLimit.toLocaleString()}. They already have KES ${otherExposure.toLocaleString()} in active/pending loans. Approving this KES ${Number(loanData.principal).toLocaleString()} loan would exceed their limit.` 
+        message: `ACTION BLOCKED: Member already has an active or pending loan. They must clear it before a new one can be approved.` 
       };
     }
-    // -------------------------------------------------------
+
+    // Prevent admin from approving if it exceeds limit
+    if (Number(loanData.principal) > creditLimit) {
+      return { 
+        success: false, 
+        message: `ACTION BLOCKED: Member's limit is KES ${creditLimit.toLocaleString()}. Approving this KES ${Number(loanData.principal).toLocaleString()} loan would exceed their limit.` 
+      };
+    }
 
     const loan = await Loan.approve(loanId, adminNotes);
     if (!loan) {
@@ -266,7 +224,8 @@ class LoanService {
             member.full_name,
             loan.principal,
             loan.total_interest,
-            loan.total_repayment
+            loan.total_repayment,
+            loan.purpose
           )
         );
       } catch (smsErr) {
@@ -292,7 +251,7 @@ class LoanService {
       try {
         await smsService.sendSMS(
           member.phone_number,
-          smsService.templates.loanRejected(member.full_name, adminNotes)
+          smsService.templates.loanRejected(member.full_name, adminNotes, loan.purpose)
         );
       } catch (smsErr) {
         console.error('Loan rejection SMS failed (loan still rejected):', smsErr.message);

@@ -278,10 +278,13 @@ async function handleWallet(phoneNumber, steps, sessionId) {
     }
 
     try {
-      const newBalance = await Member.debitWallet(member.id, amount, 'withdrawal', 'Pending B2C');
+      // 2026-10-31: Updated to get uniqueRef from debitWallet
+      const debitResult = await Member.debitWallet(member.id, amount, 'withdrawal', null);
+      const newBalance = debitResult.wallet_balance;
+      const uniqueRef = debitResult.reference;
 
       const DisbursementService = require('../services/disbursementService');
-      await DisbursementService.disburseWalletToMpesa(member, amount);
+      await DisbursementService.disburseWalletToMpesa(member, amount, uniqueRef);
 
       try {
         await smsService.sendSMS(
@@ -354,14 +357,12 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
   }
 
   if (remaining.length === 0) {
-    // Menu with "Coming soon" labels as you requested
     return `CON Select Loan Type:\n1. Emergency (Coming soon)\n2. School Fees (Coming soon)\n3. Mobile (Instant to M-Pesa)`;
   }
 
   if (remaining.length === 1) {
     const typeChoice = remaining[0];
     
-    // 2026-10-31: Hard-block the "Coming soon" options so they don't create phantom loans.
     if (typeChoice === '1') {
       return 'END Emergency loans are not yet available. Please check back later.';
     }
@@ -369,7 +370,6 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
       return 'END School Fees loans are not yet available. Please check back later.';
     }
     
-    // Only Option 3 (Mobile) proceeds
     if (typeChoice === '3') {
       return `CON Enter loan amount (KES)\nCredit limit: KES ${eligibility.creditLimit.toLocaleString()}`;
     }
@@ -381,7 +381,6 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
     const typeChoice = remaining[0];
     const amount = Number(remaining[1]);
     
-    // Double-check: Only Mobile loans are allowed to process.
     if (typeChoice !== '3') {
       return 'END Invalid loan type. Please dial again.';
     }
@@ -451,7 +450,6 @@ async function handleRepayLoan(phoneNumber, steps, sessionId) {
     return 'END You have no active loans to repay.';
   }
 
-  // If they have exactly 1 loan, skip the menu
   if (activeLoans.length === 1) {
     const loan = activeLoans[0];
     if (remaining.length === 0) {
@@ -470,7 +468,6 @@ async function handleRepayLoan(phoneNumber, steps, sessionId) {
     }
   }
 
-  // If they have multiple loans, show the menu
   if (activeLoans.length > 1) {
     if (remaining.length === 0) {
       let menu = 'CON Select loan to repay:\n';
