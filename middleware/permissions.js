@@ -1,17 +1,6 @@
 // Central definition of roles, what each is allowed to do, and who is
-// allowed to assign which roles to others. Adding a new permission check
-// anywhere in the app should mean adding one entry here, not writing a new
-// `if (req.user.role === '...')` in a route file.
-//
-// Role values stored in admins.role (VARCHAR(20), unconstrained - see
-// models/Admin.js). IMPORTANT: the top role is stored as 'admin', not
-// 'super_admin' - existing accounts and the existing requireAdmin
-// middleware (role === 'admin') both already use that exact string, so
-// reusing it means every current admin account is automatically a Super
-// Administrator under this model with no migration needed. 'staff' is kept
-// as a legacy role too, so existing staff accounts keep working with a
-// sensible (read-mostly) permission set until individually migrated to one
-// of the more specific operational roles below.
+// allowed to assign which roles to others.
+
 const ROLES = {
   SUPER_ADMIN: 'admin',             // Full system administration and configuration
   SACCO_ADMIN: 'sacco_admin',       // General operations and member management
@@ -22,26 +11,12 @@ const ROLES = {
   STAFF_LEGACY: 'staff',            // Pre-existing generic staff role, kept working as-is
 };
 
-// Permission naming: <resource>:<action>. Reads and writes are the bulk of
-// it, but two member permissions are deliberately NOT part of the generic
-// members:write grant, because they carry more consequence than "edit a
-// profile field" and must be grantable independently:
-//
-//   members:set_board_status — flips a member into the board/staff category,
-//     which auto-approves their future loan applications under SACCO policy
-//     (25 Sept 2026). A data-entry role with members:write should not be
-//     able to grant that.
-//
-//   members:delete — permanently removes a member record (only when they
-//     have no transaction history; see the delete spec). Destructive and
-//     irreversible, so again kept off the general write grant.
-//
-// Both are granted to Super Administrator and SACCO Administrator only.
 const PERMISSIONS = {
   [ROLES.SUPER_ADMIN]: [
     'system:configure',
     'staff:manage',
     'members:read', 'members:write', 'members:set_board_status', 'members:delete',
+    'members:edit_limit', // <--- 2026-10-31: ADDED FOR CEO ONLY
     'loans:read', 'loans:approve', 'loans:disburse',
     'payments:read', 'payments:write',
     'withdrawals:read', 'withdrawals:write',
@@ -51,6 +26,7 @@ const PERMISSIONS = {
   [ROLES.SACCO_ADMIN]: [
     'staff:manage',
     'members:read', 'members:write', 'members:set_board_status', 'members:delete',
+    // 'members:edit_limit', // <--- NOT ALLOWED FOR SACCO ADMIN
     'loans:read', 'loans:approve', 'loans:disburse',
     'payments:read',
     'withdrawals:read', 'withdrawals:write',
@@ -62,11 +38,8 @@ const PERMISSIONS = {
     'payments:read', 'payments:write',
     'withdrawals:read', 'withdrawals:write',
     'reports:read',
-    // 2026-10-17: Added so Finance can view loan ledgers, repayments, and aging.
     'loans:read', 
-    // 2026-10-17: Added so Finance can see the Staff Directory (UI hides edit buttons)
     'staff:manage',
-    // 2026-10-17: Added so Finance can view System Health
     'system:configure',
   ],
   [ROLES.LOANS_OFFICER]: [
@@ -79,7 +52,6 @@ const PERMISSIONS = {
     'withdrawals:read',
   ],
   [ROLES.AUDITOR]: [
-    // Explicitly read-only - no :write, :approve, or :disburse anywhere.
     'members:read',
     'loans:read',
     'payments:read',
@@ -88,8 +60,6 @@ const PERMISSIONS = {
     'audit:read',
   ],
   [ROLES.STAFF_LEGACY]: [
-    // Matches the original README description: can view member and
-    // transaction records, cannot approve loans or manage staff accounts.
     'members:read',
     'loans:read',
     'payments:read',
@@ -97,35 +67,6 @@ const PERMISSIONS = {
   ],
 };
 
-// Who can assign which roles to OTHER accounts, when creating or editing
-// staff. Without this, anyone with staff:manage could hand out the top
-// role to anyone, including themselves later - a privilege-escalation
-// path. A SACCO Administrator can staff up the operational roles but
-// cannot create or promote someone to Super Administrator or SACCO
-// Administrator; only an existing Super Administrator can do that.
-//
-// KEMRI SACCO operates with four roles in practice. Three entries in the
-// ROLES object above are deliberately NOT assignable via the invite flow:
-//
-//   MEMBER_SUPPORT: its permissions are a subset of SACCO_ADMIN's. A
-//     distinct support role adds complexity without adding safety at
-//     this scale — if you need someone to edit member records, make
-//     them a SACCO Administrator.
-//
-//   AUDITOR: read-only access, useful only if an external auditor needs
-//     direct console access rather than shared reports. Add the value
-//     back below if that changes.
-//
-//   STAFF_LEGACY: kept for backward compatibility with pre-existing
-//     accounts. Should never be assigned to new staff.
-//
-// The PERMISSIONS map above still defines all seven roles — existing
-// accounts with a hidden role keep their permissions and continue to
-// work. Hiding a role from ASSIGNABLE_ROLES only prevents creating NEW
-// accounts with that role; it does not revoke anything.
-//
-// To re-enable a hidden role, add its value to the arrays below. The
-// frontend's constants/roles.js mirrors this list — keep the two in sync.
 const ASSIGNABLE_ROLES = {
   [ROLES.SUPER_ADMIN]: [
     ROLES.SUPER_ADMIN, ROLES.SACCO_ADMIN,
@@ -140,7 +81,6 @@ function roleHasPermission(role, permission) {
   return (PERMISSIONS[role] || []).includes(permission);
 }
 
-// Can `assignerRole` grant `targetRole` to some other account?
 function canAssignRole(assignerRole, targetRole) {
   return (ASSIGNABLE_ROLES[assignerRole] || []).includes(targetRole);
 }

@@ -253,6 +253,52 @@ async function setBoardStaff(req, res) {
   }
 }
 
+// 2026-10-31: NEW - CEO/Super Admin only route to update a member's credit limit
+async function updateCreditLimit(req, res) {
+  try {
+    const { id } = req.params;
+    const { creditLimit, reason } = req.body;
+
+    const limit = Number(creditLimit);
+    if (isNaN(limit) || limit < 0) {
+      return res.status(400).json({ error: 'Credit limit must be a valid positive number.' });
+    }
+    
+    if (!reason || reason.trim() === '') {
+      return res.status(400).json({ error: 'Reason for change is required for the audit trail.' });
+    }
+
+    const member = await Member.findById(id);
+    if (!member) {
+      return res.status(404).json({ error: 'Member not found.' });
+    }
+
+    const oldLimit = Number(member.credit_limit || 0);
+    const updatedMember = await Member.update(id, { credit_limit: limit });
+
+    // Log to Audit Trail
+    await AuditLog.log({
+      actorId: req.user.id,
+      actorUsername: req.user.username,
+      action: 'Updated Credit Limit',
+      category: 'member_management',
+      targetType: 'member',
+      targetId: id,
+      targetLabel: member.full_name,
+      details: `Changed limit from KES ${oldLimit.toLocaleString()} to KES ${limit.toLocaleString()}. Reason: ${reason}`,
+    });
+
+    res.json({ 
+      success: true, 
+      message: 'Credit limit updated successfully.', 
+      member: updatedMember 
+    });
+  } catch (err) {
+    console.error('Update credit limit error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+}
+
 async function deleteMember(req, res) {
   try {
     const result = await Member.remove(req.params.id);
@@ -371,6 +417,7 @@ module.exports = {
   getMember,
   listMembers,
   updateMember,
+  updateCreditLimit, // <--- Exporting the new function
   setBoardStaff,
   deleteMember,
   importMembers,
