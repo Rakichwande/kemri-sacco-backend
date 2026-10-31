@@ -37,8 +37,10 @@ exports.approveLoan = async (req, res) => {
         const { loanId } = req.params;
         const { adminNotes } = req.body;
 
+        // This call now includes the strict credit limit check in loanService
         const result = await LoanService.approveLoan(loanId, adminNotes);
 
+        // If the limit check fails, it throws the specific error message here
         if (!result.success) {
             return res.status(400).json({ error: result.message });
         }
@@ -60,6 +62,7 @@ exports.approveLoan = async (req, res) => {
             // Mobile Loan: Send directly to M-Pesa via Safaricom B2C
             const disbursement = await DisbursementService.disburseLoan(loanId);
             if (!disbursement.success) {
+                // Loan is approved, but B2C failed. Admin will see this error.
                 return res.status(400).json({ error: disbursement.message });
             }
             return res.json({ 

@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS members (
   employer VARCHAR(150),
   scheme VARCHAR(100) DEFAULT 'holiday_savings',
   status VARCHAR(20) DEFAULT 'active',
-  credit_limit INTEGER DEFAULT 10000,
+  -- 2026-10-31: Changed default from 10000 to 0. New members must be explicitly approved by admin.
+  credit_limit INTEGER DEFAULT 0, 
   total_outstanding_balance INTEGER DEFAULT 0,
   successful_repayments INTEGER DEFAULT 0,
   wallet_balance INTEGER DEFAULT 0,
@@ -89,7 +90,7 @@ async function create(member) {
       age || null,
       employer || null,
       scheme || 'holiday_savings',
-      10000,
+      0, // 2026-10-31: CRITICAL FIX. Changed from 10000 to 0. New members start with no loan eligibility.
       0,
       0,
       imported_reference || null,

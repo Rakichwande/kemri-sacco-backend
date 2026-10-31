@@ -335,10 +335,12 @@ async function applyRepayment(loan_id, amount, externalClient = null) {
     );
 
     if (isFullyRepaid) {
+      // 2026-10-31: CRITICAL FIX: Removed the automatic `credit_limit = 10000` upgrade.
+      // Credit limits are strictly admin-controlled per the CEO/Board rules. 
+      // Repaying a loan only increments the successful repayment count.
       await client.query(
         `UPDATE members 
-         SET successful_repayments = successful_repayments + 1,
-             credit_limit = 10000
+         SET successful_repayments = successful_repayments + 1
          WHERE id = $1`,
         [loan.member_id]
       );

@@ -23,21 +23,30 @@ class LoanService {
       return { allowed: false, reason: 'You are currently not eligible to take a loan. Please contact the SACCO office.' };
     }
 
-    // 2. CRITICAL FIX: Check total outstanding balance across ALL active loans
+    // 2. CRITICAL FIX: Check total exposure across ALL active loans.
+    // For pending/approved loans, count the PRINCIPAL (since outstanding_balance is 0 until disbursed).
+    // For disbursing/disbursed loans, count the OUTSTANDING BALANCE.
     const activeLoansRes = await db.query(
-      `SELECT COALESCE(SUM(outstanding_balance), 0) AS total_owed 
+      `SELECT COALESCE(SUM(
+        CASE 
+          WHEN status IN ('pending', 'approved') THEN principal
+          WHEN status IN ('disbursing', 'disbursed') THEN outstanding_balance
+          ELSE 0
+        END
+      ), 0) AS total_exposure 
        FROM loans 
        WHERE member_id = $1 AND status IN ('pending', 'approved', 'disbursing', 'disbursed')`,
       [memberId]
     );
-    const totalOwed = Number(activeLoansRes.rows[0].total_owed);
-    const availableLimit = creditLimit - totalOwed;
+    
+    const totalExposure = Number(activeLoansRes.rows[0].total_exposure);
+    const availableLimit = creditLimit - totalExposure;
 
-    // 3. Block if they have maxed out their limit
+    // 3. Block if they have maxed out their limit (including pending applications)
     if (availableLimit <= 0) {
       return { 
         allowed: false, 
-        reason: `You have reached your maximum credit limit of KES ${creditLimit.toLocaleString()}. Please clear your outstanding balance before applying for another loan.` 
+        reason: `You have reached your maximum credit limit of KES ${creditLimit.toLocaleString()}. Please clear your outstanding or pending loans before applying for another.` 
       };
     }
 
@@ -201,14 +210,52 @@ class LoanService {
   static async approveLoan(loanId, adminNotes = '', opts = {}) {
     const { skipSms = false } = opts;
 
-    const loan = await Loan.approve(loanId, adminNotes);
-    if (!loan) {
-      return { success: false, message: 'Loan not found or not in a pending state.' };
+    // --- CRITICAL FIX: Re-verify limits before approval ---
+    // 1. Fetch the pending loan
+    const loanCheck = await db.query('SELECT * FROM loans WHERE id = $1', [loanId]);
+    if (loanCheck.rows.length === 0) {
+      return { success: false, message: 'Loan not found.' };
+    }
+    const loanData = loanCheck.rows[0];
+    if (loanData.status !== 'pending') {
+      return { success: false, message: 'Loan is not in a pending state.' };
     }
 
-    const member = await Member.findById(loan.member_id);
+    // 2. Fetch member and calculate their exposure EXCLUDING this current loan
+    const member = await Member.findById(loanData.member_id);
     if (!member) {
       return { success: false, message: 'Member not found.' };
+    }
+
+    const creditLimit = Number(member.credit_limit || 0);
+    
+    const otherLoansRes = await db.query(
+      `SELECT COALESCE(SUM(
+        CASE 
+          WHEN status IN ('pending', 'approved') THEN principal
+          WHEN status IN ('disbursing', 'disbursed') THEN outstanding_balance
+          ELSE 0
+        END
+      ), 0) AS total_exposure 
+       FROM loans 
+       WHERE member_id = $1 AND status IN ('pending', 'approved', 'disbursing', 'disbursed') AND id != $2`,
+      [loanData.member_id, loanId]
+    );
+    
+    const otherExposure = Number(otherLoansRes.rows[0].total_exposure);
+
+    // 3. Prevent admin from approving if it exceeds limit
+    if (otherExposure + Number(loanData.principal) > creditLimit) {
+      return { 
+        success: false, 
+        message: `ACTION BLOCKED: Member's limit is KES ${creditLimit.toLocaleString()}. They already have KES ${otherExposure.toLocaleString()} in active/pending loans. Approving this KES ${Number(loanData.principal).toLocaleString()} loan would exceed their limit.` 
+      };
+    }
+    // -------------------------------------------------------
+
+    const loan = await Loan.approve(loanId, adminNotes);
+    if (!loan) {
+      return { success: false, message: 'Loan not found or could not be approved.' };
     }
 
     if (!skipSms) {
