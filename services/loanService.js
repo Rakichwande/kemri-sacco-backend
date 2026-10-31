@@ -5,29 +5,25 @@ const notificationService = require('./notificationService');
 const emailService = require('./emailService');
 const db = require('../config/database'); 
 
-// 2026-10-19: Board policy dictates that the maximum loan limit is strictly
-// KES 10,000 for ALL members (board/staff and regular alike).
-const MAX_ABSOLUTE_LIMIT = 10000;
 const MIN_LOAN_AMOUNT = 1000;
 const INTEREST_RATE = 6.0;
 const TENURE_MONTHS = 1;
 
 class LoanService {
-  static calculateCreditLimit(successfulRepayments) {
-    return MAX_ABSOLUTE_LIMIT;
-  }
-
   static async canApply(memberId) {
     const member = await Member.findById(memberId);
     if (!member) {
       return { allowed: false, reason: 'Member not found.' };
     }
 
-    // 2026-10-30: Removed the activeLoan check. Members can now have multiple loans 
-    // (e.g., an Emergency loan while they still have a Mobile loan).
+    // 2026-10-30: Strictly enforce the database credit limit.
+    // If a member is not highlighted in the CEO's Excel, their limit will be 0,
+    // which blocks them completely.
+    const creditLimit = Number(member.credit_limit || 0);
 
-    const successfulRepayments = await Loan.countRepaidByMember(memberId);
-    const creditLimit = this.calculateCreditLimit(successfulRepayments);
+    if (creditLimit === 0) {
+      return { allowed: false, reason: 'You are currently not eligible to take a loan. Please contact the SACCO office.' };
+    }
 
     return { allowed: true, creditLimit, member, reason: 'Eligible to apply.' };
   }
@@ -68,10 +64,15 @@ class LoanService {
       };
     }
 
-    // 2026-10-30: ONLY Mobile loans are auto-approved. 
-    // Emergency and School loans for EVERYONE (Board/Staff and Regular) go to the Admin Queue.
+    // 2026-10-30: ONLY Board/Staff Mobile loans are auto-approved. 
+    // Emergency/School loans for everyone, AND Mobile loans for regular members, go to the Admin Queue.
     const isMobile = purpose === 'mobile';
-    const autoApprove = isMobile; 
+    const isBoard = eligibility.member.is_board_staff === true;
+    
+    let autoApprove = false;
+    if (isMobile && isBoard && amount <= 10000) {
+      autoApprove = true;
+    }
 
     const loan = await Loan.create({
       member_id: memberId,
@@ -84,19 +85,19 @@ class LoanService {
     const ref = `LN-${String(loan.id).padStart(5, '0')}`;
     const member = eligibility.member;
 
-    // --- Manual review path (Emergency/School for everyone) ---
+    // --- Manual review path (Regular members, or Emergency/School for everyone) ---
     if (!autoApprove) {
       await this._notifyApplicationReceived(member, loan, ref);
       return {
         success: true,
-        message: 'Loan application submitted successfully.',
+        message: 'Loan application submitted successfully. Awaiting SACCO review.',
         loan,
         autoApproved: false,
       };
     }
 
-    // --- Auto-approval path (Mobile Only) ---
-    const approval = await this.approveLoan(loan.id, 'Auto-approved: Mobile Loan', { skipSms: true });
+    // --- Auto-approval path (Board/Staff Mobile Only) ---
+    const approval = await this.approveLoan(loan.id, 'Auto-approved: Board Mobile Loan', { skipSms: true });
 
     if (!approval.success) {
       await this._notifyApplicationReceived(member, loan, ref);

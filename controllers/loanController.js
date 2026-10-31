@@ -12,12 +12,12 @@ const db = require('../config/database');
 // ============================================================
 exports.applyLoan = async (req, res) => {
     try {
-        const { memberId, amount } = req.body;
+        const { memberId, amount, purpose } = req.body;
         if (!memberId || !amount) {
             return res.status(400).json({ error: 'memberId and amount required' });
         }
 
-        const result = await LoanService.apply(memberId, amount);
+        const result = await LoanService.apply(memberId, amount, purpose);
         if (!result.success) {
             return res.status(400).json({ error: result.message });
         }
@@ -30,10 +30,8 @@ exports.applyLoan = async (req, res) => {
 };
 
 // ============================================================
-// 2. Admin: Approve loan AND Credit to Wallet (1-Click Flow)
+// 2. Admin: Approve loan (Routes to B2C or Wallet based on purpose)
 // ============================================================
-// 2026-10-27: Updated to instantly call markDisbursed after approval.
-// This means Super Admins no longer have to click twice.
 exports.approveLoan = async (req, res) => {
     try {
         const { loanId } = req.params;
@@ -54,12 +52,26 @@ exports.approveLoan = async (req, res) => {
             targetType: 'loan',
             targetId: loanId,
             targetLabel: member ? `${member.full_name} (loan #${loanId})` : `loan #${loanId}`,
-            details: `Approved KES ${result.loan.principal} loan.${adminNotes ? ' Notes: ' + adminNotes : ''}`,
+            details: `Approved KES ${result.loan.principal} ${result.loan.purpose} loan.${adminNotes ? ' Notes: ' + adminNotes : ''}`,
         });
 
-        // Forward directly to the wallet credit logic
-        req.params.loanId = loanId;
-        return exports.markDisbursed(req, res);
+        // 2026-10-31: Route based on loan type
+        if (result.loan.purpose === 'mobile') {
+            // Mobile Loan: Send directly to M-Pesa via Safaricom B2C
+            const disbursement = await DisbursementService.disburseLoan(loanId);
+            if (!disbursement.success) {
+                return res.status(400).json({ error: disbursement.message });
+            }
+            return res.json({ 
+                success: true, 
+                message: 'Mobile loan approved and B2C initiated.', 
+                loan: disbursement.loan 
+            });
+        } else {
+            // Emergency/School Loan: Credit to Wallet
+            req.params.loanId = loanId;
+            return exports.markDisbursed(req, res);
+        }
 
     } catch (err) {
         console.error('Approve loan error:', err);
@@ -270,10 +282,49 @@ exports.markDisbursed = async (req, res) => {
 };
 
 // ============================================================
-// 6b. Admin: Disburse loan automatically (Now disabled/routed to Wallet)
+// 6b. Admin: Disburse loan automatically (Manual trigger)
 // ============================================================
 exports.disburseLoan = async (req, res) => {
-    return exports.markDisbursed(req, res);
+    try {
+        const { loanId } = req.params;
+        const result = await DisbursementService.disburseLoan(loanId);
+
+        if (!result.success) {
+            await AuditLog.log({
+                actorId: req.user.id,
+                actorUsername: req.user.username,
+                action: 'Attempted B2C disbursement',
+                category: 'loan_decision',
+                targetType: 'loan',
+                targetId: loanId,
+                targetLabel: `loan #${loanId}`,
+                details: `B2C disbursement failed: ${result.message}`,
+            });
+            return res.status(400).json({ error: result.message });
+        }
+
+        const member = await Member.findById(result.loan.member_id);
+        await AuditLog.log({
+            actorId: req.user.id,
+            actorUsername: req.user.username,
+            action: 'Initiated B2C disbursement',
+            category: 'loan_decision',
+            targetType: 'loan',
+            targetId: loanId,
+            targetLabel: member ? `${member.full_name} (loan #${loanId})` : `loan #${loanId}`,
+            details: `Initiated B2C disbursement of KES ${result.loan.principal}. ConversationID: ${result.conversationId}.`,
+        });
+
+        res.json({
+            success: true,
+            message: result.message,
+            loan: result.loan,
+            conversationId: result.conversationId,
+        });
+    } catch (err) {
+        console.error('B2C disbursement error:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
 };
 
 // ============================================================
