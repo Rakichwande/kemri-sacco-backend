@@ -482,3 +482,20 @@ exports.getPendingLoans = async (req, res) => {
         res.status(500).json({ error: 'Server error' });
     }
 };
+
+// ============================================================
+// 9. Admin: Get loan timeline by month/year
+// ============================================================
+exports.getLoanTimeline = async (req, res) => {
+    try {
+        const { year, month } = req.query;
+        if (!year || !month) {
+            return res.status(400).json({ error: 'Year and month are required' });
+        }
+        const loans = await Loan.getTimelineByMonth(Number(year), Number(month));
+        res.json(loans);
+    } catch (err) {
+        console.error('Timeline fetch error:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+};

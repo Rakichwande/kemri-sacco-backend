@@ -50,7 +50,6 @@ CREATE INDEX IF NOT EXISTS idx_loans_disbursed_due
 `;
 
 // 2026-10-30: Drop the constraint that prevented multiple active loans.
-// We now allow members to have a Mobile loan and an Emergency/School loan concurrently.
 const dropOneActiveLoanConstraint = `
 DROP INDEX IF EXISTS loans_one_active_per_member;
 `;
@@ -70,7 +69,6 @@ async function create({ member_id, principal, interest_rate, tenure_months, purp
   const totalRepayment = Number(principal) + totalInterest;
   const monthlyInstallment = Math.round(totalRepayment / tenure_months);
 
-  // 2026-10-30: Removed try/catch because the unique constraint is gone.
   const result = await db.query(
     `INSERT INTO loans (
        member_id, principal, interest_rate, tenure_months,
@@ -423,7 +421,7 @@ async function findAllDisbursedForReminders() {
     `SELECT
        l.id, l.member_id, l.principal, l.monthly_installment,
        l.outstanding_balance, l.amount_paid, l.tenure_months,
-       l.disbursed_at, l.next_payment_due, l.purpose, -- <--- ADDED l.purpose
+       l.disbursed_at, l.next_payment_due, l.purpose,
        l.last_member_reminder_at, l.last_staff_alert_at,
        ${REFERENCE_SQL} AS reference,
        m.full_name, m.phone_number
@@ -441,6 +439,27 @@ async function markReminderSent(loan_id, kind) {
     `UPDATE loans SET ${column} = NOW() WHERE id = $1`,
     [loan_id]
   );
+}
+
+// 2026-11-02: NEW - Get loans for a specific month/year for the Timeline Report
+async function getTimelineByMonth(year, month) {
+  const result = await db.query(
+    `SELECT 
+       l.*, 
+       ${REFERENCE_SQL} AS reference,
+       m.full_name as member_name, 
+       m.phone_number, 
+       m.credit_limit,
+       m.is_board_staff,
+       ${Member.REFERENCE_SQL} AS member_reference
+     FROM loans l
+     LEFT JOIN members m ON l.member_id = m.id
+     WHERE EXTRACT(YEAR FROM l.applied_at) = $1 
+       AND EXTRACT(MONTH FROM l.applied_at) = $2
+     ORDER BY l.applied_at DESC`,
+    [year, month]
+  );
+  return result.rows;
 }
 
 module.exports = {
@@ -465,4 +484,5 @@ module.exports = {
   getRepayableLoan,
   findAllDisbursedForReminders,
   markReminderSent,
+  getTimelineByMonth, // <--- ADDED to exports
 };
