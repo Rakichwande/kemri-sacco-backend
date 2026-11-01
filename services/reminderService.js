@@ -11,28 +11,8 @@ const smsService = require('./smsService');
 //   day 3 of the month      → overdue nudge to members who are behind
 //   day 6 of the month      → staff alert for members still behind
 //   every Monday            → weekly digest to staff (only if there's content)
-//
-// TOLERANCE
-//   A member is "behind" when amount_paid is more than 1 instalment below
-//   the cumulative schedule. At month 1 (0 instalments due) nobody is
-//   behind. At month 2 (1 due) the threshold is 0. At month 3 (2 due) it's
-//   1 × monthly_installment. This gives every member one month of slack
-//   without drifting into a genuinely overdue position.
-//
-// IDEMPOTENCY
-//   Before sending any member reminder, we check whether one was already
-//   sent today. If yes, skip. This makes the endpoint safe to call twice —
-//   e.g. on a GitHub Actions retry — without double-sending.
-//
-// DRY RUN
-//   Every send path checks opts.dryRun first. When true, no SMS goes out
-//   and no money is spent — the intended message is logged to the console
-//   instead. Used by the /internal/run-reminders endpoint's ?dryRun=1
-//   parameter to verify cadence logic without triggering real sends.
 
 class ReminderService {
-  // Entry point. Returns a summary of what was sent, which the endpoint
-  // returns to GitHub Actions for logging.
   static async runDaily(today = new Date(), opts = {}) {
     const { dryRun = false } = opts;
 
@@ -145,19 +125,26 @@ class ReminderService {
     return { monthsElapsed, instalmentsDue, threshold, amountPaid, outstanding, behind, amountBehind };
   }
 
-  // 2026-10-21: All member reminders now use the board-approved unified
-  // template. They all pass full name, outstanding balance, and amount paid.
+  // Helper to format the date for the SMS
+  static formatDueDate(dateString) {
+    if (!dateString) return '';
+    return new Date(dateString).toLocaleDateString('en-GB', { 
+      day: '2-digit', month: 'short', year: 'numeric' 
+    });
+  }
 
   static async sendMidMonth(loan, status, dryRun) {
+    const dueDate = this.formatDueDate(loan.next_payment_due);
     const message = smsService.templates.loanReminderBoardApproved(
-      loan.full_name, status.outstanding, status.amountPaid
+      loan.full_name, status.outstanding, status.amountPaid, loan.reference, loan.purpose, dueDate
     );
     await this.deliver({ dryRun, to: loan.phone_number, message, logLabel: `mid-month → ${loan.reference}` });
   }
 
   static async sendEndOfMonth(loan, status, dryRun) {
+    const dueDate = this.formatDueDate(loan.next_payment_due);
     const message = smsService.templates.loanReminderBoardApproved(
-      loan.full_name, status.outstanding, status.amountPaid
+      loan.full_name, status.outstanding, status.amountPaid, loan.reference, loan.purpose, dueDate
     );
     await this.deliver({
       dryRun,
@@ -168,8 +155,9 @@ class ReminderService {
   }
 
   static async sendDay3Overdue(loan, status, dryRun) {
+    const dueDate = this.formatDueDate(loan.next_payment_due);
     const message = smsService.templates.loanReminderBoardApproved(
-      loan.full_name, status.outstanding, status.amountPaid
+      loan.full_name, status.outstanding, status.amountPaid, loan.reference, loan.purpose, dueDate
     );
     await this.deliver({ dryRun, to: loan.phone_number, message, logLabel: `day-3 overdue → ${loan.reference}` });
   }

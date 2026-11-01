@@ -423,7 +423,7 @@ async function findAllDisbursedForReminders() {
     `SELECT
        l.id, l.member_id, l.principal, l.monthly_installment,
        l.outstanding_balance, l.amount_paid, l.tenure_months,
-       l.disbursed_at, l.next_payment_due,
+       l.disbursed_at, l.next_payment_due, l.purpose, -- <--- ADDED l.purpose
        l.last_member_reminder_at, l.last_staff_alert_at,
        ${REFERENCE_SQL} AS reference,
        m.full_name, m.phone_number

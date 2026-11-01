@@ -79,13 +79,16 @@ const templates = {
     `KEMRI SACCO: Hi ${firstName(name)}, we could not complete your loan disbursement right now. Our team will contact you shortly.`,
 
   // ─── MEMBER-FACING — LOAN REMINDERS ───
-  loanReminderBoardApproved: (name, amountOutstanding, amountPaid, ref, purpose) => {
+  loanReminderBoardApproved: (name, amountOutstanding, amountPaid, ref, purpose, dueDate) => {
     const hasPaid = Number(amountPaid) > 0;
     const paymentStatus = hasPaid
       ? `and you have paid ${formatKES(amountPaid)} to date`
       : 'and no repayments have been received to date';
+    
+    // 2026-11-01: Added due date to the reminder SMS
+    const dueText = dueDate ? ` Your repayment is due by ${dueDate}.` : '';
 
-    return `KEMRI SACCO: Dear ${firstName(name)}, your current outstanding balance for ${formatLoanType(purpose)} Loan (${ref}) is ${formatKES(amountOutstanding)}, ${paymentStatus}. Kindly repay by dialling *483*4444#. Thank you.`;
+    return `KEMRI SACCO: Dear ${firstName(name)}, your current outstanding balance for ${formatLoanType(purpose)} Loan (${ref}) is ${formatKES(amountOutstanding)}, ${paymentStatus}.${dueText} Kindly repay by dialling *483*4444#. Thank you.`;
   },
 
   // ─── STAFF-FACING ───
