@@ -22,6 +22,19 @@ CREATE TABLE IF NOT EXISTS members (
 );
 `;
 
+// 2026-11-01: Added wallet_transactions table creation
+const createWalletTxTableQuery = `
+CREATE TABLE IF NOT EXISTS wallet_transactions (
+  id SERIAL PRIMARY KEY,
+  member_id INT REFERENCES members(id),
+  amount INTEGER NOT NULL,
+  transaction_type VARCHAR(30) NOT NULL,
+  reference VARCHAR(50),
+  wallet_type VARCHAR(30) DEFAULT 'general',
+  created_at TIMESTAMP DEFAULT NOW()
+);
+`;
+
 const MAX_PIN_ATTEMPTS = 5;
 const PIN_LOCKOUT_MINUTES = 30;
 const PIN_HASH_ROUNDS = 10;
@@ -42,6 +55,9 @@ function normalizePhone(input) {
 
 async function init() {
   await pool.query(createTableQuery);
+  
+  // 2026-11-01: Ensure wallet_transactions table exists
+  await pool.query(createWalletTxTableQuery);
 
   await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS imported_reference VARCHAR(30);`);
   await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS pin_hash VARCHAR(255);`);
