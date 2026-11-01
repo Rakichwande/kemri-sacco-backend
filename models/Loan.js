@@ -386,6 +386,9 @@ async function findAllForAdmin() {
        ${REFERENCE_SQL} AS reference,
        m.full_name as member_name, 
        m.phone_number, 
+       m.credit_limit, 
+       m.is_board_staff, 
+       m.wallet_balance,
        ${Member.REFERENCE_SQL} AS member_reference
      FROM loans l
      LEFT JOIN members m ON l.member_id = m.id
@@ -403,6 +406,9 @@ async function findPending() {
        ${REFERENCE_SQL} AS reference,
        m.full_name as member_name, 
        m.phone_number, 
+       m.credit_limit, 
+       m.is_board_staff, 
+       m.wallet_balance,
        ${Member.REFERENCE_SQL} AS member_reference
      FROM loans l
      LEFT JOIN members m ON l.member_id = m.id
