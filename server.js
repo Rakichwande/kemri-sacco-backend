@@ -6,24 +6,6 @@ const bodyParser = require('body-parser');
 
 // ------------------------------------------------------------
 // Last-resort safety net for unhandled promise rejections.
-//
-// The 2026-09-24 crash was a concrete case of this class of bug:
-// smsService.sendSMS threw on a per-recipient delivery failure
-// (UserInBlacklist), a fire-and-forget caller never caught it, and Node
-// killed the entire process - taking USSD and the admin portal offline
-// for every other member because one phone was on Safaricom's DND list.
-//
-// That specific bug is fixed at the source (smsService now returns
-// { sent, reason } instead of throwing). This handler is defence in
-// depth: any future bug of the same shape - an un-awaited promise, a
-// missed .catch(), a third-party library that rejects unexpectedly -
-// logs loudly but keeps the server alive, so a peripheral failure never
-// becomes a systemic outage.
-//
-// Systemic failures (missing config, DB unreachable at boot) still exit
-// cleanly at their point of origin - see config/env.js and the start()
-// try/catch below. This handler is deliberately scoped to the "one
-// thing failed" class, not the "everything is broken" class.
 // ------------------------------------------------------------
 process.on('unhandledRejection', (reason) => {
   console.error('⚠️  Unhandled promise rejection (server staying alive):', reason);
@@ -34,14 +16,7 @@ const Member = require('./models/Member');
 const Payment = require('./models/Payment');
 const Loan = require('./models/Loan');
 const Repayment = require('./models/Repayment');
-// 2026-10-09: Withdrawal feature retired per board instruction.
-// The model import is retained so Withdrawal.init() below still ensures the
-// `withdrawals` table exists (CREATE TABLE IF NOT EXISTS) - the table is
-// kept as an archive of the two historical records. Do not remove this
-// import unless you also remove Withdrawal.init() from start() and accept
-// that a fresh DB deploy will no longer include the archive table.
 const Withdrawal = require('./models/Withdrawal');
-// Add these lines
 const authRoutes = require('./routes/auth');
 const Admin = require('./models/Admin');
 
@@ -61,24 +36,10 @@ const StaffInvite = require('./models/StaffInvite');
 // ============================================================
 const app = express();
 
-// Render's edge sits behind Cloudflare plus an internal LB plus a local
-// proxy - four hops total (confirmed via /debug/ip: socket ::1, XFF =
-// "client, cloudflare, render-lb"). The original `1` walked back only one
-// hop and resolved req.ip to 10.192.163.192 for every client, which made
-// every rate limiter a global (not per-client) counter. `true` takes the
-// leftmost XFF value as the real client, and is safe here because the
-// container is not directly reachable - all inbound traffic goes through
-// Render's edge.
 app.set('trust proxy', true);
 
 const PORT = process.env.PORT || 3000;
 
-// Middleware
-// CORS is restricted to an explicit allowlist rather than the previous bare
-// cors() (which reflected Access-Control-Allow-Origin: * for every origin).
-// ALLOWED_ORIGINS is a comma-separated list set in Render's environment,
-// e.g. "https://kemri-sacco-portal.onrender.com,http://localhost:5173" -
-// add a new origin there (no code change needed) rather than here.
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
   .split(',')
   .map((o) => o.trim())
@@ -86,9 +47,6 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
 
 app.use(cors({
   origin(origin, callback) {
-    // Requests with no Origin header (server-to-server calls, curl, the
-    // Daraja/AT webhooks) are allowed through unconditionally - this check
-    // only governs browser cross-origin requests.
     if (!origin) return callback(null, true);
 
     if (allowedOrigins.includes(origin)) {
@@ -112,34 +70,14 @@ app.use('/api/auth', authRoutes);
 
 // ----- LOAN ROUTES (NEW) -----
 const loanRoutes = require('./routes/loans');
-app.use('/api/loans', loanRoutes);   // <-- Now placed after app is defined
+app.use('/api/loans', loanRoutes);
 app.use('/api/audit-log', auditLogRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/repayments', require('./routes/repayments'));
 app.use('/api/reports', require('./routes/reports'));
 app.use('/api/system-health', require('./routes/systemHealth'));
-
-// ----- LOAN INCOME REPORT (Phase 4, 2026-10-09) -----
-// Per-loan breakdown of principal, expected interest, and amount repaid
-// to date. Powers the admin portal's Loan Income page (sidebar: Loans).
-// Read-only, gated on members:read inside the route file.
 app.use('/api/income', require('./routes/income'));
 
-// ----- WITHDRAWAL ROUTES (RETIRED 2026-10-09) -----
-// Removed per board instruction. The route file `routes/withdrawals.js`
-// and model `models/Withdrawal.js` remain on disk, unmounted, so the code
-// is recoverable if the board ever reinstates the feature. The
-// `withdrawals` table itself is retained as an archive - see the
-// Withdrawal import note above.
-//
-// app.use('/api/withdrawals', require('./routes/withdrawals'));
-
-// ----- INTERNAL ROUTES (scheduled jobs) -----
-// Called by GitHub Actions, not by users. Auth is a shared-secret header
-// (X-Reminder-Secret) instead of a JWT because the caller is a scheduled
-// job with no user account. Mounted under /internal to keep it visually
-// and semantically separate from the /api namespace that the portal and
-// USSD callers use.
 app.use('/internal', require('./routes/internal'));
 
 // Health check
@@ -151,29 +89,20 @@ app.use(errorHandler);
 async function start() {
   try {
     // Creates tables if they don't exist yet
+    // 2026-11-01: Re-ordered initialization so core tables (Admins, Members) 
+    // are created BEFORE dependent tables (Withdrawal, AuditLog).
+    await Admin.init();
     await Member.init();
+    await AuditLog.init();
+    
     await Loan.init();
     await Payment.init();
     await Repayment.init();
-    // 2026-10-09: Withdrawal.init() is deliberately retained even though
-    // the feature is retired. It runs CREATE TABLE IF NOT EXISTS - a no-op
-    // on the live DB (table already exists), but it ensures a fresh deploy
-    // against a new database still provisions the archive table so
-    // historical records have a home. Remove this line only if you are
-    // also dropping the archive.
     await Withdrawal.init();
+    
     await UssdSession.init();
     await StaffInvite.init();
-    await Admin.init();
-    await AuditLog.init();
 
-    // Capture the server instance so listen-time errors (EADDRINUSE during
-    // a rolling deploy, EACCES if the port is privileged, etc.) can be
-    // logged with a clear message instead of crashing as an unhandled
-    // 'error' event. EADDRINUSE during a Render deploy is expected and
-    // benign - the old instance may still be shutting down - so this logs
-    // and exits cleanly for Render to reconcile, rather than throwing a
-    // stack trace that reads like an application bug.
     const server = app.listen(PORT, () => {
       console.log(`KEMRI SACCO backend running on port ${PORT}`);
     });
