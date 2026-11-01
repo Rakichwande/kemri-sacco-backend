@@ -267,13 +267,32 @@ async function update(id, updates) {
 }
 
 async function setBoardStaffStatus(memberId, isBoardStaff) {
-  const result = await pool.query(`UPDATE members SET is_board_staff = $1 WHERE id = $2 RETURNING id, full_name, imported_reference, is_board_staff`, [!!isBoardStaff, memberId]);
+  // 2026-11-01: Promote -> 10,000. Revoke -> 5,000. (CEO can adjust manually after).
+  const newLimit = isBoardStaff ? 10000 : 5000;
+
+  const result = await pool.query(
+    `UPDATE members 
+     SET is_board_staff = $1,
+         credit_limit = $2
+     WHERE id = $3 
+     RETURNING id, full_name, imported_reference, is_board_staff, credit_limit`,
+    [!!isBoardStaff, newLimit, memberId]
+  );
   return result.rows[0] || null;
 }
 
 async function setBoardStaffByReferences(references, isBoardStaff = true) {
   if (!Array.isArray(references) || references.length === 0) return [];
-  const result = await pool.query(`UPDATE members SET is_board_staff = $1 WHERE imported_reference = ANY($2::text[]) RETURNING id, full_name, imported_reference, is_board_staff`, [!!isBoardStaff, references.map(String)]);
+  const newLimit = isBoardStaff ? 10000 : 5000;
+
+  const result = await pool.query(
+    `UPDATE members 
+     SET is_board_staff = $1,
+         credit_limit = $2
+     WHERE imported_reference = ANY($3::text[]) 
+     RETURNING id, full_name, imported_reference, is_board_staff, credit_limit`, 
+    [!!isBoardStaff, newLimit, references.map(String)]
+  );
   return result.rows;
 }
 
