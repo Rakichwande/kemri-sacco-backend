@@ -75,4 +75,8 @@ router.post('/:loanId/resolve-disbursement', authenticate, requirePermission('lo
 router.get('/admin/list', authenticate, requirePermission('loans:read'), loanController.getAdminLoans);
 router.get('/admin/pending', authenticate, requirePermission('loans:read'), loanController.getPendingLoans);
 
+// 2026-11-02: NEW ROUTE - Loan Timeline Report
+// Must be placed ABOVE any generic /:id routes if they are ever added.
+router.get('/timeline', authenticate, requirePermission('loans:read'), loanController.getLoanTimeline);
+
 module.exports = router;
