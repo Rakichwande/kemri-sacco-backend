@@ -229,7 +229,7 @@ async function handleRegister(phoneNumber, steps) {
 }
 
 // ============================================================
-// 2. MY WALLET (M-Shwari Style)
+// 2. MY WALLET (Separated Wallets: General, Emergency, School)
 // ============================================================
 async function handleWallet(phoneNumber, steps, sessionId) {
   const member = await Member.findByPhone(phoneNumber);
@@ -242,49 +242,80 @@ async function handleWallet(phoneNumber, steps, sessionId) {
   const remaining = pinCheck.remainingSteps;
 
   const currentMember = await Member.findById(member.id);
-  const walletBalance = Number(currentMember.wallet_balance || 0);
+  const balances = {
+    general: Number(currentMember.wallet_balance || 0),
+    emergency: Number(currentMember.wallet_balance_emergency || 0),
+    school: Number(currentMember.wallet_balance_school || 0),
+  };
   const savingsBalance = await Payment.getMemberBalance(member.id);
 
+  // Determine which wallets have money in them right now
+  const activeWallets = [];
+  if (balances.emergency > 0) activeWallets.push({ type: 'emergency', name: 'Emergency', bal: balances.emergency });
+  if (balances.school > 0) activeWallets.push({ type: 'school', name: 'School', bal: balances.school });
+  if (balances.general > 0) activeWallets.push({ type: 'general', name: 'General', bal: balances.general });
+
+  const totalBalance = balances.emergency + balances.school + balances.general;
+
+  // Q2 Option A: If total is 0, just show savings and end.
+  if (totalBalance <= 0) {
+    return `END My Account\nSavings: KES ${savingsBalance.toLocaleString()}\nNo active wallet funds.\nThank you for using KEMRI SACCO.`;
+  }
+
+  // Step 1: Show overall wallet summary
   if (remaining.length === 0) {
-    return `CON My Wallet\n` +
-           `Wallet: KES ${walletBalance.toLocaleString()}\n` +
-           `Savings: KES ${savingsBalance.toLocaleString()}\n` +
-           `1. Withdraw Wallet to M-Pesa\n` +
-           `2. Back`;
+    let menu = `CON My Wallet\n`;
+    activeWallets.forEach(w => {
+      menu += `${w.name}: KES ${w.bal.toLocaleString()}\n`;
+    });
+    menu += `Savings: KES ${savingsBalance.toLocaleString()}\n`;
+    menu += `1. Withdraw Wallet to M-Pesa\n`;
+    menu += `2. Back`;
+    return menu;
   }
 
+  // Step 2: User chose to withdraw, ask them WHICH wallet
   if (remaining.length === 1) {
-    const choice = remaining[0];
-    if (choice === '1') {
-      if (walletBalance <= 0) {
-        return 'END You have no funds in your wallet to withdraw.';
-      }
-      return `CON Enter amount to withdraw (Max KES ${walletBalance.toLocaleString()}):`;
+    if (remaining[0] === '1') {
+      let menu = 'CON Select wallet to withdraw from:\n';
+      activeWallets.forEach((w, idx) => {
+        menu += `${idx + 1}. ${w.name} (KES ${w.bal.toLocaleString()})\n`;
+      });
+      menu += '0. Cancel';
+      return menu;
     }
-    if (choice === '2') {
-      return 'END Thank you for using KEMRI SACCO.';
-    }
-    return 'END Invalid choice.';
+    return 'END Thank you for using KEMRI SACCO.';
   }
 
+  // Step 3: User selected a wallet, ask for amount
   if (remaining.length === 2) {
-    const amount = Number(remaining[1]);
+    const selection = Number(remaining[1]);
+    if (selection === 0) return 'END Cancelled.';
+    if (selection < 1 || selection > activeWallets.length) return 'END Invalid selection.';
     
-    if (!amount || amount <= 0) {
-      return 'END Invalid amount. Please dial again.';
-    }
-    if (amount > walletBalance) {
-      return `END Insufficient wallet funds. Your balance is KES ${walletBalance.toLocaleString()}.`;
-    }
+    const selectedWallet = activeWallets[selection - 1];
+    return `CON Enter amount to withdraw (Max KES ${selectedWallet.bal.toLocaleString()}):`;
+  }
+
+  // Step 4: Process the withdrawal
+  if (remaining.length === 3) {
+    const selection = Number(remaining[1]);
+    const amount = Number(remaining[2]);
+    if (selection < 1 || selection > activeWallets.length) return 'END Invalid selection.';
+    
+    const selectedWallet = activeWallets[selection - 1];
+
+    if (!amount || amount <= 0) return 'END Invalid amount. Please dial again.';
+    if (amount > selectedWallet.bal) return `END Insufficient funds. Your ${selectedWallet.name} balance is KES ${selectedWallet.bal.toLocaleString()}.`;
 
     try {
-      // 2026-10-31: Updated to get uniqueRef from debitWallet
-      const debitResult = await Member.debitWallet(member.id, amount, 'withdrawal', null);
+      // 2026-11-01: Debit the specific wallet
+      const debitResult = await Member.debitWallet(member.id, amount, 'withdrawal', null, selectedWallet.type);
       const newBalance = debitResult.wallet_balance;
       const uniqueRef = debitResult.reference;
 
       const DisbursementService = require('../services/disbursementService');
-      await DisbursementService.disburseWalletToMpesa(member, amount, uniqueRef);
+      await DisbursementService.disburseWalletToMpesa(member, amount, uniqueRef, selectedWallet.type);
 
       try {
         await smsService.sendSMS(
@@ -295,15 +326,16 @@ async function handleWallet(phoneNumber, steps, sessionId) {
         console.error('Withdrawal SMS failed:', smsErr.message);
       }
 
-      return `END KES ${amount.toLocaleString()} sent to M-Pesa.\nNew Wallet Balance: KES ${Number(newBalance).toLocaleString()}`;
+      return `END KES ${amount.toLocaleString()} sent to M-Pesa.\nNew ${selectedWallet.name} Balance: KES ${Number(newBalance).toLocaleString()}`;
     } catch (err) {
       console.error('Wallet withdrawal failed:', err.message);
       try {
-        await Member.creditWallet(member.id, amount, 'withdrawal_refund', 'B2C Failed');
+        // 2026-11-01: Refund the specific wallet
+        await Member.creditWallet(member.id, amount, 'withdrawal_refund', 'B2C Failed', selectedWallet.type);
       } catch (refundErr) {
         console.error('Failed to refund wallet after B2C failure:', refundErr.message);
       }
-      return 'END We could not process your withdrawal right now. Your funds have been returned to your wallet.';
+      return 'END Withdrawal failed. Your funds have been returned to your wallet.';
     }
   }
 

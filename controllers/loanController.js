@@ -208,9 +208,14 @@ exports.markDisbursed = async (req, res) => {
                 return res.status(404).json({ error: 'Loan not found or not in approved state.' });
             }
 
-            // 2. Credit the member's wallet
+            // 2. Determine which wallet to credit based on purpose
+            let walletType = 'general';
+            if (loan.purpose === 'emergency') walletType = 'emergency';
+            if (loan.purpose === 'school') walletType = 'school';
+
+            // 3. Credit the member's specific wallet
             const ref = `LN-${String(loan.id).padStart(5, '0')}`;
-            await Member.creditWallet(loan.member_id, loan.principal, 'loan_credit', ref, client);
+            await Member.creditWallet(loan.member_id, loan.principal, 'loan_credit', ref, walletType, client);
             
             await client.query('COMMIT');
         } catch (dbErr) {
@@ -243,7 +248,7 @@ exports.markDisbursed = async (req, res) => {
                     loan.total_repayment,
                     today,
                     ref,
-                    loan.purpose // <--- Added this
+                    loan.purpose
                 )
             );
         } catch (smsErr) {
@@ -257,7 +262,7 @@ exports.markDisbursed = async (req, res) => {
                     member.full_name,
                     loan.principal,
                     ref,
-                    loan.purpose // <--- Added this
+                    loan.purpose
                 ),
                 emailContent: null,
             });
@@ -273,12 +278,12 @@ exports.markDisbursed = async (req, res) => {
             targetType: 'loan',
             targetId: loanId,
             targetLabel: `${member.full_name} (loan #${loanId})`,
-            details: `Credited KES ${loan.principal} to SACCO Wallet for ${member.full_name}.`,
+            details: `Credited KES ${loan.principal} to ${loan.purpose} SACCO Wallet for ${member.full_name}.`,
         });
 
         res.json({
             success: true,
-            message: 'Loan credited to member SACCO Wallet. SMS sent to member.',
+            message: `Loan credited to member's ${loan.purpose} Wallet. SMS sent to member.`,
             loan,
         });
     } catch (err) {
@@ -411,7 +416,7 @@ exports.resolveStuckDisbursement = async (req, res) => {
                         loan.principal,
                         updatedMember?.total_outstanding_balance || loan.total_repayment,
                         dueDateFormatted,
-                        loan.reference // <--- Added this
+                        loan.reference
                     )
                 );
             } catch (err) {

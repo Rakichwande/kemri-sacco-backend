@@ -13,8 +13,7 @@ CREATE TABLE IF NOT EXISTS members (
   employer VARCHAR(150),
   scheme VARCHAR(100) DEFAULT 'holiday_savings',
   status VARCHAR(20) DEFAULT 'active',
-  -- 2026-10-31: Changed default from 10000 to 0. New members must be explicitly approved by admin.
-  credit_limit INTEGER DEFAULT 0, 
+  credit_limit INTEGER DEFAULT 0,
   total_outstanding_balance INTEGER DEFAULT 0,
   successful_repayments INTEGER DEFAULT 0,
   wallet_balance INTEGER DEFAULT 0,
@@ -50,7 +49,10 @@ async function init() {
   await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS pin_locked_until TIMESTAMP;`);
   await pool.query(`ALTER TABLE members ALTER COLUMN phone_number DROP NOT NULL;`);
   await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS is_board_staff BOOLEAN NOT NULL DEFAULT FALSE;`);
-  await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS wallet_balance INTEGER DEFAULT 0;`);
+  
+  // 2026-11-01: NEW WALLET COLUMNS
+  await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS wallet_balance_emergency INTEGER DEFAULT 0;`);
+  await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS wallet_balance_school INTEGER DEFAULT 0;`);
   
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_members_board_staff ON members (id) WHERE is_board_staff;`);
   await pool.query(`CREATE SEQUENCE IF NOT EXISTS sacco_member_reference_seq;`);
@@ -83,18 +85,8 @@ async function create(member) {
              COALESCE($12, NOW())) 
      RETURNING *`,
     [
-      full_name,
-      id_number,
-      phone_number,
-      nationality || null,
-      age || null,
-      employer || null,
-      scheme || 'holiday_savings',
-      0, // 2026-10-31: CRITICAL FIX. Changed from 10000 to 0. New members start with no loan eligibility.
-      0,
-      0,
-      imported_reference || null,
-      created_at || null,
+      full_name, id_number, phone_number, nationality || null, age || null, employer || null, scheme || 'holiday_savings',
+      0, 0, 0, imported_reference || null, created_at || null,
     ]
   );
   return result.rows[0];
@@ -103,9 +95,7 @@ async function create(member) {
 async function findByPhone(phone_number) {
   if (!phone_number) return null;
   const normalized = normalizePhone(phone_number);
-  if (!normalized) {
-    return null;
-  }
+  if (!normalized) return null;
   const local = normalized.slice(4);
   const variants = [normalized, `0${local}`, `254${local}`, local];
 
@@ -211,10 +201,7 @@ async function bulkImport(rows) {
     if (phoneRaw) {
       const normalized = normalizePhone(phoneRaw);
       if (!normalized) {
-        results.skipped.push({
-          row: rowNum,
-          reason: `phone "${phoneRaw}" is not a valid Kenyan number`,
-        });
+        results.skipped.push({ row: rowNum, reason: `phone "${phoneRaw}" is not a valid Kenyan number` });
         continue;
       }
       phone_number = normalized;
@@ -223,47 +210,25 @@ async function bulkImport(rows) {
     try {
       const existing = await findByPhoneOrId(phone_number, id_number);
       if (existing) {
-        results.skipped.push({
-          row: rowNum,
-          reason: `Already exists as "${existing.full_name}" (matched on ${
-            existing.id_number === id_number ? 'national ID' : 'phone number'
-          })`,
-        });
+        results.skipped.push({ row: rowNum, reason: `Already exists as "${existing.full_name}"` });
         continue;
       }
 
-      await create({
-        full_name,
-        id_number,
-        phone_number,
-        employer,
-        imported_reference: reference,
-        created_at: joinDate,
-      });
+      await create({ full_name, id_number, phone_number, employer, imported_reference: reference, created_at: joinDate });
       results.created++;
     } catch (err) {
-      results.skipped.push({
-        row: rowNum,
-        reason: err.code === '23505' ? 'Duplicate ID, phone, or reference number' : (err.message || 'Save failed'),
-      });
+      results.skipped.push({ row: rowNum, reason: err.code === '23505' ? 'Duplicate ID/phone' : (err.message || 'Save failed') });
     }
   }
-
   return results;
 }
 
 async function findByPhoneOrId(phone_number, id_number) {
   if (phone_number) {
-    const result = await pool.query(
-      'SELECT * FROM members WHERE phone_number = $1 OR id_number = $2 LIMIT 1',
-      [phone_number, id_number]
-    );
+    const result = await pool.query('SELECT * FROM members WHERE phone_number = $1 OR id_number = $2 LIMIT 1', [phone_number, id_number]);
     return result.rows[0];
   }
-  const result = await pool.query(
-    'SELECT * FROM members WHERE id_number = $1 LIMIT 1',
-    [id_number]
-  );
+  const result = await pool.query('SELECT * FROM members WHERE id_number = $1 LIMIT 1', [id_number]);
   return result.rows[0];
 }
 
@@ -275,156 +240,110 @@ async function findAll() {
 const REFERENCE_SQL = `COALESCE(m.imported_reference, 'KEMRI-' || EXTRACT(YEAR FROM m.created_at)::text || '-' || LPAD(m.id::text, 4, '0'))`;
 
 async function findById(id) {
-  const result = await pool.query(
-    `SELECT m.*, ${REFERENCE_SQL} AS reference FROM members m WHERE m.id = $1`,
-    [id]
-  );
+  const result = await pool.query(`SELECT m.*, ${REFERENCE_SQL} AS reference FROM members m WHERE m.id = $1`, [id]);
   return result.rows[0];
 }
 
 async function findAllForDirectory() {
   const result = await pool.query(`
-    SELECT
-      m.*,
-      ${REFERENCE_SQL} AS reference,
+    SELECT m.*, ${REFERENCE_SQL} AS reference,
       COALESCE(sav.balance, 0) AS savings_balance,
       loan.status AS current_loan_status
     FROM members m
-    LEFT JOIN LATERAL (
-      SELECT SUM(amount) AS balance
-      FROM payments p
-      WHERE p.member_id = m.id AND p.status = 'completed' AND p.loan_id IS NULL
-    ) sav ON true
-    LEFT JOIN LATERAL (
-      SELECT status
-      FROM loans l
-      WHERE l.member_id = m.id AND l.status IN ('pending', 'approved', 'disbursing', 'disbursed')
-      ORDER BY l.applied_at DESC
-      LIMIT 1
-    ) loan ON true
+    LEFT JOIN LATERAL (SELECT SUM(amount) AS balance FROM payments p WHERE p.member_id = m.id AND p.status = 'completed' AND p.loan_id IS NULL) sav ON true
+    LEFT JOIN LATERAL (SELECT status FROM loans l WHERE l.member_id = m.id AND l.status IN ('pending', 'approved', 'disbursing', 'disbursed') ORDER BY l.applied_at DESC LIMIT 1) loan ON true
     ORDER BY m.created_at DESC
   `);
   return result.rows;
 }
 
 async function update(id, updates) {
-  if ('is_board_staff' in updates) {
-    throw new Error('is_board_staff must be changed via setBoardStaffStatus(), not update()');
-  }
-
+  if ('is_board_staff' in updates) throw new Error('is_board_staff must be changed via setBoardStaffStatus()');
   const keys = Object.keys(updates);
   const setClause = keys.map((key, i) => `${key} = $${i + 2}`).join(', ');
   const values = keys.map((key) => updates[key]);
-  const result = await pool.query(
-    `UPDATE members SET ${setClause} WHERE id = $1 RETURNING *`,
-    [id, ...values]
-  );
+  const result = await pool.query(`UPDATE members SET ${setClause} WHERE id = $1 RETURNING *`, [id, ...values]);
   return result.rows[0];
 }
 
 async function setBoardStaffStatus(memberId, isBoardStaff) {
-  const result = await pool.query(
-    `UPDATE members
-     SET is_board_staff = $1
-     WHERE id = $2
-     RETURNING id, full_name, imported_reference, is_board_staff`,
-    [!!isBoardStaff, memberId]
-  );
+  const result = await pool.query(`UPDATE members SET is_board_staff = $1 WHERE id = $2 RETURNING id, full_name, imported_reference, is_board_staff`, [!!isBoardStaff, memberId]);
   return result.rows[0] || null;
 }
 
 async function setBoardStaffByReferences(references, isBoardStaff = true) {
   if (!Array.isArray(references) || references.length === 0) return [];
-  const result = await pool.query(
-    `UPDATE members
-     SET is_board_staff = $1
-     WHERE imported_reference = ANY($2::text[])
-     RETURNING id, full_name, imported_reference, is_board_staff`,
-    [!!isBoardStaff, references.map(String)]
-  );
+  const result = await pool.query(`UPDATE members SET is_board_staff = $1 WHERE imported_reference = ANY($2::text[]) RETURNING id, full_name, imported_reference, is_board_staff`, [!!isBoardStaff, references.map(String)]);
   return result.rows;
 }
 
 async function isBoardStaff(memberId) {
-  const result = await pool.query(
-    'SELECT is_board_staff FROM members WHERE id = $1',
-    [memberId]
-  );
+  const result = await pool.query('SELECT is_board_staff FROM members WHERE id = $1', [memberId]);
   return result.rows[0]?.is_board_staff === true;
 }
 
-// --- Wallet Operations (2026-10-23) ---
+// --- Wallet Operations (2026-11-01 Separated Wallets) ---
 
-async function creditWallet(memberId, amount, type, reference, client = null) {
+const VALID_WALLETS = {
+  general: 'wallet_balance',
+  emergency: 'wallet_balance_emergency',
+  school: 'wallet_balance_school'
+};
+
+async function creditWallet(memberId, amount, type, reference, walletType = 'general', client = null) {
   const dbClient = client || pool;
+  const col = VALID_WALLETS[walletType] || VALID_WALLETS.general;
   
-  // 1. Add to balance (Cast to Number and round to prevent NUMERIC -> INTEGER error)
   await dbClient.query(
-    `UPDATE members SET wallet_balance = wallet_balance + $1 WHERE id = $2`,
+    `UPDATE members SET ${col} = ${col} + $1 WHERE id = $2`,
     [Math.round(Number(amount)), memberId]
   );
   
-  // 2. Log the transaction
   await dbClient.query(
-    `INSERT INTO wallet_transactions (member_id, amount, transaction_type, reference) 
-     VALUES ($1, $2, $3, $4)`,
-    [memberId, Math.round(Number(amount)), type, reference]
+    `INSERT INTO wallet_transactions (member_id, amount, transaction_type, reference, wallet_type) 
+     VALUES ($1, $2, $3, $4, $5)`,
+    [memberId, Math.round(Number(amount)), type, reference, walletType]
   );
 }
 
-async function debitWallet(memberId, amount, type, reference, client = null) {
+async function debitWallet(memberId, amount, type, reference, walletType = 'general', client = null) {
   const dbClient = client || pool;
+  const col = VALID_WALLETS[walletType] || VALID_WALLETS.general;
   const amt = Math.round(Number(amount));
   
-  // 1. Deduct from balance (Only if they have enough)
   const res = await dbClient.query(
-    `UPDATE members SET wallet_balance = wallet_balance - $1 
-     WHERE id = $2 AND wallet_balance >= $1 RETURNING wallet_balance`,
+    `UPDATE members SET ${col} = ${col} - $1 
+     WHERE id = $2 AND ${col} >= $1 RETURNING ${col} AS new_balance`,
     [amt, memberId]
   );
   
-  if (res.rows.length === 0) {
-    throw new Error('Insufficient wallet balance');
-  }
+  if (res.rows.length === 0) throw new Error(`Insufficient ${walletType} wallet balance`);
   
-  // 2026-10-31: Generate a unique reference so we can track the B2C callback
   const ref = reference || `WD-${Date.now()}-${memberId}`;
 
-  // 2. Log the transaction (as a negative amount)
   await dbClient.query(
-    `INSERT INTO wallet_transactions (member_id, amount, transaction_type, reference) 
-     VALUES ($1, $2, $3, $4)`,
-    [memberId, -amt, type, ref]
+    `INSERT INTO wallet_transactions (member_id, amount, transaction_type, reference, wallet_type) 
+     VALUES ($1, $2, $3, $4, $5)`,
+    [memberId, -amt, type, ref, walletType]
   );
 
-  // 3. Return the new balance AND the reference so the caller can use it
-  return { wallet_balance: res.rows[0].wallet_balance, reference: ref };
+  return { wallet_balance: res.rows[0].new_balance, reference: ref };
 }
 
 async function remove(memberId) {
   const client = await pool.pool.connect();
   try {
     await client.query('BEGIN');
-
-    const memberRes = await client.query(
-      'SELECT id, full_name, imported_reference FROM members WHERE id = $1 FOR UPDATE',
-      [memberId]
-    );
-    if (memberRes.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return null;
-    }
+    const memberRes = await client.query('SELECT id, full_name, imported_reference FROM members WHERE id = $1 FOR UPDATE', [memberId]);
+    if (memberRes.rows.length === 0) { await client.query('ROLLBACK'); return null; }
     const member = memberRes.rows[0];
 
     const histRes = await client.query(
       `SELECT
-         (SELECT COUNT(*) FROM payments    WHERE member_id = $1
-            AND status = 'completed') AS payments,
-         (SELECT COUNT(*) FROM loans       WHERE member_id = $1
-            AND status IN ('disbursing', 'disbursed', 'repaid')) AS loans,
+         (SELECT COUNT(*) FROM payments    WHERE member_id = $1 AND status = 'completed') AS payments,
+         (SELECT COUNT(*) FROM loans       WHERE member_id = $1 AND status IN ('disbursing', 'disbursed', 'repaid')) AS loans,
          (SELECT COUNT(*) FROM repayments  WHERE member_id = $1) AS repayments,
-         (SELECT COUNT(*) FROM withdrawals WHERE member_id = $1
-            AND status IN ('disbursing', 'processed')) AS withdrawals`,
+         (SELECT COUNT(*) FROM withdrawals WHERE member_id = $1 AND status IN ('disbursing', 'processed')) AS withdrawals`,
       [memberId]
     );
 
@@ -433,59 +352,20 @@ async function remove(memberId) {
 
     if (total > 0) {
       await client.query('ROLLBACK');
-
-      const parts = Object.entries(counts)
-        .filter(([, n]) => Number(n) > 0)
-        .map(([table, n]) => `${n} ${Number(n) === 1 ? table.replace(/s$/, '') : table}`)
-        .join(', ');
-
-      return {
-        deleted: false,
-        code: 'HAS_HISTORY',
-        message: `This member has financial history (${parts}) and cannot be deleted. Their record must be retained for audit and financial accuracy.`,
-        counts,
-      };
+      const parts = Object.entries(counts).filter(([, n]) => Number(n) > 0).map(([table, n]) => `${n} ${Number(n) === 1 ? table.replace(/s$/, '') : table}`).join(', ');
+      return { deleted: false, code: 'HAS_HISTORY', message: `This member has financial history (${parts}) and cannot be deleted.`, counts };
     }
 
-    const removedLoansRes = await client.query(
-      `DELETE FROM loans WHERE member_id = $1 AND status IN ('pending', 'rejected')
-       RETURNING id, status`,
-      [memberId]
-    );
-
-    const removedPaymentsRes = await client.query(
-      `DELETE FROM payments WHERE member_id = $1 AND status IN ('pending', 'failed')
-       RETURNING id, status`,
-      [memberId]
-    );
-
-    const removedWithdrawalsRes = await client.query(
-      `DELETE FROM withdrawals WHERE member_id = $1 AND status IN ('pending', 'rejected')
-       RETURNING id, status`,
-      [memberId]
-    );
-
+    await client.query(`DELETE FROM loans WHERE member_id = $1 AND status IN ('pending', 'rejected')`, [memberId]);
+    await client.query(`DELETE FROM payments WHERE member_id = $1 AND status IN ('pending', 'failed')`, [memberId]);
+    await client.query(`DELETE FROM withdrawals WHERE member_id = $1 AND status IN ('pending', 'rejected')`, [memberId]);
     await client.query('DELETE FROM members WHERE id = $1', [memberId]);
     await client.query('COMMIT');
 
-    return {
-      deleted: true,
-      member,
-      removedLoans: removedLoansRes.rows,
-      removedPayments: removedPaymentsRes.rows,
-      removedWithdrawals: removedWithdrawalsRes.rows,
-    };
+    return { deleted: true, member };
   } catch (err) {
     await client.query('ROLLBACK');
-
-    if (err.code === '23503') {
-      return {
-        deleted: false,
-        code: 'HAS_HISTORY',
-        message: 'This member has related records and cannot be deleted. Their record must be retained for audit and financial accuracy.',
-      };
-    }
-
+    if (err.code === '23503') return { deleted: false, code: 'HAS_HISTORY', message: 'This member has related records and cannot be deleted.' };
     throw err;
   } finally {
     client.release();
@@ -493,28 +373,8 @@ async function remove(memberId) {
 }
 
 module.exports = {
-  init,
-  create,
-  findByPhone,
-  findById,
-  findByPhoneOrId,
-  findAll,
-  findAllForDirectory,
-  update,
-  REFERENCE_SQL,
-  bulkImport,
-  normalizePhone,
-  toTitleCase,
-  hasPinSet,
-  setPin,
-  isPinLocked,
-  verifyPin,
-  recordFailedPinAttempt,
-  resetPinAttempts,
-  setBoardStaffStatus,
-  setBoardStaffByReferences,
-  isBoardStaff,
-  creditWallet,
-  debitWallet,
-  remove,
+  init, create, findByPhone, findById, findByPhoneOrId, findAll, findAllForDirectory,
+  update, REFERENCE_SQL, bulkImport, normalizePhone, toTitleCase, hasPinSet, setPin,
+  isPinLocked, verifyPin, recordFailedPinAttempt, resetPinAttempts, setBoardStaffStatus,
+  setBoardStaffByReferences, isBoardStaff, creditWallet, debitWallet, remove,
 };

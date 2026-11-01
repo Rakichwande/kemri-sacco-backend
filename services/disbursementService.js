@@ -51,7 +51,8 @@ class DisbursementService {
     return { success: true, loan: updated, conversationId: response.ConversationID, message: 'Disbursement initiated.' };
   }
 
-  static async disburseWalletToMpesa(member, amount, reference) {
+  // 2026-11-01: Added walletType parameter
+  static async disburseWalletToMpesa(member, amount, reference, walletType = 'general') {
     if (!darajaB2CService.isConfigured()) {
       throw new Error('B2C is not configured. Wallet withdrawals are temporarily unavailable.');
     }
@@ -120,7 +121,9 @@ class DisbursementService {
       console.error(`B2C Wallet withdrawal failed for member ${tx.member_id}. Refunding KES ${Math.abs(tx.amount)}.`);
       
       try {
-        await Member.creditWallet(tx.member_id, Math.abs(tx.amount), 'withdrawal_refund', 'B2C Failed');
+        // 2026-11-01: Refund to the specific wallet type
+        const refundType = tx.wallet_type || 'general';
+        await Member.creditWallet(tx.member_id, Math.abs(tx.amount), 'withdrawal_refund', 'B2C Failed', refundType);
         
         // Update the original failed transaction so it doesn't show as a pending withdrawal
         await db.query(`UPDATE wallet_transactions SET transaction_type = 'withdrawal_failed' WHERE id = $1`, [tx.id]);
@@ -128,7 +131,7 @@ class DisbursementService {
         if (member) {
           await smsService.sendSMS(
             member.phone_number,
-            `KEMRI SACCO: Hi ${member.full_name.split(' ')[0]}, your wallet withdrawal of KES ${Math.abs(tx.amount)} failed. The funds have been returned to your SACCO Wallet.`
+            `KEMRI SACCO: Hi ${member.full_name.split(' ')[0]}, your ${refundType.toUpperCase()} wallet withdrawal of KES ${Math.abs(tx.amount)} failed. The funds have been returned to your ${refundType.toUpperCase()} wallet.`
           );
         }
       } catch (err) {
@@ -188,7 +191,6 @@ class DisbursementService {
         : '—';
 
       try {
-        // 2026-10-31: Added loan.reference
         await smsService.sendSMS(
           member.phone_number,
           smsService.templates.loanDisbursed(member.full_name, loan.principal, amountOutstanding, dueDateFormatted, loan.reference)
@@ -230,7 +232,9 @@ class DisbursementService {
     );
     if (walletTxRes.rows.length > 0) {
        const tx = walletTxRes.rows[0];
-       await Member.creditWallet(tx.member_id, Math.abs(tx.amount), 'withdrawal_refund', 'B2C Timeout');
+       // 2026-11-01: Refund to the specific wallet type
+       const refundType = tx.wallet_type || 'general';
+       await Member.creditWallet(tx.member_id, Math.abs(tx.amount), 'withdrawal_refund', 'B2C Timeout', refundType);
        await db.query(`UPDATE wallet_transactions SET transaction_type = 'withdrawal_failed' WHERE id = $1`, [tx.id]);
        return { handled: true, failed: true, reason: 'Timeout' };
     }
