@@ -298,6 +298,25 @@ exports.markDisbursed = async (req, res) => {
 exports.disburseLoan = async (req, res) => {
     try {
         const { loanId } = req.params;
+        
+        // 2026-11-02: PRE-FLIGHT CHECK
+        // Block disbursement if the member's limit was lowered AFTER the loan was approved.
+        const loanCheck = await Loan.findById(loanId);
+        if (!loanCheck) return res.status(404).json({ error: 'Loan not found' });
+        
+        const memberCheck = await Member.findById(loanCheck.member_id);
+        if (!memberCheck) return res.status(404).json({ error: 'Member not found' });
+
+        const currentLimit = Number(memberCheck.credit_limit || 0);
+        const loanAmount = Number(loanCheck.principal);
+
+        if (loanAmount > currentLimit) {
+            return res.status(400).json({ 
+                error: `ACTION BLOCKED: Member's limit is KES ${currentLimit.toLocaleString()}. This loan is KES ${loanAmount.toLocaleString()}. Update their limit first.` 
+            });
+        }
+
+        // Call the service
         const result = await DisbursementService.disburseLoan(loanId);
 
         if (!result.success) {

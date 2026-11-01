@@ -18,6 +18,20 @@ class DisbursementService {
 
     const member = await Member.findById(loan.member_id);
     if (!member) return { success: false, message: 'Member not found.' };
+
+    // 2026-11-02: CRITICAL SECURITY FIX
+    // Ensure the loan principal does not exceed the member's CURRENT credit limit.
+    // This prevents loans approved before a limit downgrade from being disbursed.
+    const currentLimit = Number(member.credit_limit || 0);
+    const loanAmount = Number(loan.principal);
+    
+    if (loanAmount > currentLimit) {
+      return { 
+        success: false, 
+        message: `ACTION BLOCKED: Member's current credit limit is KES ${currentLimit.toLocaleString()}. This loan is KES ${loanAmount.toLocaleString()}. You must increase their limit or reject the loan.` 
+      };
+    }
+
     if (!member.phone_number) {
       return { success: false, message: 'Member has no phone number on file. Disburse manually and record the M-Pesa receipt.' };
     }
