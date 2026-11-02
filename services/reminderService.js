@@ -1,4 +1,5 @@
 const Loan = require('../models/Loan');
+const Member = require('../models/Member'); // <--- ADDED for the new unlock reminder
 const smsService = require('./smsService');
 
 // Daily reminder orchestrator. Called by GitHub Actions once a day at
@@ -111,6 +112,47 @@ class ReminderService {
 
     return summary;
   }
+
+  // ============================================================
+  // 2026-11-02: SUGGESTION 1 - 7-Day Savings Unlock Reminder
+  // ============================================================
+  static async runSavingsUnlockReminders(dryRun = false) {
+    const upcoming = await Member.getUpcomingUnlocks();
+    let sentCount = 0;
+
+    for (const member of upcoming) {
+      try {
+        if (Number(member.jipange_balance) > 0) {
+          const date = new Date(member.jipange_unlock_date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+          const msg = smsService.templates.savingsUnlockReminder(member.full_name, 'jipange', member.jipange_balance, date);
+          
+          if (dryRun) {
+            console.log(`[DRY RUN] SMS to ${member.phone_number}: ${msg}`);
+          } else {
+            await smsService.sendSMS(member.phone_number, msg);
+          }
+          sentCount++;
+        }
+
+        if (Number(member.holiday_balance) > 0) {
+          const date = new Date(member.holiday_unlock_date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+          const msg = smsService.templates.savingsUnlockReminder(member.full_name, 'holiday', member.holiday_balance, date);
+          
+          if (dryRun) {
+            console.log(`[DRY RUN] SMS to ${member.phone_number}: ${msg}`);
+          } else {
+            await smsService.sendSMS(member.phone_number, msg);
+          }
+          sentCount++;
+        }
+      } catch (err) {
+        console.error(`Failed to send unlock reminder to ${member.full_name}:`, err.message);
+      }
+    }
+    
+    return { totalUnlocks: upcoming.length, smsSent: sentCount };
+  }
+  // ============================================================
 
   static computeStatus(loan, today) {
     const disbursed = new Date(loan.disbursed_at);

@@ -1,4 +1,4 @@
-name: Loan Reminders
+name: Loan and Savings Reminders
 
 # Runs once a day at 09:00 East Africa Time (06:00 UTC).
 #
@@ -20,7 +20,10 @@ jobs:
   run-reminders:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger daily reminder job
+      # ────────────────────────────────────────────────────────────
+      # 1. DAILY LOAN REMINDERS
+      # ────────────────────────────────────────────────────────────
+      - name: Trigger daily loan reminder job
         run: |
           response=$(curl -sS -X POST \
             https://kemri-sacco-backend.onrender.com/internal/run-reminders \
@@ -29,6 +32,22 @@ jobs:
             -w "\n__HTTP_STATUS__%{http_code}")
           echo "$response"
           if [[ "$response" != *"__HTTP_STATUS__200"* ]]; then
-            echo "❌ Reminder job did not return 200"
+            echo "❌ Loan reminder job did not return 200"
+            exit 1
+          fi
+
+      # ────────────────────────────────────────────────────────────
+      # 2. 7-DAY SAVINGS UNLOCK REMINDERS
+      # ────────────────────────────────────────────────────────────
+      - name: Trigger savings unlock reminder job
+        run: |
+          response=$(curl -sS -X POST \
+            https://kemri-sacco-backend.onrender.com/internal/run-unlock-reminders \
+            -H "Content-Type: application/json" \
+            -H "X-Reminder-Secret: ${{ secrets.REMINDER_SECRET }}" \
+            -w "\n__HTTP_STATUS__%{http_code}")
+          echo "$response"
+          if [[ "$response" != *"__HTTP_STATUS__200"* ]]; then
+            echo "❌ Savings unlock reminder job did not return 200"
             exit 1
           fi

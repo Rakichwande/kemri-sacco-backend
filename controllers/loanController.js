@@ -336,6 +336,19 @@ exports.disburseLoan = async (req, res) => {
                 targetLabel: `loan #${loanId}`,
                 details: `B2C retry failed: ${result.message}`,
             });
+
+            // 2026-11-02: SUGGESTION 2 - Alert staff via SMS immediately
+            try {
+                await notificationService.notifyStaff({
+                    smsText: smsService.templates.staffLoanDisbursementFailed(
+                        memberCheck.full_name, loanCheck.reference, result.message
+                    ),
+                    emailContent: null
+                });
+            } catch (notifyErr) {
+                console.error('Staff B2C failure alert failed:', notifyErr.message);
+            }
+
             return res.status(400).json({ error: result.message });
         }
 

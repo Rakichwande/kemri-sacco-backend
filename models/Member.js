@@ -22,7 +22,6 @@ CREATE TABLE IF NOT EXISTS members (
 );
 `;
 
-// 2026-11-01: Added wallet_transactions table creation
 const createWalletTxTableQuery = `
 CREATE TABLE IF NOT EXISTS wallet_transactions (
   id SERIAL PRIMARY KEY,
@@ -55,8 +54,6 @@ function normalizePhone(input) {
 
 async function init() {
   await pool.query(createTableQuery);
-  
-  // 2026-11-01: Ensure wallet_transactions table exists
   await pool.query(createWalletTxTableQuery);
 
   await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS imported_reference VARCHAR(30);`);
@@ -66,11 +63,9 @@ async function init() {
   await pool.query(`ALTER TABLE members ALTER COLUMN phone_number DROP NOT NULL;`);
   await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS is_board_staff BOOLEAN NOT NULL DEFAULT FALSE;`);
   
-  // 2026-11-01: NEW WALLET COLUMNS
   await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS wallet_balance_emergency INTEGER DEFAULT 0;`);
   await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS wallet_balance_school INTEGER DEFAULT 0;`);
   
-  // 2026-11-02: NEW SAVINGS LOCK DATES
   await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS jipange_unlock_date DATE;`);
   await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS holiday_unlock_date DATE;`);
   await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS jipange_interest_date DATE;`);
@@ -289,14 +284,9 @@ async function update(id, updates) {
 }
 
 async function setBoardStaffStatus(memberId, isBoardStaff) {
-  // 2026-11-01: Promote -> 10,000. Revoke -> 5,000. (CEO can adjust manually after).
   const newLimit = isBoardStaff ? 10000 : 5000;
-
   const result = await pool.query(
-    `UPDATE members 
-     SET is_board_staff = $1,
-         credit_limit = $2
-     WHERE id = $3 
+    `UPDATE members SET is_board_staff = $1, credit_limit = $2 WHERE id = $3 
      RETURNING id, full_name, imported_reference, is_board_staff, credit_limit`,
     [!!isBoardStaff, newLimit, memberId]
   );
@@ -306,12 +296,8 @@ async function setBoardStaffStatus(memberId, isBoardStaff) {
 async function setBoardStaffByReferences(references, isBoardStaff = true) {
   if (!Array.isArray(references) || references.length === 0) return [];
   const newLimit = isBoardStaff ? 10000 : 5000;
-
   const result = await pool.query(
-    `UPDATE members 
-     SET is_board_staff = $1,
-         credit_limit = $2
-     WHERE imported_reference = ANY($3::text[]) 
+    `UPDATE members SET is_board_staff = $1, credit_limit = $2 WHERE imported_reference = ANY($3::text[]) 
      RETURNING id, full_name, imported_reference, is_board_staff, credit_limit`, 
     [!!isBoardStaff, newLimit, references.map(String)]
   );
@@ -322,8 +308,6 @@ async function isBoardStaff(memberId) {
   const result = await pool.query('SELECT is_board_staff FROM members WHERE id = $1', [memberId]);
   return result.rows[0]?.is_board_staff === true;
 }
-
-// --- Wallet Operations (2026-11-01 Separated Wallets) ---
 
 const VALID_WALLETS = {
   general: 'wallet_balance',
@@ -371,7 +355,6 @@ async function debitWallet(memberId, amount, type, reference, walletType = 'gene
   return { wallet_balance: res.rows[0].new_balance, reference: ref };
 }
 
-// 2026-11-02: SAVINGS DATE SETTERS
 async function setJipangeDates(memberId) {
   await pool.query(
     `UPDATE members 
@@ -390,6 +373,26 @@ async function setHolidayDates(memberId) {
      WHERE id = $1 AND holiday_unlock_date IS NULL`,
     [memberId]
   );
+}
+
+// 2026-11-02: SUGGESTION 1 - Find members whose Jipange or Holiday savings unlock in exactly 7 days
+async function getUpcomingUnlocks() {
+  const targetDate = new Date();
+  targetDate.setDate(targetDate.getDate() + 7);
+  const dateString = targetDate.toISOString().split('T')[0]; // YYYY-MM-DD
+
+  const result = await pool.query(
+    `SELECT 
+       m.id, m.full_name, m.phone_number, m.jipange_unlock_date, m.holiday_unlock_date,
+       COALESCE(p_jip.sum, 0) AS jipange_balance,
+       COALESCE(p_hol.sum, 0) AS holiday_balance
+     FROM members m
+     LEFT JOIN LATERAL (SELECT SUM(amount) AS sum FROM payments WHERE member_id = m.id AND savings_type = 'jipange' AND status = 'completed') p_jip ON true
+     LEFT JOIN LATERAL (SELECT SUM(amount) AS sum FROM payments WHERE member_id = m.id AND savings_type = 'holiday' AND status = 'completed') p_hol ON true
+     WHERE m.jipange_unlock_date = $1 OR m.holiday_unlock_date = $1`,
+    [dateString]
+  );
+  return result.rows;
 }
 
 async function remove(memberId) {
@@ -439,6 +442,7 @@ module.exports = {
   update, REFERENCE_SQL, bulkImport, normalizePhone, toTitleCase, hasPinSet, setPin,
   isPinLocked, verifyPin, recordFailedPinAttempt, resetPinAttempts, setBoardStaffStatus,
   setBoardStaffByReferences, isBoardStaff, creditWallet, debitWallet, 
-  setJipangeDates, setHolidayDates, // <--- EXPORTED HERE
+  setJipangeDates, setHolidayDates,
+  getUpcomingUnlocks, // <--- EXPORTED HERE
   remove,
 };
