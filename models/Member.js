@@ -70,6 +70,12 @@ async function init() {
   await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS wallet_balance_emergency INTEGER DEFAULT 0;`);
   await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS wallet_balance_school INTEGER DEFAULT 0;`);
   
+  // 2026-11-02: NEW SAVINGS LOCK DATES
+  await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS jipange_unlock_date DATE;`);
+  await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS holiday_unlock_date DATE;`);
+  await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS jipange_interest_date DATE;`);
+  await pool.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS holiday_interest_date DATE;`);
+  
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_members_board_staff ON members (id) WHERE is_board_staff;`);
   await pool.query(`CREATE SEQUENCE IF NOT EXISTS sacco_member_reference_seq;`);
 
@@ -365,6 +371,27 @@ async function debitWallet(memberId, amount, type, reference, walletType = 'gene
   return { wallet_balance: res.rows[0].new_balance, reference: ref };
 }
 
+// 2026-11-02: SAVINGS DATE SETTERS
+async function setJipangeDates(memberId) {
+  await pool.query(
+    `UPDATE members 
+     SET jipange_unlock_date = (NOW() + INTERVAL '6 months')::date,
+         jipange_interest_date = (NOW() + INTERVAL '1 year')::date
+     WHERE id = $1 AND jipange_unlock_date IS NULL`,
+    [memberId]
+  );
+}
+
+async function setHolidayDates(memberId) {
+  await pool.query(
+    `UPDATE members 
+     SET holiday_unlock_date = (NOW() + INTERVAL '6 months')::date,
+         holiday_interest_date = (NOW() + INTERVAL '1 year')::date
+     WHERE id = $1 AND holiday_unlock_date IS NULL`,
+    [memberId]
+  );
+}
+
 async function remove(memberId) {
   const client = await pool.pool.connect();
   try {
@@ -411,5 +438,7 @@ module.exports = {
   init, create, findByPhone, findById, findByPhoneOrId, findAll, findAllForDirectory,
   update, REFERENCE_SQL, bulkImport, normalizePhone, toTitleCase, hasPinSet, setPin,
   isPinLocked, verifyPin, recordFailedPinAttempt, resetPinAttempts, setBoardStaffStatus,
-  setBoardStaffByReferences, isBoardStaff, creditWallet, debitWallet, remove,
+  setBoardStaffByReferences, isBoardStaff, creditWallet, debitWallet, 
+  setJipangeDates, setHolidayDates, // <--- EXPORTED HERE
+  remove,
 };

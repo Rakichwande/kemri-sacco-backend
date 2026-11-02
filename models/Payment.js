@@ -22,16 +22,10 @@ async function init() {
   await pool.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS description TEXT;`);
   await pool.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();`);
   await pool.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS loan_id INTEGER REFERENCES loans(id);`);
-
-  // 2026-10-12: contribution channel. Repayments have tracked this since
-  // they were introduced (`repayments.channel`); the payments table never
-  // did — every deposit was implicitly M-Pesa by omission. Adding the
-  // column now, defaulted to 'mpesa', so historical rows are correctly
-  // labelled and future non-M-Pesa channels (cash, bank transfer, in-
-  // office deposit) can be recorded without another schema change. Does
-  // not affect any existing query: getMemberBalance, findAllAdmin, and
-  // the statement lines all filter by status and loan_id, not by channel.
   await pool.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS channel VARCHAR(20) DEFAULT 'mpesa';`);
+  
+  // 2026-11-02: Added savings_type for Ordinary, Jipange, Holiday
+  await pool.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS savings_type VARCHAR(30) DEFAULT 'ordinary';`);
 
   await pool.query(`
     DO $$
@@ -57,18 +51,15 @@ async function create({
   description,
   checkout_request_id,
   loan_id = null,
-  // 2026-10-12: channel defaults to 'mpesa' because every existing caller
-  // (paymentService.initiatePayment) initiates via STK Push. Any future
-  // caller for a cash or bank deposit can pass a different value; no
-  // caller today needs to.
   channel = 'mpesa',
+  savings_type = 'ordinary', // 2026-11-02: Added
 }) {
   const result = await pool.query(
     `INSERT INTO payments 
-      (member_id, amount, phone_number, account_reference, description, checkout_request_id, loan_id, channel, status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')
+      (member_id, amount, phone_number, account_reference, description, checkout_request_id, loan_id, channel, status, savings_type)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9)
      RETURNING *`,
-    [member_id, amount, phone, account_reference, description, checkout_request_id, loan_id, channel]
+    [member_id, amount, phone, account_reference, description, checkout_request_id, loan_id, channel, savings_type]
   );
   return result.rows[0];
 }
@@ -128,14 +119,34 @@ async function findByMpesaReceipt(mpesa_receipt) {
   return result.rows[0];
 }
 
-async function getMemberBalance(member_id) {
-  const result = await pool.query(
-    `SELECT COALESCE(SUM(amount), 0) as balance
-     FROM payments
-     WHERE member_id = $1 AND status = 'completed' AND loan_id IS NULL`,
-    [member_id]
-  );
+// 2026-11-02: Updated to filter by savings_type
+async function getMemberBalance(member_id, savingsType = 'ordinary') {
+  let query = `SELECT COALESCE(SUM(amount), 0) as balance FROM payments WHERE member_id = $1 AND status = 'completed' AND loan_id IS NULL`;
+  const params = [member_id];
+
+  if (savingsType) {
+    query += ` AND savings_type = $2`;
+    params.push(savingsType);
+  }
+
+  const result = await pool.query(query, params);
   return Number(result.rows[0].balance);
+}
+
+// 2026-11-02: Added function to deduct savings on withdrawal
+async function withdrawSavings(memberId, amount, savingsType, reference, client = null) {
+  const dbClient = client || pool;
+  const amt = Math.round(Number(amount));
+
+  // Insert a negative payment to reduce the balance
+  const result = await dbClient.query(
+    `INSERT INTO payments 
+      (member_id, amount, phone_number, account_reference, description, checkout_request_id, loan_id, channel, status, savings_type)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+     RETURNING *`,
+    [memberId, -amt, 'N/A', 'SAVINGS-WITHDRAWAL', `Withdrawal from ${savingsType}`, `WD-${Date.now()}-${memberId}`, null, 'mpesa', 'completed', savingsType]
+  );
+  return result.rows[0];
 }
 
 async function findRecentByMember(member_id, limit = 5) {
@@ -149,24 +160,6 @@ async function findRecentByMember(member_id, limit = 5) {
   return result.rows;
 }
 
-// Statement lines for deposits and loan repayments — two queries in one
-// function since both live in the payments table, distinguished only by
-// loan_id. Used by the member statement view alongside loan disbursements
-// (models/Loan.js) and withdrawals (models/Withdrawal.js).
-//
-// 2026-10-09 (Phase 4): LEFT JOINs the repayments ledger so repayment
-// lines carry the Phase 2 principal/interest split. The join key is the
-// M-Pesa receipt number — repayments.mpesa_receipt and
-// payments.mpesa_receipt are the same value written by
-// paymentService.handleCallback, and repayments has no payment_id FK to
-// link back. The loan_id check in the ON clause guards against a
-// theoretical receipt collision across loans.
-//
-// Both split fields are null for deposit lines (loan_id IS NULL), which
-// the frontend already guards against. For repayment lines that predate
-// the Phase 2 backfill (none in practice — the backfill covered every
-// row), the fields would also be null and the frontend would simply
-// omit the split sub-line.
 async function getStatementLines(member_id) {
   const result = await pool.query(
     `SELECT
@@ -244,6 +237,7 @@ module.exports = {
   claimForProcessing,
   revertToPending,
   getMemberBalance,
+  withdrawSavings, // <--- EXPORTED
   findRecentByMember,
   findAllAdmin,
   getStatementLines,

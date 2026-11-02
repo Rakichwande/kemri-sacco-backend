@@ -44,32 +44,15 @@ async function handleUssd(req, res) {
       const steps = input.slice(1);
 
       switch (choice) {
-        case '1':
-          response = await handleRegister(phoneNumber, steps);
-          break;
-        case '2':
-          response = await handleWallet(phoneNumber, steps, sessionId);
-          break;
-        case '3':
-          response = await handleDeposit(phoneNumber, steps);
-          break;
-        case '4':
-          response = await handleLoanApplication(phoneNumber, steps, sessionId);
-          break;
-        case '5':
-          response = await handleRepayLoan(phoneNumber, steps, sessionId);
-          break;
-        case '6':
-          response = await handleTransactions(phoneNumber, steps, sessionId);
-          break;
-        case '7':
-          response = await handleChangePin(phoneNumber, steps);
-          break;
-        case '8':
-          response = 'END Thank you for using KEMRI SACCO. Goodbye.';
-          break;
-        default:
-          response = 'END Invalid choice. Please dial again.';
+        case '1': response = await handleRegister(phoneNumber, steps); break;
+        case '2': response = await handleWallet(phoneNumber, steps, sessionId); break;
+        case '3': response = await handleDeposit(phoneNumber, steps); break;
+        case '4': response = await handleLoanApplication(phoneNumber, steps, sessionId); break;
+        case '5': response = await handleRepayLoan(phoneNumber, steps, sessionId); break;
+        case '6': response = await handleTransactions(phoneNumber, steps, sessionId); break;
+        case '7': response = await handleChangePin(phoneNumber, steps); break;
+        case '8': response = 'END Thank you for using KEMRI SACCO. Goodbye.'; break;
+        default: response = 'END Invalid choice. Please dial again.';
       }
     }
   } catch (err) {
@@ -78,10 +61,7 @@ async function handleUssd(req, res) {
   }
 
   UssdSession.log({
-    sessionId,
-    phoneNumber,
-    serviceCode,
-    inputText: text || '',
+    sessionId, phoneNumber, serviceCode, inputText: text || '',
     status: looksLikeFailure(response) ? 'failed' : 'success',
     durationMs: Date.now() - startedAt,
     message: response.replace(/^(CON|END)\s*/, '').split('\n')[0].slice(0, 300),
@@ -92,17 +72,7 @@ async function handleUssd(req, res) {
 }
 
 function mainMenu() {
-  return (
-    'CON Welcome to KEMRI SACCO\n' +
-    '1. Register\n' +
-    '2. My Wallet\n' +
-    '3. Deposit\n' +
-    '4. Loan\n' +
-    '5. Loan Repayment\n' +
-    '6. Transactions\n' +
-    '7. Change PIN\n' +
-    '8. Exit'
-  );
+  return 'CON Welcome to KEMRI SACCO\n1. Register\n2. My Wallet\n3. Deposit\n4. Loan\n5. Loan Repayment\n6. Transactions\n7. Change PIN\n8. Exit';
 }
 
 // ============================================================
@@ -110,61 +80,38 @@ function mainMenu() {
 // ============================================================
 async function requirePin(member, steps, sessionId) {
   const cached = pinSessionState.get(sessionId);
-  if (cached) {
-    return { authenticated: true, remainingSteps: steps.slice(cached.pinStepsConsumed) };
-  }
+  if (cached) return { authenticated: true, remainingSteps: steps.slice(cached.pinStepsConsumed) };
 
   if (!Member.hasPinSet(member)) {
-    if (steps.length === 0) {
-      return { authenticated: false, response: 'CON No SACCO PIN set yet.\nEnter a new 4-digit PIN:' };
-    }
+    if (steps.length === 0) return { authenticated: false, response: 'CON No SACCO PIN set yet.\nEnter a new 4-digit PIN:' };
     if (steps.length === 1) {
-      if (!/^\d{4}$/.test(steps[0])) {
-        return { authenticated: false, response: 'END PIN must be exactly 4 digits. Please dial again.' };
-      }
+      if (!/^\d{4}$/.test(steps[0])) return { authenticated: false, response: 'END PIN must be exactly 4 digits. Please dial again.' };
       return { authenticated: false, response: 'CON Confirm your new PIN:' };
     }
     if (steps.length >= 2) {
       const [newPin, confirmPin] = steps;
-      if (newPin !== confirmPin) {
-        return { authenticated: false, response: 'END PINs did not match. Please dial again to try once more.' };
-      }
+      if (newPin !== confirmPin) return { authenticated: false, response: 'END PINs did not match. Please dial again to try once more.' };
+      
       await Member.setPin(member.id, newPin);
       pinSessionState.set(sessionId, { pinStepsConsumed: 2, touchedAt: Date.now() });
 
       try {
-        await smsService.sendSMS(
-          member.phone_number,
-          'KEMRI SACCO: Your SACCO PIN has been set. Keep it secret - we will never ask for it by SMS or call.'
-        );
-      } catch (smsErr) {
-        console.error('PIN-setup confirmation SMS failed (PIN still set):', smsErr.message);
-      }
-
+        await smsService.sendSMS(member.phone_number, 'KEMRI SACCO: Your SACCO PIN has been set. Keep it secret - we will never ask for it by SMS or call.');
+      } catch (smsErr) { console.error('PIN-setup confirmation SMS failed:', smsErr.message); }
       return { authenticated: true, remainingSteps: steps.slice(2) };
     }
   }
 
   if (Member.isPinLocked(member)) {
-    return {
-      authenticated: false,
-      response: 'END Too many incorrect PIN attempts. Locked for 30 minutes - please try again later or visit our office.',
-    };
+    return { authenticated: false, response: 'END Too many incorrect PIN attempts. Locked for 30 minutes - please try again later or visit our office.' };
   }
-  if (steps.length === 0) {
-    return { authenticated: false, response: 'CON Enter your SACCO PIN:' };
-  }
+  if (steps.length === 0) return { authenticated: false, response: 'CON Enter your SACCO PIN:' };
 
   const submittedPin = steps[0];
   const valid = await Member.verifyPin(member, submittedPin);
   if (!valid) {
     const updated = await Member.recordFailedPinAttempt(member.id);
-    if (Member.isPinLocked(updated)) {
-      return {
-        authenticated: false,
-        response: 'END Incorrect PIN. Too many attempts - your account is now locked for 30 minutes.',
-      };
-    }
+    if (Member.isPinLocked(updated)) return { authenticated: false, response: 'END Incorrect PIN. Too many attempts - your account is now locked for 30 minutes.' };
     return { authenticated: false, response: 'END Incorrect PIN. Please dial again to retry.' };
   }
 
@@ -178,164 +125,220 @@ async function requirePin(member, steps, sessionId) {
 // ============================================================
 async function handleRegister(phoneNumber, steps) {
   const existing = await Member.findByPhone(phoneNumber);
-  if (existing) {
-    return 'END This phone number is already registered with KEMRI SACCO.';
-  }
+  if (existing) return 'END This phone number is already registered with KEMRI SACCO.';
 
   if (steps.length === 0) return 'CON Enter your full name';
   if (steps.length === 1) return 'CON Enter your ID number';
 
   if (steps.length === 2) {
     const [full_name, id_number] = steps;
-
-    if (!/^\d{6,10}$/.test(id_number)) {
-      return 'END Invalid ID number. Please dial again and enter 6-10 digits.';
-    }
+    if (!/^\d{6,10}$/.test(id_number)) return 'END Invalid ID number. Please dial again and enter 6-10 digits.';
 
     let member;
     try {
-      member = await Member.create({
-        full_name,
-        id_number,
-        phone_number: phoneNumber,
-        scheme: 'holiday_savings',
-      });
+      member = await Member.create({ full_name, id_number, phone_number: phoneNumber, scheme: 'holiday_savings' });
     } catch (err) {
-      if (err.code === '23505' && err.constraint === 'members_id_number_key') {
-        return 'END This ID number is already registered with KEMRI SACCO. If this is your ID, contact the office to link your new phone number.';
-      }
-      if (err.code === '23505' && err.constraint === 'members_phone_number_key') {
-        return 'END This phone number is already registered with KEMRI SACCO.';
-      }
+      if (err.code === '23505' && err.constraint === 'members_id_number_key') return 'END This ID number is already registered with KEMRI SACCO. If this is your ID, contact the office to link your new phone number.';
+      if (err.code === '23505' && err.constraint === 'members_phone_number_key') return 'END This phone number is already registered with KEMRI SACCO.';
       throw err;
     }
 
     try {
       await smsService.sendSMS(phoneNumber, smsService.templates.applicationReceived(full_name));
-    } catch (smsErr) {
-      console.error('USSD registration SMS failed (member still registered):', smsErr.message);
-    }
-    notificationService.notifyStaff({
-      smsText: smsService.templates.staffNewMember(full_name),
-      emailContent: emailService.staffTemplates.newMember(full_name),
-    });
+    } catch (smsErr) { console.error('USSD registration SMS failed:', smsErr.message); }
+    notificationService.notifyStaff({ smsText: smsService.templates.staffNewMember(full_name), emailContent: emailService.staffTemplates.newMember(full_name) });
 
-    const memberRef = member.imported_reference;
-
-    return `END Thank you, ${full_name}. Your registration is complete. Ref: ${memberRef}. You can now save, check balance, or apply for a loan by dialling *483*4444#.\nYou'll set a SACCO PIN the first time you check your balance or apply for a loan.`;
+    return `END Thank you, ${full_name}. Your registration is complete. Ref: ${member.imported_reference}. You can now save, check balance, or apply for a loan by dialling *483*4444#.\nYou'll set a SACCO PIN the first time you check your balance or apply for a loan.`;
   }
 
   return 'END Invalid input. Please dial again.';
 }
 
 // ============================================================
-// 2. MY WALLET (Separated Wallets: General, Emergency, School)
+// 2. MY WALLET (Wallets + Savings Withdrawal)
 // ============================================================
 async function handleWallet(phoneNumber, steps, sessionId) {
   const member = await Member.findByPhone(phoneNumber);
-  if (!member) {
-    return 'END You are not registered. Dial and select option 1 to register first.';
-  }
+  if (!member) return 'END You are not registered. Dial and select option 1 to register first.';
 
   const pinCheck = await requirePin(member, steps, sessionId);
   if (!pinCheck.authenticated) return pinCheck.response;
   const remaining = pinCheck.remainingSteps;
 
   const currentMember = await Member.findById(member.id);
-  const balances = {
+  const walletBalances = {
     general: Number(currentMember.wallet_balance || 0),
     emergency: Number(currentMember.wallet_balance_emergency || 0),
     school: Number(currentMember.wallet_balance_school || 0),
   };
-  const savingsBalance = await Payment.getMemberBalance(member.id);
+  
+  const savingsBalances = {
+    ordinary: await Payment.getMemberBalance(member.id, 'ordinary'),
+    jipange: await Payment.getMemberBalance(member.id, 'jipange'),
+    holiday: await Payment.getMemberBalance(member.id, 'holiday'),
+  };
+  
+  const totalWallet = walletBalances.general + walletBalances.emergency + walletBalances.school;
+  const totalSavings = savingsBalances.ordinary + savingsBalances.jipange + savingsBalances.holiday;
 
-  // Determine which wallets have money in them right now
-  const activeWallets = [];
-  if (balances.emergency > 0) activeWallets.push({ type: 'emergency', name: 'Emergency', bal: balances.emergency });
-  if (balances.school > 0) activeWallets.push({ type: 'school', name: 'School', bal: balances.school });
-  if (balances.general > 0) activeWallets.push({ type: 'general', name: 'General', bal: balances.general });
-
-  const totalBalance = balances.emergency + balances.school + balances.general;
-
-  // Q2 Option A: If total is 0, just show savings and end.
-  if (totalBalance <= 0) {
-    return `END My Account\nSavings: KES ${savingsBalance.toLocaleString()}\nNo active wallet funds.\nThank you for using KEMRI SACCO.`;
-  }
-
-  // Step 1: Show overall wallet summary
+  // Step 1: Main Wallet Menu
   if (remaining.length === 0) {
-    let menu = `CON My Wallet\n`;
-    activeWallets.forEach(w => {
-      menu += `${w.name}: KES ${w.bal.toLocaleString()}\n`;
-    });
-    menu += `Savings: KES ${savingsBalance.toLocaleString()}\n`;
-    menu += `1. Withdraw Wallet to M-Pesa\n`;
-    menu += `2. Back`;
-    return menu;
+    return `CON My Account\n` +
+           `Savings: KES ${totalSavings.toLocaleString()}\n` +
+           `Wallet: KES ${totalWallet.toLocaleString()}\n` +
+           `1. Withdraw Wallet to M-Pesa\n` +
+           `2. Withdraw Savings to M-Pesa\n` +
+           `3. Back`;
   }
 
-  // Step 2: User chose to withdraw, ask them WHICH wallet
+  // Step 2: User selects Withdraw Wallet or Withdraw Savings
   if (remaining.length === 1) {
-    if (remaining[0] === '1') {
+    const choice = remaining[0];
+    
+    // Withdraw Wallet (Existing logic)
+    if (choice === '1') {
+      if (totalWallet <= 0) return 'END You have no funds in your wallet to withdraw.';
+      
+      const activeWallets = [];
+      if (walletBalances.emergency > 0) activeWallets.push({ type: 'emergency', name: 'Emergency', bal: walletBalances.emergency });
+      if (walletBalances.school > 0) activeWallets.push({ type: 'school', name: 'School', bal: walletBalances.school });
+      if (walletBalances.general > 0) activeWallets.push({ type: 'general', name: 'General', bal: walletBalances.general });
+
       let menu = 'CON Select wallet to withdraw from:\n';
-      activeWallets.forEach((w, idx) => {
-        menu += `${idx + 1}. ${w.name} (KES ${w.bal.toLocaleString()})\n`;
-      });
-      menu += '0. Cancel';
-      return menu;
+      activeWallets.forEach((w, idx) => { menu += `${idx + 1}. ${w.name} (KES ${w.bal})\n`; });
+      return menu.trim() + '\n0. Cancel';
     }
-    return 'END Thank you for using KEMRI SACCO.';
+    
+    // Withdraw Savings (New logic)
+    if (choice === '2') {
+      let menu = 'CON Select savings to withdraw:\n';
+      let available = false;
+      let index = 1;
+      
+      if (savingsBalances.jipange > 0) { menu += `${index++}. Jipange (KES ${savingsBalances.jipange.toLocaleString()})\n`; available = true; }
+      if (savingsBalances.holiday > 0) { menu += `${index++}. Holiday (KES ${savingsBalances.holiday.toLocaleString()})\n`; available = true; }
+      
+      if (!available) return 'END You have no withdrawable savings (Jipange or Holiday) at this time.';
+      return menu.trim() + '\n0. Cancel';
+    }
+    
+    if (choice === '3') return 'END Thank you for using KEMRI SACCO.';
+    return 'END Invalid choice.';
   }
 
-  // Step 3: User selected a wallet, ask for amount
+  // Step 3: Handle Wallet Withdrawal Amount OR Savings Selection
   if (remaining.length === 2) {
-    const selection = Number(remaining[1]);
-    if (selection === 0) return 'END Cancelled.';
-    if (selection < 1 || selection > activeWallets.length) return 'END Invalid selection.';
-    
-    const selectedWallet = activeWallets[selection - 1];
-    return `CON Enter amount to withdraw (Max KES ${selectedWallet.bal.toLocaleString()}):`;
+    const choice = remaining[0];
+    const subChoice = Number(remaining[1]);
+
+    // --- WALLET WITHDRAWAL FLOW ---
+    if (choice === '1') {
+      if (subChoice === 0) return 'END Cancelled.';
+      
+      const activeWallets = [];
+      if (walletBalances.emergency > 0) activeWallets.push('emergency');
+      if (walletBalances.school > 0) activeWallets.push('school');
+      if (walletBalances.general > 0) activeWallets.push('general');
+      
+      if (subChoice < 1 || subChoice > activeWallets.length) return 'END Invalid selection.';
+      const selectedType = activeWallets[subChoice - 1];
+      
+      return `CON Withdrawing from ${selectedType.toUpperCase()}.\nMax KES ${walletBalances[selectedType].toLocaleString()}\nEnter amount:`;
+    }
+
+    // --- SAVINGS WITHDRAWAL FLOW ---
+    if (choice === '2') {
+      if (subChoice === 0) return 'END Cancelled.';
+      
+      let selectedType = null;
+      let validOptions = [];
+      if (savingsBalances.jipange > 0) validOptions.push('jipange');
+      if (savingsBalances.holiday > 0) validOptions.push('holiday');
+      
+      if (subChoice < 1 || subChoice > validOptions.length) return 'END Invalid selection.';
+      selectedType = validOptions[subChoice - 1];
+
+      // 2026-11-02: Check 6-month unlock date
+      const unlockDateStr = selectedType === 'jipange' ? currentMember.jipange_unlock_date : currentMember.holiday_unlock_date;
+      if (!unlockDateStr) return 'END You have no active unlock date for this savings.';
+      
+      const unlockDate = new Date(unlockDateStr);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      if (today < unlockDate) {
+        const formattedDate = unlockDate.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+        return `END Your ${selectedType.toUpperCase()} savings are locked until ${formattedDate}.`;
+      }
+
+      return `CON Withdrawing from ${selectedType.toUpperCase()}.\nMax KES ${savingsBalances[selectedType].toLocaleString()}\nEnter amount:`;
+    }
   }
 
-  // Step 4: Process the withdrawal
+  // Step 4: Process the amounts
   if (remaining.length === 3) {
-    const selection = Number(remaining[1]);
+    const choice = remaining[0];
+    const subChoice = Number(remaining[1]);
     const amount = Number(remaining[2]);
-    if (selection < 1 || selection > activeWallets.length) return 'END Invalid selection.';
-    
-    const selectedWallet = activeWallets[selection - 1];
 
-    if (!amount || amount <= 0) return 'END Invalid amount. Please dial again.';
-    if (amount > selectedWallet.bal) return `END Insufficient funds. Your ${selectedWallet.name} balance is KES ${selectedWallet.bal.toLocaleString()}.`;
-
-    try {
-      // 2026-11-01: Debit the specific wallet
-      const debitResult = await Member.debitWallet(member.id, amount, 'withdrawal', null, selectedWallet.type);
-      const newBalance = debitResult.wallet_balance;
-      const uniqueRef = debitResult.reference;
-
-      const DisbursementService = require('../services/disbursementService');
-      await DisbursementService.disburseWalletToMpesa(member, amount, uniqueRef, selectedWallet.type);
+    // --- WALLET WITHDRAWAL ---
+    if (choice === '1') {
+      if (!amount || amount <= 0) return 'END Invalid amount. Please dial again.';
+      
+      const activeWallets = [];
+      if (walletBalances.emergency > 0) activeWallets.push('emergency');
+      if (walletBalances.school > 0) activeWallets.push('school');
+      if (walletBalances.general > 0) activeWallets.push('general');
+      
+      const selectedType = activeWallets[subChoice - 1];
+      if (amount > walletBalances[selectedType]) return `END Insufficient funds. Max is KES ${walletBalances[selectedType].toLocaleString()}.`;
 
       try {
-        await smsService.sendSMS(
-          member.phone_number,
-          smsService.templates.walletWithdrawalConfirmed(member.full_name, amount, newBalance)
-        );
-      } catch (smsErr) {
-        console.error('Withdrawal SMS failed:', smsErr.message);
-      }
+        const debitResult = await Member.debitWallet(member.id, amount, 'withdrawal', null, selectedType);
+        const newBalance = debitResult.wallet_balance;
+        const uniqueRef = debitResult.reference;
 
-      return `END KES ${amount.toLocaleString()} sent to M-Pesa.\nNew ${selectedWallet.name} Balance: KES ${Number(newBalance).toLocaleString()}`;
-    } catch (err) {
-      console.error('Wallet withdrawal failed:', err.message);
-      try {
-        // 2026-11-01: Refund the specific wallet
-        await Member.creditWallet(member.id, amount, 'withdrawal_refund', 'B2C Failed', selectedWallet.type);
-      } catch (refundErr) {
-        console.error('Failed to refund wallet after B2C failure:', refundErr.message);
+        const DisbursementService = require('../services/disbursementService');
+        await DisbursementService.disburseWalletToMpesa(member, amount, uniqueRef, selectedType);
+
+        try { await smsService.sendSMS(member.phone_number, smsService.templates.walletWithdrawalConfirmed(member.full_name, amount, newBalance)); } catch (smsErr) { console.error('SMS failed:', smsErr.message); }
+
+        return `END KES ${amount.toLocaleString()} sent to M-Pesa.\nNew ${selectedType.toUpperCase()} Balance: KES ${Number(newBalance).toLocaleString()}`;
+      } catch (err) {
+        console.error('Wallet withdrawal failed:', err.message);
+        try { await Member.creditWallet(member.id, amount, 'withdrawal_refund', 'B2C Failed', selectedType); } catch (refundErr) { console.error('Refund failed:', refundErr.message); }
+        return 'END Withdrawal failed. Your funds have been returned to your wallet.';
       }
-      return 'END Withdrawal failed. Your funds have been returned to your wallet.';
+    }
+
+    // --- SAVINGS WITHDRAWAL ---
+    if (choice === '2') {
+      if (!amount || amount <= 0) return 'END Invalid amount. Please dial again.';
+      
+      let validOptions = [];
+      if (savingsBalances.jipange > 0) validOptions.push('jipange');
+      if (savingsBalances.holiday > 0) validOptions.push('holiday');
+      
+      const selectedType = validOptions[subChoice - 1];
+      if (amount > savingsBalances[selectedType]) return `END Insufficient funds. Max is KES ${savingsBalances[selectedType].toLocaleString()}.`;
+
+      try {
+        // 1. Deduct from savings (inserts negative payment)
+        await Payment.withdrawSavings(member.id, amount, selectedType, `WD-${Date.now()}`);
+        
+        // 2. Send B2C to M-Pesa
+        const DisbursementService = require('../services/disbursementService');
+        await DisbursementService.disburseWalletToMpesa(member, amount, `SAV-${Date.now()}`, 'savings'); 
+
+        try { 
+          await smsService.sendSMS(member.phone_number, `KEMRI SACCO: KES ${amount.toLocaleString()} has been sent to your M-Pesa from your ${selectedType.toUpperCase()} savings.`); 
+        } catch (smsErr) { console.error('SMS failed:', smsErr.message); }
+
+        return `END KES ${amount.toLocaleString()} sent to M-Pesa from ${selectedType.toUpperCase()} savings.`;
+      } catch (err) {
+        console.error('Savings withdrawal failed:', err.message);
+        return 'END Could not process withdrawal. Please try again later or visit the office.';
+      }
     }
   }
 
@@ -343,24 +346,40 @@ async function handleWallet(phoneNumber, steps, sessionId) {
 }
 
 // ============================================================
-// 3. DEPOSIT
+// 3. DEPOSIT (New Sub-Menu)
 // ============================================================
 async function handleDeposit(phoneNumber, steps) {
   const member = await Member.findByPhone(phoneNumber);
-  if (!member) {
-    return 'END You are not registered. Dial and select option 1 to register first.';
+  if (!member) return 'END You are not registered. Dial and select option 1 to register first.';
+
+  // Step 1: Select Savings Type
+  if (steps.length === 0) {
+    return 'CON Select Savings Type:\n1. Ordinary (Fixed)\n2. Jipange\n3. Holiday';
   }
 
-  if (steps.length === 0) return 'CON Enter amount to deposit (KES)';
-
+  // Step 2: Enter Amount
   if (steps.length === 1) {
-    const amount = Number(steps[0]);
-    if (!amount || amount <= 0) {
-      return 'END Invalid amount. Please dial again.';
-    }
+    const typeChoice = steps[0];
+    if (!['1', '2', '3'].includes(typeChoice)) return 'END Invalid selection.';
+    
+    const typeMap = { '1': 'ordinary', '2': 'jipange', '3': 'holiday' };
+    const typeName = typeMap[typeChoice].toUpperCase();
+    
+    return `CON Enter amount to deposit into ${typeName} (KES)`;
+  }
+
+  // Step 3: Initiate STK Push
+  if (steps.length === 2) {
+    const typeChoice = steps[0];
+    const amount = Number(steps[1]);
+    
+    if (!amount || amount <= 0) return 'END Invalid amount. Please dial again.';
+
+    const typeMap = { '1': 'ordinary', '2': 'jipange', '3': 'holiday' };
+    const savingsType = typeMap[typeChoice];
 
     try {
-      await paymentService.initiatePayment({ memberId: member.id, phoneNumber, amount });
+      await paymentService.initiatePayment({ memberId: member.id, phoneNumber, amount, savingsType });
       return 'END An M-Pesa prompt has been sent to your phone. Enter your PIN to complete the deposit.';
     } catch (err) {
       return 'END We could not process your deposit right now. Please try again shortly.';
@@ -375,18 +394,14 @@ async function handleDeposit(phoneNumber, steps) {
 // ============================================================
 async function handleLoanApplication(phoneNumber, steps, sessionId) {
   const member = await Member.findByPhone(phoneNumber);
-  if (!member) {
-    return 'END You are not registered. Dial and select option 1 to register first.';
-  }
+  if (!member) return 'END You are not registered. Dial and select option 1 to register first.';
 
   const pinCheck = await requirePin(member, steps, sessionId);
   if (!pinCheck.authenticated) return pinCheck.response;
   const remaining = pinCheck.remainingSteps;
 
   const eligibility = await LoanService.canApply(member.id);
-  if (!eligibility.allowed) {
-    return `END ${eligibility.reason}`;
-  }
+  if (!eligibility.allowed) return `END ${eligibility.reason}`;
 
   if (remaining.length === 0) {
     return `CON Select Loan Type:\n1. Emergency (Coming soon)\n2. School Fees (Coming soon)\n3. Mobile (Instant to M-Pesa)`;
@@ -394,72 +409,37 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
 
   if (remaining.length === 1) {
     const typeChoice = remaining[0];
-    
-    if (typeChoice === '1') {
-      return 'END Emergency loans are not yet available. Please check back later.';
-    }
-    if (typeChoice === '2') {
-      return 'END School Fees loans are not yet available. Please check back later.';
-    }
-    
-    if (typeChoice === '3') {
-      return `CON Enter loan amount (KES)\nCredit limit: KES ${eligibility.creditLimit.toLocaleString()}`;
-    }
-    
+    if (typeChoice === '1') return 'END Emergency loans are not yet available. Please check back later.';
+    if (typeChoice === '2') return 'END School Fees loans are not yet available. Please check back later.';
+    if (typeChoice === '3') return `CON Enter loan amount (KES)\nCredit limit: KES ${eligibility.creditLimit.toLocaleString()}`;
     return 'END Invalid loan type. Please dial again.';
   }
 
   if (remaining.length === 2) {
     const typeChoice = remaining[0];
     const amount = Number(remaining[1]);
-    
-    if (typeChoice !== '3') {
-      return 'END Invalid loan type. Please dial again.';
-    }
+    if (typeChoice !== '3') return 'END Invalid loan type. Please dial again.';
+    if (!amount || amount <= 0) return 'END Invalid amount. Please dial again.';
 
-    const purpose = 'mobile';
-
-    if (!amount || amount <= 0) {
-      return 'END Invalid amount. Please dial again.';
-    }
-
-    const result = await LoanService.apply(member.id, amount, purpose);
-
-    if (!result.success) {
-      return `END ${result.message}`;
-    }
+    const result = await LoanService.apply(member.id, amount, 'mobile');
+    if (!result.success) return `END ${result.message}`;
 
     const { loan } = result;
     const ref = `LN-${String(loan.id).padStart(5, '0')}`;
 
-    let opening;
-    let closing;
-    if (result.walletCredited) {
-      opening = 'Loan approved';
-      closing = 'Funds credited to your Wallet. Dial *483*4444# to withdraw.';
-    } else if (result.disbursing) {
-      opening = 'Loan approved';
-      closing = 'Funds on the way to your M-Pesa.';
-    } else if (result.disbursementFailed) {
-      opening = 'Loan approved';
-      closing = 'Our team will complete this shortly.';
-    } else if (result.autoApproved) {
-      opening = 'Loan approved';
-      closing = 'Disbursement shortly.';
-    } else {
-      opening = 'Loan application received';
-      closing = 'Awaiting SACCO review.';
-    }
+    let opening, closing;
+    if (result.walletCredited) { opening = 'Loan approved'; closing = 'Funds credited to your Wallet. Dial *483*4444# to withdraw.'; }
+    else if (result.disbursing) { opening = 'Loan approved'; closing = 'Funds on the way to your M-Pesa.'; }
+    else if (result.disbursementFailed) { opening = 'Loan approved'; closing = 'Our team will complete this shortly.'; }
+    else if (result.autoApproved) { opening = 'Loan approved'; closing = 'Disbursement shortly.'; }
+    else { opening = 'Loan application received'; closing = 'Awaiting SACCO review.'; }
 
-    const summary =
-      `${opening}: Principal KES ${Number(loan.principal).toLocaleString()}\n` +
-      `Interest: KES ${Number(loan.total_interest).toLocaleString()}\n` +
-      `Total amount payable: KES ${Number(loan.total_repayment).toLocaleString()}\n` +
-      `Ref: ${ref}. ${closing}`;
-
+    const summary = `${opening}: Principal KES ${Number(loan.principal).toLocaleString()}\n` +
+                    `Interest: KES ${Number(loan.total_interest).toLocaleString()}\n` +
+                    `Total amount payable: KES ${Number(loan.total_repayment).toLocaleString()}\n` +
+                    `Ref: ${ref}. ${closing}`;
     return `END ${summary}`;
   }
-
   return 'END Invalid input. Please dial again.';
 }
 
@@ -468,71 +448,51 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
 // ============================================================
 async function handleRepayLoan(phoneNumber, steps, sessionId) {
   const member = await Member.findByPhone(phoneNumber);
-  if (!member) {
-    return 'END You are not registered. Dial and select option 1 to register first.';
-  }
+  if (!member) return 'END You are not registered. Dial and select option 1 to register first.';
 
   const pinCheck = await requirePin(member, steps, sessionId);
   if (!pinCheck.authenticated) return pinCheck.response;
   const remaining = pinCheck.remainingSteps;
 
   const activeLoans = await Loan.getActiveLoansForRepayment(member.id);
-
-  if (activeLoans.length === 0) {
-    return 'END You have no active loans to repay.';
-  }
+  if (activeLoans.length === 0) return 'END You have no active loans to repay.';
 
   if (activeLoans.length === 1) {
     const loan = activeLoans[0];
-    if (remaining.length === 0) {
-      return `CON Repaying ${loan.reference}.\nAmount outstanding: KES ${Number(loan.outstanding_balance).toLocaleString()}\nEnter amount to pay`;
-    }
+    if (remaining.length === 0) return `CON Repaying ${loan.reference}.\nAmount outstanding: KES ${Number(loan.outstanding_balance).toLocaleString()}\nEnter amount to pay`;
     if (remaining.length === 1) {
       const amount = Number(remaining[0]);
       if (!amount || amount <= 0) return 'END Invalid amount. Please dial again.';
-      
       try {
         await paymentService.initiatePayment({ memberId: member.id, phoneNumber, amount, loanId: loan.id });
         return 'END An M-Pesa prompt has been sent to your phone. Enter your PIN to complete the payment.';
-      } catch (err) {
-        return 'END We could not process your payment right now. Please try again.';
-      }
+      } catch (err) { return 'END We could not process your payment right now. Please try again.'; }
     }
   }
 
   if (activeLoans.length > 1) {
     if (remaining.length === 0) {
       let menu = 'CON Select loan to repay:\n';
-      activeLoans.forEach((l, index) => {
-        menu += `${index + 1}. ${l.reference} (KES ${Number(l.outstanding_balance).toLocaleString()})\n`;
-      });
+      activeLoans.forEach((l, index) => { menu += `${index + 1}. ${l.reference} (KES ${Number(l.outstanding_balance).toLocaleString()})\n`; });
       return menu.trim();
     }
-
     if (remaining.length === 1) {
       const selection = Number(remaining[0]);
       if (selection < 1 || selection > activeLoans.length) return 'END Invalid selection.';
-      
       const loan = activeLoans[selection - 1];
       return `CON Repaying ${loan.reference}.\nAmount outstanding: KES ${Number(loan.outstanding_balance).toLocaleString()}\nEnter amount to pay`;
     }
-
     if (remaining.length === 2) {
       const selection = Number(remaining[0]);
       const amount = Number(remaining[1]);
       const loan = activeLoans[selection - 1];
-      
       if (!amount || amount <= 0) return 'END Invalid amount. Please dial again.';
-
       try {
         await paymentService.initiatePayment({ memberId: member.id, amount, phoneNumber, loanId: loan.id });
         return 'END An M-Pesa prompt has been sent to your phone. Enter your PIN to complete the payment.';
-      } catch (err) {
-        return 'END We could not process your payment right now. Please try again.';
-      }
+      } catch (err) { return 'END We could not process your payment right now. Please try again.'; }
     }
   }
-
   return 'END Invalid input.';
 }
 
@@ -541,46 +501,21 @@ async function handleRepayLoan(phoneNumber, steps, sessionId) {
 // ============================================================
 async function handleTransactions(phoneNumber, steps, sessionId) {
   const member = await Member.findByPhone(phoneNumber);
-  if (!member) {
-    return 'END You are not registered. Dial and select option 1 to register first.';
-  }
+  if (!member) return 'END You are not registered. Dial and select option 1 to register first.';
 
   const pinCheck = await requirePin(member, steps, sessionId);
   if (!pinCheck.authenticated) return pinCheck.response;
 
-  const [payments, loans] = await Promise.all([
-    Payment.findRecentByMember(member.id, 10),
-    Loan.getHistory(member.id, 10),
-  ]);
+  const [payments, loans] = await Promise.all([ Payment.findRecentByMember(member.id, 10), Loan.getHistory(member.id, 10) ]);
 
-  const fromPayments = payments.map((p) => ({
-    date: p.created_at,
-    type: p.loan_id === null ? 'Deposit' : 'Repay',
-    amount: p.amount,
-    status: p.status,
-  }));
+  const fromPayments = payments.map((p) => ({ date: p.created_at, type: p.loan_id === null ? 'Deposit' : 'Repay', amount: p.amount, status: p.status }));
+  const fromLoans = loans.filter((l) => l.disbursed_at).map((l) => ({ date: l.disbursed_at, type: 'Loan', amount: l.principal, status: 'completed' }));
 
-  const fromLoans = loans
-    .filter((l) => l.disbursed_at)
-    .map((l) => ({
-      date: l.disbursed_at,
-      type: 'Loan',
-      amount: l.principal,
-      status: 'completed',
-    }));
-
-  const merged = [...fromPayments, ...fromLoans]
-    .sort((a, b) => new Date(b.date) - new Date(a.date))
-    .slice(0, 5);
-
-  if (merged.length === 0) {
-    return 'END You have no transactions yet.';
-  }
+  const merged = [...fromPayments, ...fromLoans].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 5);
+  if (merged.length === 0) return 'END You have no transactions yet.';
 
   const lines = merged.map((t) => {
-    const date = new Date(t.date).toLocaleDateString('en-GB', {
-      day: '2-digit', month: 'short',
-    });
+    const date = new Date(t.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
     const suffix = t.status === 'completed' ? '' : ` (${t.status})`;
     return `${date}: ${t.type} KES ${Number(t.amount).toLocaleString()}${suffix}`;
   });
@@ -593,17 +528,10 @@ async function handleTransactions(phoneNumber, steps, sessionId) {
 // ============================================================
 async function handleChangePin(phoneNumber, steps) {
   const member = await Member.findByPhone(phoneNumber);
-  if (!member) {
-    return 'END You are not registered. Dial and select option 1 to register first.';
-  }
+  if (!member) return 'END You are not registered. Dial and select option 1 to register first.';
 
-  if (!Member.hasPinSet(member)) {
-    return 'END No SACCO PIN set yet. Check your balance or apply for a loan first to set one.';
-  }
-
-  if (Member.isPinLocked(member)) {
-    return 'END Too many incorrect PIN attempts. Locked for 30 minutes - please try again later.';
-  }
+  if (!Member.hasPinSet(member)) return 'END No SACCO PIN set yet. Check your balance or apply for a loan first to set one.';
+  if (Member.isPinLocked(member)) return 'END Too many incorrect PIN attempts. Locked for 30 minutes - please try again later.';
 
   if (steps.length === 0) return 'CON Enter your CURRENT SACCO PIN:';
 
@@ -611,9 +539,7 @@ async function handleChangePin(phoneNumber, steps) {
     const valid = await Member.verifyPin(member, steps[0]);
     if (!valid) {
       const updated = await Member.recordFailedPinAttempt(member.id);
-      if (Member.isPinLocked(updated)) {
-        return 'END Incorrect PIN. Too many attempts - your account is now locked for 30 minutes.';
-      }
+      if (Member.isPinLocked(updated)) return 'END Incorrect PIN. Too many attempts - your account is now locked for 30 minutes.';
       return 'END Incorrect PIN. Please dial again to retry.';
     }
     return 'CON Enter your NEW 4-digit PIN:';
@@ -621,39 +547,22 @@ async function handleChangePin(phoneNumber, steps) {
 
   if (steps.length === 2) {
     const valid = await Member.verifyPin(member, steps[0]);
-    if (!valid) {
-      return 'END Incorrect current PIN. Please dial again to retry.';
-    }
-    if (!/^\d{4}$/.test(steps[1])) {
-      return 'END New PIN must be exactly 4 digits. Please dial again.';
-    }
+    if (!valid) return 'END Incorrect current PIN. Please dial again to retry.';
+    if (!/^\d{4}$/.test(steps[1])) return 'END New PIN must be exactly 4 digits. Please dial again.';
     return 'CON Confirm your new PIN:';
   }
 
   if (steps.length === 3) {
     const valid = await Member.verifyPin(member, steps[0]);
-    if (!valid) {
-      return 'END Incorrect current PIN. Please dial again to retry.';
-    }
-    if (steps[1] !== steps[2]) {
-      return 'END New PINs did not match. Please dial again to try once more.';
-    }
+    if (!valid) return 'END Incorrect current PIN. Please dial again to retry.';
+    if (steps[1] !== steps[2]) return 'END New PINs did not match. Please dial again to try once more.';
     await Member.resetPinAttempts(member.id);
     await Member.setPin(member.id, steps[1]);
-    try {
-      await smsService.sendSMS(phoneNumber, 'KEMRI SACCO: Your PIN was changed successfully. If this wasn\'t you, contact us immediately.');
-    } catch (smsErr) {
-      console.error('PIN-change confirmation SMS failed (PIN still changed):', smsErr.message);
-    }
+    try { await smsService.sendSMS(phoneNumber, 'KEMRI SACCO: Your PIN was changed successfully. If this wasn\'t you, contact us immediately.'); } catch (smsErr) { console.error('PIN-change confirmation SMS failed:', smsErr.message); }
     return 'END Your PIN has been changed successfully.';
   }
 
   return 'END Invalid input. Please dial again.';
 }
-
-// ============================================================
-// 8. (RETIRED) WITHDRAW
-// ============================================================
-// 2026-10-09: Withdrawal feature retired per board instruction.
 
 module.exports = { handleUssd };

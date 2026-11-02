@@ -9,11 +9,12 @@ const Withdrawal = require('../models/Withdrawal');
 const notificationService = require('./notificationService');
 const emailService = require('./emailService');
 
-async function initiatePayment({ memberId, phoneNumber, amount, loanId }) {
+// 2026-11-02: Added savingsType parameter
+async function initiatePayment({ memberId, phoneNumber, amount, loanId, savingsType = 'ordinary' }) {
   try {
     const isRepayment = !!loanId;
     const accountReference = isRepayment ? `LOAN-${loanId}` : `SACCO-${memberId}`;
-    const description = isRepayment ? 'Loan repayment' : 'Holiday Savings Scheme contribution';
+    const description = isRepayment ? 'Loan repayment' : `${savingsType} Savings`;
 
     const stkResponse = await darajaService.stkPush({
       phoneNumber,
@@ -30,6 +31,7 @@ async function initiatePayment({ memberId, phoneNumber, amount, loanId }) {
       description,
       checkout_request_id: stkResponse.CheckoutRequestID,
       loan_id: loanId || null,
+      savings_type: savingsType, // <--- NEW
     });
 
     return stkResponse;
@@ -67,7 +69,6 @@ async function requestWithdrawal({ memberId, amount }) {
 
 async function notifyRepaymentSuccess(member, payment, updatedLoan, mpesaReceipt) {
   try {
-    // 2026-10-31: Added updatedLoan.reference to SMS templates so member/staff know which loan was paid.
     await smsService.sendSMS(
       member.phone_number,
       smsService.templates.loanRepaymentConfirmed(
@@ -89,15 +90,11 @@ async function notifyRepaymentSuccess(member, payment, updatedLoan, mpesaReceipt
 
 async function notifyDepositSuccess(member, payment, mpesaReceipt) {
   try {
-    await smsService.sendSMS(
-      member.phone_number,
-      smsService.templates.paymentConfirmed(
-        member.full_name,
-        payment.amount,
-        payment.account_reference,
-        mpesaReceipt
-      )
-    );
+    // 2026-11-02: Updated SMS to reflect the savings type
+    const smsText = `KEMRI SACCO: Hi ${member.full_name.split(' ')[0]}, we received your ${payment.savings_type.toUpperCase()} savings deposit of KES ${Number(payment.amount).toLocaleString()}. Receipt: ${mpesaReceipt}.`;
+    
+    await smsService.sendSMS(member.phone_number, smsText);
+    
     await notificationService.notifyStaff({
       smsText: smsService.templates.staffDeposit(member.full_name, payment.amount),
       emailContent: emailService.staffTemplates.deposit(member.full_name, payment.amount),
@@ -109,7 +106,6 @@ async function notifyDepositSuccess(member, payment, mpesaReceipt) {
 
 async function notifyPaymentFailed(member, payment, isRepayment) {
   try {
-    // 2026-10-31: Improved the repayment failure message to include the loan ID
     const message = isRepayment
       ? `KEMRI SACCO: Hi ${member.full_name.split(' ')[0]}, your repayment for Loan ID ${payment.loan_id} failed. Please try again or visit our office.`
       : smsService.templates.paymentFailed(member.full_name);
@@ -148,18 +144,6 @@ async function handleCallback(callbackBody) {
 
       if (isRepayment) {
         // --- REPAYMENT SUCCESS ---
-        //
-        // 2026-10-09: The repayment ledger row (repayments table) is now
-        // written INSIDE this same transaction. Before Phase 2 the ledger
-        // was audit-only - a failure to log it was swallowed because the
-        // canonical state lived in loans/payments. It no longer is: the
-        // principal/interest split now lives in `repayments` and nowhere
-        // else. A missing row would permanently under-report interest
-        // income with no retry. Atomicity is required.
-        //
-        // Split values come back from Loan.applyRepayment(), which reads
-        // the loan's total_interest and the sum of prior interest_paid
-        // rows under the FOR UPDATE lock.
         const client = await db.pool.connect();
         let updatedLoan;
         try {
@@ -197,6 +181,14 @@ async function handleCallback(callbackBody) {
         await Payment.updateStatus(checkoutRequestId, 'completed', mpesaReceipt);
 
         if (member) {
+          // 2026-11-02: Set 6-month/12-month dates on first deposit
+          if (payment.savings_type === 'jipange' && !member.jipange_unlock_date) {
+            await Member.setJipangeDates(member.id);
+          }
+          if (payment.savings_type === 'holiday' && !member.holiday_unlock_date) {
+            await Member.setHolidayDates(member.id);
+          }
+          
           await notifyDepositSuccess(member, payment, mpesaReceipt);
         }
       }
