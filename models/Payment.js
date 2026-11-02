@@ -52,14 +52,15 @@ async function create({
   checkout_request_id,
   loan_id = null,
   channel = 'mpesa',
-  savings_type = 'ordinary', // 2026-11-02: Added
+  savings_type = 'ordinary',
+  status = 'pending', // <--- NEW: Allow passing status (e.g. 'completed' for interest)
 }) {
   const result = await pool.query(
     `INSERT INTO payments 
       (member_id, amount, phone_number, account_reference, description, checkout_request_id, loan_id, channel, status, savings_type)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      RETURNING *`,
-    [member_id, amount, phone, account_reference, description, checkout_request_id, loan_id, channel, savings_type]
+    [member_id, amount, phone, account_reference, description, checkout_request_id, loan_id, channel, status, savings_type]
   );
   return result.rows[0];
 }
@@ -119,7 +120,6 @@ async function findByMpesaReceipt(mpesa_receipt) {
   return result.rows[0];
 }
 
-// 2026-11-02: Updated to filter by savings_type
 async function getMemberBalance(member_id, savingsType = 'ordinary') {
   let query = `SELECT COALESCE(SUM(amount), 0) as balance FROM payments WHERE member_id = $1 AND status = 'completed' AND loan_id IS NULL`;
   const params = [member_id];
@@ -133,7 +133,6 @@ async function getMemberBalance(member_id, savingsType = 'ordinary') {
   return Number(result.rows[0].balance);
 }
 
-// 2026-11-02: Added function to deduct savings on withdrawal
 async function withdrawSavings(memberId, amount, savingsType, reference, client = null) {
   const dbClient = client || pool;
   const amt = Math.round(Number(amount));
@@ -237,7 +236,7 @@ module.exports = {
   claimForProcessing,
   revertToPending,
   getMemberBalance,
-  withdrawSavings, // <--- EXPORTED
+  withdrawSavings,
   findRecentByMember,
   findAllAdmin,
   getStatementLines,

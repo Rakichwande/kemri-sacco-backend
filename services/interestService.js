@@ -31,7 +31,8 @@ class InterestService {
                 checkout_request_id: `INT-${Date.now()}-${member.id}-J`,
                 loan_id: null,
                 channel: 'system',
-                savings_type: 'jipange'
+                savings_type: 'jipange',
+                status: 'completed' // <--- CRITICAL FIX
               }, client);
               // Update the date in the same transaction
               await Member.resetInterestDate(member.id, 'jipange', client);
@@ -78,7 +79,8 @@ class InterestService {
                 checkout_request_id: `INT-${Date.now()}-${member.id}-H`,
                 loan_id: null,
                 channel: 'system',
-                savings_type: 'holiday'
+                savings_type: 'holiday',
+                status: 'completed' // <--- CRITICAL FIX
               }, client);
               await Member.resetInterestDate(member.id, 'holiday', client);
               await client.query('COMMIT');
