@@ -109,6 +109,10 @@ const templates = {
   savingsUnlockReminder: (name, savingsType, amount, unlockDate) =>
     `KEMRI SACCO: Hi ${firstName(name)}, your ${savingsType.toUpperCase()} savings of ${formatKES(amount)} will unlock in 7 days on ${unlockDate}. Dial *483*4444# to plan your withdrawal.`,
 
+  // ─── MEMBER-FACING — ANNUAL INTEREST PAYOUT (Final Feature) ───
+  interestPaid: (name, savingsType, interestAmount, newBalance) =>
+    `KEMRI SACCO: Congratulations ${firstName(name)}! You earned ${formatKES(interestAmount)} in 10% annual interest on your ${savingsType.toUpperCase()} savings. Your new balance is ${formatKES(newBalance)}.`,
+
   // ─── STAFF-FACING (Suggestion 2 Locked In) ───
   staffNewMember: (name) =>
     `KEMRI SACCO Admin: New member registered - ${name}. Note: Credit limit defaults to 0.`,

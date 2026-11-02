@@ -395,6 +395,32 @@ async function getUpcomingUnlocks() {
   return result.rows;
 }
 
+// 2026-11-02: Find members whose 1-year interest date has arrived
+async function getMembersDueForInterest() {
+  const result = await pool.query(
+    `SELECT 
+       m.id, m.full_name, m.phone_number, 
+       m.jipange_interest_date, m.holiday_interest_date,
+       COALESCE(p_jip.sum, 0) AS jipange_balance,
+       COALESCE(p_hol.sum, 0) AS holiday_balance
+     FROM members m
+     LEFT JOIN LATERAL (SELECT SUM(amount) AS sum FROM payments WHERE member_id = m.id AND savings_type = 'jipange' AND status = 'completed') p_jip ON true
+     LEFT JOIN LATERAL (SELECT SUM(amount) AS sum FROM payments WHERE member_id = m.id AND savings_type = 'holiday' AND status = 'completed') p_hol ON true
+     WHERE (m.jipange_interest_date <= CURRENT_DATE AND m.jipange_interest_date IS NOT NULL)
+        OR (m.holiday_interest_date <= CURRENT_DATE AND m.holiday_interest_date IS NOT NULL)`
+  );
+  return result.rows;
+}
+
+// 2026-11-02: Update the interest date to +1 year after payout
+async function resetInterestDate(memberId, savingsType, client) {
+  const col = savingsType === 'jipange' ? 'jipange_interest_date' : 'holiday_interest_date';
+  await client.query(
+    `UPDATE members SET ${col} = (NOW() + INTERVAL '1 year')::date WHERE id = $1`,
+    [memberId]
+  );
+}
+
 async function remove(memberId) {
   const client = await pool.pool.connect();
   try {
@@ -443,6 +469,8 @@ module.exports = {
   isPinLocked, verifyPin, recordFailedPinAttempt, resetPinAttempts, setBoardStaffStatus,
   setBoardStaffByReferences, isBoardStaff, creditWallet, debitWallet, 
   setJipangeDates, setHolidayDates,
-  getUpcomingUnlocks, // <--- EXPORTED HERE
+  getUpcomingUnlocks, 
+  getMembersDueForInterest, // <--- NEW
+  resetInterestDate,        // <--- NEW
   remove,
 };

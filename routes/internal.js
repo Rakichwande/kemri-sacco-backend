@@ -102,4 +102,49 @@ router.post('/run-unlock-reminders', async (req, res) => {
   }
 });
 
+// ============================================================
+// ROUTE 3: Annual Interest Payout (2026-11-02)
+// ============================================================
+// Pays out 10% annual interest to members whose Jipange or Holiday
+// savings have completed a full year.
+//
+// Called by GitHub Actions once per day. It only pays members whose
+// jipange_interest_date or holiday_interest_date is today or earlier.
+// After paying, it resets their interest date to +1 year, so they
+// earn interest again next year.
+//
+// Use ?dryRun=1 to verify without sending real money or SMS.
+router.post('/run-interest-payout', async (req, res) => {
+  const provided = req.headers['x-reminder-secret'];
+  const expected = process.env.REMINDER_SECRET;
+
+  if (!expected) {
+    console.error('REMINDER_SECRET is not configured — interest payout disabled.');
+    return res.status(503).json({ error: 'Reminder service not configured' });
+  }
+
+  if (!provided || provided !== expected) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const dryRun = req.query.dryRun === '1' || req.query.dryRun === 'true';
+
+  try {
+    const InterestService = require('../services/interestService');
+    const summary = await InterestService.runAnnualPayout(dryRun);
+    console.log(
+      `Interest payout run [${dryRun ? 'DRY-RUN' : 'live'}]:`,
+      JSON.stringify(summary)
+    );
+    res.json({
+      success: true,
+      dryRun,
+      summary,
+    });
+  } catch (err) {
+    console.error('Interest payout run failed:', err);
+    res.status(500).json({ error: 'Interest payout run failed', message: err.message });
+  }
+});
+
 module.exports = router;

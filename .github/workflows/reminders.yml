@@ -51,3 +51,19 @@ jobs:
             echo "❌ Savings unlock reminder job did not return 200"
             exit 1
           fi
+
+      # ────────────────────────────────────────────────────────────
+      # 3. ANNUAL INTEREST PAYOUT
+      # ────────────────────────────────────────────────────────────
+      - name: Trigger annual interest payout job
+        run: |
+          response=$(curl -sS -X POST \
+            https://kemri-sacco-backend.onrender.com/internal/run-interest-payout \
+            -H "Content-Type: application/json" \
+            -H "X-Reminder-Secret: ${{ secrets.REMINDER_SECRET }}" \
+            -w "\n__HTTP_STATUS__%{http_code}")
+          echo "$response"
+          if [[ "$response" != *"__HTTP_STATUS__200"* ]]; then
+            echo "❌ Interest payout job did not return 200"
+            exit 1
+          fi
