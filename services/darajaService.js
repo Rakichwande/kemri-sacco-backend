@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { withRetry } = require('../utils/retryHelper'); // <--- ADDED
 require('dotenv').config();
 
 // Shared Daraja environment. Used by STK Push and — in the absence of a
@@ -22,25 +23,10 @@ const BASE_URL = baseUrlFor(getSharedEnv());
 // Token cache keyed by `${env}:${consumerKey}` so STK Push (shared env,
 // e.g. production) and B2C (potentially a different env with different
 // credentials, e.g. sandbox) hold independent cached tokens.
-//
-// Before this was a single module-level variable, which was fine while
-// both services shared one environment. The moment B2C needed to target
-// sandbox while STK Push stayed on production, a single cache would have
-// one overwriting the other — producing the "Invalid Access Token"
-// (401.002.01) error from Safaricom, because the token in flight was
-// minted against the wrong environment.
-//
-// Each entry: { token, expiresAt }
 const tokenCache = new Map();
 
 /**
  * Get OAuth access token from Daraja.
- *
- * config is optional. When omitted, uses the shared DARAJA_ENV /
- * DARAJA_CONSUMER_KEY / DARAJA_CONSUMER_SECRET — the behaviour STK Push
- * depends on. When provided as { env, consumerKey, consumerSecret }, the
- * caller targets a specific environment with specific credentials, and
- * gets its own cached token.
  */
 async function getAccessToken(config = null) {
   const env = config?.env || getSharedEnv();
@@ -63,10 +49,14 @@ async function getAccessToken(config = null) {
 
   try {
     const credentials = Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64');
-    const response = await axios.get(
-      `${baseUrlFor(env)}/oauth/v1/generate?grant_type=client_credentials`,
-      { headers: { Authorization: `Basic ${credentials}` } }
-    );
+    
+    // 2026-11-02: Wrapped in retry logic
+    const response = await withRetry(async () => {
+      return await axios.get(
+        `${baseUrlFor(env)}/oauth/v1/generate?grant_type=client_credentials`,
+        { headers: { Authorization: `Basic ${credentials}` } }
+      );
+    });
 
     const token = response.data.access_token;
     // Refresh 5 minutes before Safaricom's own expiry (typically 1h).
@@ -100,20 +90,6 @@ function getTimestamp() {
 /**
  * Normalizes a Kenyan phone number to the 254XXXXXXXXX format Daraja
  * requires (12 digits, country code, no leading + or 0).
- *
- * Member phone numbers are validated at registration to accept EITHER
- * 07XXXXXXXX/01XXXXXXXX or 2547XXXXXXXX/2541XXXXXXXX (see
- * middleware/validate.js's isValidKenyanPhone) - nothing normalizes them
- * to one consistent stored format. Previously this function only stripped
- * non-digit characters, so a member stored as "0712345678" would be sent
- * to Safaricom exactly as "0712345678" - 10 digits, wrong format - which
- * Daraja does not accept as a valid MSISDN. That would very likely have
- * caused STK pushes to fail for any member who registered with a plain
- * 0-prefixed number, i.e. the way most people naturally type their own
- * number.
- *
- * Throws if the input isn't a recognizable Kenyan number after cleaning,
- * rather than silently sending something malformed to Safaricom.
  */
 function normalizeToMsisdn(phoneNumber) {
   const digitsOnly = String(phoneNumber).replace(/\D/g, '');
@@ -133,9 +109,6 @@ function normalizeToMsisdn(phoneNumber) {
 
 /**
  * Initiate STK push (M-Pesa payment request).
- *
- * Always targets the shared environment (DARAJA_ENV). B2C runs through
- * its own service and can point elsewhere.
  */
 async function stkPush({ phoneNumber, amount, accountReference, description }) {
   try {
@@ -174,11 +147,14 @@ async function stkPush({ phoneNumber, amount, accountReference, description }) {
       TransactionDesc: description || 'SACCO payment',
     };
 
-    const response = await axios.post(
-      `${BASE_URL}/mpesa/stkpush/v1/processrequest`,
-      payload,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
+    // 2026-11-02: Wrapped in retry logic
+    const response = await withRetry(async () => {
+      return await axios.post(
+        `${BASE_URL}/mpesa/stkpush/v1/processrequest`,
+        payload,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+    });
 
     return response.data;
   } catch (error) {

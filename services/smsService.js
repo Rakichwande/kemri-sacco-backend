@@ -1,5 +1,6 @@
 require('dotenv').config();
 const axios = require('axios');
+const { withRetry } = require('../utils/retryHelper'); // <--- ADDED
 
 const SMS_API_URL = process.env.SMS_PROVIDER_API_URL;
 const SMS_API_KEY = process.env.SMS_PROVIDER_API_KEY;
@@ -58,11 +59,9 @@ const templates = {
   loanApproved: (name, principal, interest, totalPayable, purpose) =>
     `KEMRI SACCO: Hi ${firstName(name)}, your ${formatLoanType(purpose)} Loan is approved. Principal: ${formatKES(principal)}. Interest: ${formatKES(interest)}. Total payable: ${formatKES(totalPayable)}. Our team will process the funds shortly.`,
 
-  // Used specifically for Mobile Loans (B2C)
   loanDisbursed: (name, principal, totalPayable, dueDate, ref) =>
     `KEMRI SACCO: Hi ${firstName(name)}, ${formatKES(principal)} has been sent to your M-Pesa (Ref: ${ref}). Total payable: ${formatKES(totalPayable)}, due ${dueDate}. Please settle on time. Thank you.`,
 
-  // Used specifically for Emergency/School Loans (Wallet)
   loanWalletCredited: (name, principal, totalRepayment, date, ref, purpose) =>
     `KEMRI SACCO: Hi ${firstName(name)}, on ${date}, your ${formatLoanType(purpose)} Loan of ${formatKES(principal)} was credited to your SACCO Wallet (Ref: ${ref}). Total payable: ${formatKES(totalRepayment)}. Dial *483*4444# and select '2. My Wallet' to withdraw to M-Pesa.`,
 
@@ -156,31 +155,32 @@ async function sendViaProvider(cleanPhone, message) {
     message,
   };
 
-  const response = await axios.post(SMS_API_URL, payload, {
-    headers: {
-      Authorization: `Bearer ${SMS_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    timeout: 10000,
-  });
+  // 2026-11-02: Wrapped in retry logic
+  return await withRetry(async () => {
+    const response = await axios.post(SMS_API_URL, payload, {
+      headers: {
+        Authorization: `Bearer ${SMS_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      timeout: 10000,
+    });
 
-  const data = response.data || {};
-  const status = String(data.status || '').toUpperCase();
-  const statusCode = String(data.statusCode ?? '');
+    const data = response.data || {};
+    const status = String(data.status || '').toUpperCase();
+    const statusCode = String(data.statusCode ?? '');
 
-  if (status !== 'SUCCESS' || (statusCode && statusCode !== '0')) {
+    if (status !== 'SUCCESS' || (statusCode && statusCode !== '0')) {
+      // Throw an error to trigger the retry mechanism
+      throw new Error(data.desc || `Provider status ${status || '(missing)'}${statusCode ? ` (${statusCode})` : ''}`);
+    }
+
     return {
-      sent: false,
-      reason: data.desc || `Provider status ${status || '(missing)'}${statusCode ? ` (${statusCode})` : ''}`,
+      sent: true,
+      msgId: data.msgId,
+      cost: data.cost,
+      balance: data.balance,
     };
-  }
-
-  return {
-    sent: true,
-    msgId: data.msgId,
-    cost: data.cost,
-    balance: data.balance,
-  };
+  });
 }
 
 async function sendSMS(phoneNumber, message) {
