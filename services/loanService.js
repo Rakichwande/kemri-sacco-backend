@@ -81,12 +81,11 @@ class LoanService {
       };
     }
 
-    // ONLY Board/Staff Mobile loans are auto-approved. 
+    // 2026-11-03: ALL Mobile loans are auto-approved if they pass the limit check.
     const isMobile = purpose === 'mobile';
-    const isBoard = eligibility.member.is_board_staff === true;
     
     let autoApprove = false;
-    if (isMobile && isBoard && amount <= 10000) {
+    if (isMobile) {
       autoApprove = true;
     }
 
@@ -101,7 +100,7 @@ class LoanService {
     const ref = `LN-${String(loan.id).padStart(5, '0')}`;
     const member = eligibility.member;
 
-    // --- Manual review path ---
+    // --- Manual review path (Emergency/School Loans) ---
     if (!autoApprove) {
       await this._notifyApplicationReceived(member, loan, ref);
       return {
@@ -112,8 +111,8 @@ class LoanService {
       };
     }
 
-    // --- Auto-approval path (Board/Staff Mobile Only) ---
-    const approval = await this.approveLoan(loan.id, 'Auto-approved: Board Mobile Loan', { skipSms: true });
+    // --- Auto-approval path (All Mobile Loans) ---
+    const approval = await this.approveLoan(loan.id, 'Auto-approved: Mobile Loan', { skipSms: true });
 
     if (!approval.success) {
       await this._notifyApplicationReceived(member, loan, ref);

@@ -41,11 +41,11 @@ function formatLoanType(purpose) {
 }
 
 const templates = {
-  // ─── MEMBER-FACING — REGISTRATION (Suggestion 3 Locked In) ───
+  // ─── MEMBER-FACING — REGISTRATION ───
   applicationReceived: (name) =>
     `Welcome to KEMRI SACCO, ${firstName(name)}. Your account is active. Save via Ordinary (collateral), Jipange, or Holiday (unlocks in 6 months). Dial *483*4444# to start.`,
 
-  // ─── MEMBER-FACING — DEPOSITS (Three Savings Types) ───
+  // ─── MEMBER-FACING — DEPOSITS ───
   depositOrdinary: (name, amount, receipt) =>
     `KEMRI SACCO: Hi ${firstName(name)}, we received your Ordinary Savings deposit of ${formatKES(amount)}. Receipt: ${receipt}. This acts as collateral for your loans.`,
 
@@ -105,15 +105,15 @@ const templates = {
     return `KEMRI SACCO: Dear ${firstName(name)}, your current outstanding balance for ${formatLoanType(purpose)} Loan (${ref}) is ${formatKES(amountOutstanding)}, ${paymentStatus}.${dueText} Kindly repay by dialling *483*4444#. Thank you.`;
   },
 
-  // ─── MEMBER-FACING — SAVINGS UNLOCK REMINDER (Suggestion 1 Locked In) ───
+  // ─── MEMBER-FACING — SAVINGS UNLOCK REMINDER ───
   savingsUnlockReminder: (name, savingsType, amount, unlockDate) =>
     `KEMRI SACCO: Hi ${firstName(name)}, your ${savingsType.toUpperCase()} savings of ${formatKES(amount)} will unlock in 7 days on ${unlockDate}. Dial *483*4444# to plan your withdrawal.`,
 
-  // ─── MEMBER-FACING — ANNUAL INTEREST PAYOUT (Final Feature) ───
+  // ─── MEMBER-FACING — ANNUAL INTEREST PAYOUT ───
   interestPaid: (name, savingsType, interestAmount, newBalance) =>
     `KEMRI SACCO: Congratulations ${firstName(name)}! You earned ${formatKES(interestAmount)} in 10% annual interest on your ${savingsType.toUpperCase()} savings. Your new balance is ${formatKES(newBalance)}.`,
 
-  // ─── STAFF-FACING (Suggestion 2 Locked In) ───
+  // ─── STAFF-FACING ───
   staffNewMember: (name) =>
     `KEMRI SACCO Admin: New member registered - ${name}. Note: Credit limit defaults to 0.`,
 
@@ -130,7 +130,8 @@ const templates = {
     } else {
       closing = 'Awaiting action.';
     }
-    return `KEMRI SACCO Admin: Board/Staff ${formatLoanType(purpose)} Loan for ${name} (Ref: ${ref}). Auto-approved. ${closing}`;
+    // 2026-11-03: Removed "Board/Staff" because all Mobile loans are now auto-approved.
+    return `KEMRI SACCO Admin: ${formatLoanType(purpose)} Loan for ${name} (Ref: ${ref}). Auto-approved. ${closing}`;
   },
 
   staffLoanDisbursed: (name, reference, receipt) =>
@@ -148,7 +149,6 @@ const templates = {
   staffRepayment: (name, amount, ref) =>
     `KEMRI SACCO Admin: Payment of ${formatKES(amount)} received from ${name} for Loan ${ref}.`,
 
-  // Updated to include savings type
   staffDeposit: (name, amount, savingsType = 'Ordinary') =>
     `KEMRI SACCO Admin: ${savingsType.toUpperCase()} deposit of ${formatKES(amount)} received from ${name}.`,
 
