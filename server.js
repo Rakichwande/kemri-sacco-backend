@@ -111,6 +111,33 @@ async function start() {
       console.error(`Server failed to listen on port ${PORT}:`, err.message);
       process.exit(1);
     });
+
+    // 2026-11-02: GRACEFUL SHUTDOWN
+    // When Render deploys a new version, it sends a SIGTERM signal. 
+    // We stop accepting new connections, finish active requests, and then close the DB pool.
+    const shutdown = () => {
+      console.log('🛑 SIGTERM/SIGINT received. Shutting down gracefully...');
+      
+      server.close(() => {
+        console.log('✅ HTTP server closed.');
+        
+        // Close the PostgreSQL connection pool
+        pool.pool.end(() => {
+          console.log('✅ Database pool closed. Exiting process.');
+          process.exit(0);
+        });
+      });
+
+      // Force shutdown if it takes longer than 10 seconds (e.g., stuck callback)
+      setTimeout(() => {
+        console.error('❌ Could not close connections in time, forcefully shutting down.');
+        process.exit(1);
+      }, 10000);
+    };
+
+    process.on('SIGTERM', shutdown);
+    process.on('SIGINT', shutdown);
+
   } catch (err) {
     console.error('Failed to start server:', err);
     process.exit(1);
