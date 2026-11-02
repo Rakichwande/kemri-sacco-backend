@@ -37,10 +37,8 @@ exports.approveLoan = async (req, res) => {
         const { loanId } = req.params;
         const { adminNotes } = req.body;
 
-        // This call now includes the strict credit limit check in loanService
         const result = await LoanService.approveLoan(loanId, adminNotes);
 
-        // If the limit check fails, it throws the specific error message here
         if (!result.success) {
             return res.status(400).json({ error: result.message });
         }
@@ -57,12 +55,9 @@ exports.approveLoan = async (req, res) => {
             details: `Approved KES ${result.loan.principal} ${result.loan.purpose} loan.${adminNotes ? ' Notes: ' + adminNotes : ''}`,
         });
 
-        // 2026-10-31: Route based on loan type
         if (result.loan.purpose === 'mobile') {
-            // Mobile Loan: Send directly to M-Pesa via Safaricom B2C
             const disbursement = await DisbursementService.disburseLoan(loanId);
             if (!disbursement.success) {
-                // Loan is approved, but B2C failed. Admin will see this error.
                 return res.status(400).json({ error: disbursement.message });
             }
             return res.json({ 
@@ -71,7 +66,6 @@ exports.approveLoan = async (req, res) => {
                 loan: disbursement.loan 
             });
         } else {
-            // Emergency/School Loan: Credit to Wallet
             req.params.loanId = loanId;
             return exports.markDisbursed(req, res);
         }
@@ -185,14 +179,17 @@ exports.repayLoan = async (req, res) => {
 };
 
 // ============================================================
-// 6. Admin: Credit Loan to Member's Wallet (M-Shwari Model)
+// 6. Admin: Manual Disbursement (Mobile or Wallet)
 // ============================================================
 exports.markDisbursed = async (req, res) => {
     try {
         const { loanId } = req.params;
-        if (!loanId) {
-            return res.status(400).json({ error: 'Loan ID required' });
-        }
+        const { mpesaReceipt } = req.body; // Extract manual M-Pesa receipt if provided
+        
+        if (!loanId) return res.status(400).json({ error: 'Loan ID required' });
+
+        const loanCheck = await Loan.findById(loanId);
+        if (!loanCheck) return res.status(404).json({ error: 'Loan not found.' });
 
         const client = await db.pool.connect();
         let loan;
@@ -200,107 +197,106 @@ exports.markDisbursed = async (req, res) => {
         try {
             await client.query('BEGIN');
             
-            // 1. Mark loan as disbursed (updates outstanding balance)
-            loan = await Loan.markDisbursed(loanId, 'Wallet Credit', 'wallet', client);
+            if (loanCheck.purpose === 'mobile') {
+                // 1. Manual Mobile Payment
+                loan = await Loan.markDisbursed(loanId, mpesaReceipt || 'Manual M-Pesa', 'manual', client);
+            } else {
+                // 2. Wallet Credit (Emergency/School)
+                loan = await Loan.markDisbursed(loanId, 'Wallet Credit', 'wallet', client);
+                
+                let walletType = 'general';
+                if (loan.purpose === 'emergency') walletType = 'emergency';
+                if (loan.purpose === 'school') walletType = 'school';
+
+                const ref = `LN-${String(loan.id).padStart(5, '0')}`;
+                await Member.creditWallet(loan.member_id, loan.principal, 'loan_credit', ref, walletType, client);
+            }
             
             if (!loan) {
                 await client.query('ROLLBACK');
                 return res.status(404).json({ error: 'Loan not found or not in approved state.' });
             }
 
-            // 2. Determine which wallet to credit based on purpose
-            let walletType = 'general';
-            if (loan.purpose === 'emergency') walletType = 'emergency';
-            if (loan.purpose === 'school') walletType = 'school';
-
-            // 3. Credit the member's specific wallet
-            const ref = `LN-${String(loan.id).padStart(5, '0')}`;
-            await Member.creditWallet(loan.member_id, loan.principal, 'loan_credit', ref, walletType, client);
-            
             await client.query('COMMIT');
         } catch (dbErr) {
             await client.query('ROLLBACK');
-            console.error('Database error crediting wallet:', dbErr);
-            return res.status(500).json({ error: 'Failed to credit wallet due to database error.' });
+            console.error('Database error during manual disbursement:', dbErr);
+            return res.status(500).json({ error: 'Failed to process manual disbursement.' });
         } finally {
             client.release();
         }
 
         const member = await Member.findById(loan.member_id);
-        if (!member) {
-            return res.status(404).json({ error: 'Member not found' });
-        }
+        if (!member) return res.status(404).json({ error: 'Member not found' });
 
         const ref = `LN-${String(loan.id).padStart(5, '0')}`;
-        
-        // 2. Format the date for the SMS
-        const today = new Date().toLocaleDateString('en-GB', { 
-            day: '2-digit', month: 'short', year: 'numeric' 
-        });
+        const today = new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+        const dueDate = new Date();
+        dueDate.setMonth(dueDate.getMonth() + 1);
+        const dueDateFormatted = dueDate.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
 
-        // 3. Send the Wallet Credit SMS to Member
+        // 3. Send the correct SMS
         try {
-            await smsService.sendSMS(
-                member.phone_number,
-                smsService.templates.loanWalletCredited(
-                    member.full_name,
-                    loan.principal,
-                    loan.total_repayment,
-                    today,
-                    ref,
-                    loan.purpose
-                )
-            );
+            if (loan.purpose === 'mobile') {
+                await smsService.sendSMS(
+                    member.phone_number,
+                    smsService.templates.loanManuallyDisbursed(
+                        member.full_name, loan.principal, loan.total_repayment, dueDateFormatted, ref, mpesaReceipt || 'Manual Transfer'
+                    )
+                );
+            } else {
+                await smsService.sendSMS(
+                    member.phone_number,
+                    smsService.templates.loanWalletCredited(
+                        member.full_name, loan.principal, loan.total_repayment, today, ref, loan.purpose
+                    )
+                );
+            }
         } catch (smsErr) {
-            console.error('Loan wallet credit SMS failed:', smsErr.message);
+            console.error('Loan disbursement SMS failed:', smsErr.message);
         }
 
-        // 4. Send the Wallet Credit SMS to Staff
+        // 4. Notify Staff
         try {
             await notificationService.notifyStaff({
-                smsText: smsService.templates.staffWalletCredited(
-                    member.full_name,
-                    loan.principal,
-                    ref,
-                    loan.purpose
-                ),
+                smsText: loan.purpose === 'mobile' 
+                    ? smsService.templates.staffLoanDisbursed(member.full_name, ref, mpesaReceipt)
+                    : smsService.templates.staffWalletCredited(member.full_name, loan.principal, ref, loan.purpose),
                 emailContent: null,
             });
         } catch (err) {
-            console.error('Staff wallet credit notification failed:', err.message);
+            console.error('Staff notification failed:', err.message);
         }
 
         await AuditLog.log({
             actorId: req.user.id,
             actorUsername: req.user.username,
-            action: 'Credited loan to wallet',
+            action: loan.purpose === 'mobile' ? 'Manually disbursed mobile loan' : 'Credited loan to wallet',
             category: 'loan_decision',
             targetType: 'loan',
             targetId: loanId,
             targetLabel: `${member.full_name} (loan #${loanId})`,
-            details: `Credited KES ${loan.principal} to ${loan.purpose} SACCO Wallet for ${member.full_name}.`,
+            details: `Processed manual disbursement of KES ${loan.principal} for ${loan.purpose} loan.`,
         });
 
         res.json({
             success: true,
-            message: `Loan credited to member's ${loan.purpose} Wallet. SMS sent to member.`,
+            message: loan.purpose === 'mobile' ? 'Mobile loan marked as manually disbursed.' : `Loan credited to ${loan.purpose} Wallet.`,
             loan,
         });
     } catch (err) {
-        console.error('Wallet credit error:', err);
+        console.error('Manual disbursement error:', err);
         res.status(500).json({ error: 'Server error' });
     }
 };
 
 // ============================================================
-// 6b. Admin: Disburse loan automatically (Manual trigger)
+// 6b. Admin: Retry Automatic B2C Disbursement
 // ============================================================
 exports.disburseLoan = async (req, res) => {
     try {
         const { loanId } = req.params;
         
-        // 2026-11-02: PRE-FLIGHT CHECK
-        // Block disbursement if the member's limit was lowered AFTER the loan was approved.
         const loanCheck = await Loan.findById(loanId);
         if (!loanCheck) return res.status(404).json({ error: 'Loan not found' });
         
@@ -316,19 +312,29 @@ exports.disburseLoan = async (req, res) => {
             });
         }
 
-        // Call the service
+        // 1. Notify member that we are retrying
+        try {
+            await smsService.sendSMS(
+                memberCheck.phone_number,
+                smsService.templates.loanRetryB2C(memberCheck.full_name, loanCheck.principal, loanCheck.reference || `LN-${String(loanCheck.id).padStart(5, '0')}`)
+            );
+        } catch (smsErr) {
+            console.error('Retry SMS failed:', smsErr.message);
+        }
+
+        // 2. Retry B2C
         const result = await DisbursementService.disburseLoan(loanId);
 
         if (!result.success) {
             await AuditLog.log({
                 actorId: req.user.id,
                 actorUsername: req.user.username,
-                action: 'Attempted B2C disbursement',
+                action: 'Attempted B2C retry',
                 category: 'loan_decision',
                 targetType: 'loan',
                 targetId: loanId,
                 targetLabel: `loan #${loanId}`,
-                details: `B2C disbursement failed: ${result.message}`,
+                details: `B2C retry failed: ${result.message}`,
             });
             return res.status(400).json({ error: result.message });
         }
@@ -337,12 +343,12 @@ exports.disburseLoan = async (req, res) => {
         await AuditLog.log({
             actorId: req.user.id,
             actorUsername: req.user.username,
-            action: 'Initiated B2C disbursement',
+            action: 'Initiated B2C retry',
             category: 'loan_decision',
             targetType: 'loan',
             targetId: loanId,
             targetLabel: member ? `${member.full_name} (loan #${loanId})` : `loan #${loanId}`,
-            details: `Initiated B2C disbursement of KES ${result.loan.principal}. ConversationID: ${result.conversationId}.`,
+            details: `Initiated B2C retry of KES ${result.loan.principal}. ConversationID: ${result.conversationId}.`,
         });
 
         res.json({
@@ -352,7 +358,7 @@ exports.disburseLoan = async (req, res) => {
             conversationId: result.conversationId,
         });
     } catch (err) {
-        console.error('B2C disbursement error:', err);
+        console.error('B2C retry error:', err);
         res.status(500).json({ error: 'Server error' });
     }
 };
@@ -366,25 +372,17 @@ exports.resolveStuckDisbursement = async (req, res) => {
         const { outcome, receipt, reason } = req.body;
 
         if (!['received', 'not_received'].includes(outcome)) {
-            return res.status(400).json({
-                error: 'outcome must be "received" or "not_received".',
-            });
+            return res.status(400).json({ error: 'outcome must be "received" or "not_received".' });
         }
 
         const loan = await Loan.findById(loanId);
-        if (!loan) {
-            return res.status(404).json({ error: 'Loan not found.' });
-        }
+        if (!loan) return res.status(404).json({ error: 'Loan not found.' });
         if (loan.status !== 'disbursing') {
-            return res.status(400).json({
-                error: `Loan is currently '${loan.status}' — only loans stuck in 'disbursing' can be resolved this way.`,
-            });
+            return res.status(400).json({ error: `Loan is currently '${loan.status}' — only loans stuck in 'disbursing' can be resolved this way.` });
         }
 
         if (outcome === 'received' && (!receipt || !receipt.trim())) {
-            return res.status(400).json({
-                error: 'An M-Pesa receipt is required when confirming the member received the funds.',
-            });
+            return res.status(400).json({ error: 'An M-Pesa receipt is required when confirming the member received the funds.' });
         }
 
         const member = await Member.findById(loan.member_id);
@@ -393,49 +391,32 @@ exports.resolveStuckDisbursement = async (req, res) => {
         if (outcome === 'received') {
             result = await Loan.markDisbursed(loanId, receipt.trim(), 'manual');
         } else {
-            const rollbackReason = reason && reason.trim()
-                ? reason.trim()
-                : 'manual override: callback never arrived';
+            const rollbackReason = reason && reason.trim() ? reason.trim() : 'manual override: callback never arrived';
             result = await Loan.rollbackDisbursing(loanId, rollbackReason);
         }
 
-        if (!result) {
-            return res.status(500).json({ error: 'Failed to resolve the stuck disbursement.' });
-        }
+        if (!result) return res.status(500).json({ error: 'Failed to resolve the stuck disbursement.' });
 
         await AuditLog.log({
             actorId: req.user.id,
             actorUsername: req.user.username,
-            action: outcome === 'received'
-                ? 'Resolved stuck disbursement: member received funds'
-                : 'Resolved stuck disbursement: member did NOT receive funds',
+            action: outcome === 'received' ? 'Resolved stuck disbursement: member received funds' : 'Resolved stuck disbursement: member did NOT receive funds',
             category: 'loan_decision',
             targetType: 'loan',
             targetId: loanId,
             targetLabel: member ? `${member.full_name} (loan #${loanId})` : `loan #${loanId}`,
-            details: outcome === 'received'
-                ? `Manually confirmed receipt ${receipt}. Original ConversationID: ${loan.b2c_conversation_id || 'unknown'}`
-                : `Rolled back to approved. Reason: ${reason || 'callback never arrived'}. Original ConversationID: ${loan.b2c_conversation_id || 'unknown'}`,
+            details: outcome === 'received' ? `Manually confirmed receipt ${receipt}. Original ConversationID: ${loan.b2c_conversation_id || 'unknown'}` : `Rolled back to approved. Reason: ${reason || 'callback never arrived'}. Original ConversationID: ${loan.b2c_conversation_id || 'unknown'}`,
         });
 
         if (outcome === 'received' && member) {
             try {
                 const updatedMember = await Member.findById(loan.member_id);
-                
-                const dueDateFormatted = result.next_payment_due
-                    ? new Date(result.next_payment_due).toLocaleDateString('en-GB', {
-                        day: '2-digit', month: 'short', year: 'numeric',
-                      })
-                    : '—';
+                const dueDateFormatted = result.next_payment_due ? new Date(result.next_payment_due).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';
 
                 await smsService.sendSMS(
                     member.phone_number,
-                    smsService.templates.loanDisbursed(
-                        member.full_name,
-                        loan.principal,
-                        updatedMember?.total_outstanding_balance || loan.total_repayment,
-                        dueDateFormatted,
-                        loan.reference
+                    smsService.templates.loanManuallyDisbursed(
+                        member.full_name, loan.principal, updatedMember?.total_outstanding_balance || loan.total_repayment, dueDateFormatted, loan.reference, receipt
                     )
                 );
             } catch (err) {
@@ -447,9 +428,7 @@ exports.resolveStuckDisbursement = async (req, res) => {
             success: true,
             outcome,
             loan: result,
-            message: outcome === 'received'
-                ? 'Loan marked disbursed with the recorded receipt.'
-                : 'Loan rolled back to approved. Ready to retry.',
+            message: outcome === 'received' ? 'Loan marked disbursed with the recorded receipt.' : 'Loan rolled back to approved. Ready to retry.',
         });
     } catch (err) {
         console.error('Resolve stuck disbursement error:', err);

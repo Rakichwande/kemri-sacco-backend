@@ -31,7 +31,7 @@ async function initiatePayment({ memberId, phoneNumber, amount, loanId, savingsT
       description,
       checkout_request_id: stkResponse.CheckoutRequestID,
       loan_id: loanId || null,
-      savings_type: savingsType, // <--- NEW
+      savings_type: savingsType,
     });
 
     return stkResponse;
@@ -44,7 +44,7 @@ async function initiatePayment({ memberId, phoneNumber, amount, loanId, savingsT
 // 2026-10-09: Withdrawal feature retired per board instruction. This
 // function is now dormant - no caller invokes it. Retained so that if the
 // board reinstates withdrawals, the orchestration logic is recoverable
-// without rewriting from scratch. The USSD handler and admin UI are gone.
+// without rewriting from scratch.
 async function requestWithdrawal({ memberId, amount }) {
   const balance = await Payment.getMemberBalance(memberId);
   if (amount > balance) {
@@ -90,13 +90,36 @@ async function notifyRepaymentSuccess(member, payment, updatedLoan, mpesaReceipt
 
 async function notifyDepositSuccess(member, payment, mpesaReceipt) {
   try {
-    // 2026-11-02: Updated SMS to reflect the savings type
-    const smsText = `KEMRI SACCO: Hi ${member.full_name.split(' ')[0]}, we received your ${payment.savings_type.toUpperCase()} savings deposit of KES ${Number(payment.amount).toLocaleString()}. Receipt: ${mpesaReceipt}.`;
-    
+    const savingsType = payment.savings_type || 'ordinary';
+    let smsText;
+
+    // 2026-11-02: Select the correct SMS template and calculate unlock date
+    if (savingsType === 'jipange') {
+      const unlockDate = new Date();
+      unlockDate.setMonth(unlockDate.getMonth() + 6);
+      const formattedDate = unlockDate.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+      
+      smsText = smsService.templates.depositJipange(
+        member.full_name, payment.amount, mpesaReceipt, formattedDate
+      );
+    } else if (savingsType === 'holiday') {
+      const unlockDate = new Date();
+      unlockDate.setMonth(unlockDate.getMonth() + 6);
+      const formattedDate = unlockDate.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+      
+      smsText = smsService.templates.depositHoliday(
+        member.full_name, payment.amount, mpesaReceipt, formattedDate
+      );
+    } else {
+      smsText = smsService.templates.depositOrdinary(
+        member.full_name, payment.amount, mpesaReceipt
+      );
+    }
+
     await smsService.sendSMS(member.phone_number, smsText);
     
     await notificationService.notifyStaff({
-      smsText: smsService.templates.staffDeposit(member.full_name, payment.amount),
+      smsText: smsService.templates.staffDeposit(member.full_name, payment.amount, savingsType),
       emailContent: emailService.staffTemplates.deposit(member.full_name, payment.amount),
     });
   } catch (notifyErr) {

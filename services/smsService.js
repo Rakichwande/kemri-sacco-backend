@@ -1,6 +1,6 @@
 require('dotenv').config();
 const axios = require('axios');
-const { withRetry } = require('../utils/retryHelper'); // <--- ADDED
+const { withRetry } = require('../utils/retryHelper');
 
 const SMS_API_URL = process.env.SMS_PROVIDER_API_URL;
 const SMS_API_KEY = process.env.SMS_PROVIDER_API_KEY;
@@ -45,9 +45,15 @@ const templates = {
   applicationReceived: (name) =>
     `Welcome to KEMRI SACCO, ${firstName(name)}. Your account is active. Dial *483*4444# to save or apply for a loan. Note: Loan limits are set by the SACCO and may vary by member.`,
 
-  // ─── MEMBER-FACING — DEPOSITS ───
-  paymentConfirmed: (name, amount, reference, receipt) =>
-    `KEMRI SACCO: Hi ${firstName(name)}, we received your deposit of ${formatKES(amount)}. Receipt: ${receipt}. Your savings balance is updated. Ref: ${reference}.`,
+  // ─── MEMBER-FACING — DEPOSITS (Three Savings Types) ───
+  depositOrdinary: (name, amount, receipt) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, we received your Ordinary Savings deposit of ${formatKES(amount)}. Receipt: ${receipt}. This acts as collateral for your loans.`,
+
+  depositJipange: (name, amount, receipt, unlockDate) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, we received your Jipange deposit of ${formatKES(amount)}. Receipt: ${receipt}. Funds will be available for withdrawal on ${unlockDate}.`,
+
+  depositHoliday: (name, amount, receipt, unlockDate) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, we received your Holiday Savings deposit of ${formatKES(amount)}. Receipt: ${receipt}. Funds will be available for withdrawal on ${unlockDate}.`,
 
   paymentFailed: (name) =>
     `KEMRI SACCO: Hi ${firstName(name)}, your deposit did not go through. Nothing was deducted. Please try again or visit our office.`,
@@ -59,9 +65,19 @@ const templates = {
   loanApproved: (name, principal, interest, totalPayable, purpose) =>
     `KEMRI SACCO: Hi ${firstName(name)}, your ${formatLoanType(purpose)} Loan is approved. Principal: ${formatKES(principal)}. Interest: ${formatKES(interest)}. Total payable: ${formatKES(totalPayable)}. Our team will process the funds shortly.`,
 
+  // Used specifically for Mobile Loans (B2C)
   loanDisbursed: (name, principal, totalPayable, dueDate, ref) =>
-    `KEMRI SACCO: Hi ${firstName(name)}, ${formatKES(principal)} has been sent to your M-Pesa (Ref: ${ref}). Total payable: ${formatKES(totalPayable)}, due ${dueDate}. Please settle on time. Thank you.`,
+    `KEMRI SACCO: Hi ${firstName(name)}, ${formatKES(principal)} has been sent to your M-Pesa (Ref: ${ref}). Total payable: ${formatKES(totalPayable)}, due ${dueDate}. Please settle on time.`,
 
+  // Used when Admin clicks "Retry B2C"
+  loanRetryB2C: (name, principal, ref) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, we are retrying your Mobile Loan disbursement of ${formatKES(principal)} (Ref: ${ref}). You will receive another SMS once it hits your M-Pesa.`,
+
+  // Used when Admin clicks "Mark Manually Paid"
+  loanManuallyDisbursed: (name, principal, totalPayable, dueDate, ref, receipt) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, your loan of ${formatKES(principal)} has been manually disbursed (Ref: ${ref}). Receipt: ${receipt}. Total payable: ${formatKES(totalPayable)}, due ${dueDate}.`,
+
+  // Used specifically for Emergency/School Loans (Wallet)
   loanWalletCredited: (name, principal, totalRepayment, date, ref, purpose) =>
     `KEMRI SACCO: Hi ${firstName(name)}, on ${date}, your ${formatLoanType(purpose)} Loan of ${formatKES(principal)} was credited to your SACCO Wallet (Ref: ${ref}). Total payable: ${formatKES(totalRepayment)}. Dial *483*4444# and select '2. My Wallet' to withdraw to M-Pesa.`,
 
@@ -84,11 +100,14 @@ const templates = {
       ? `and you have paid ${formatKES(amountPaid)} to date`
       : 'and no repayments have been received to date';
     
-    // 2026-11-01: Added due date to the reminder SMS
     const dueText = dueDate ? ` Your repayment is due by ${dueDate}.` : '';
 
     return `KEMRI SACCO: Dear ${firstName(name)}, your current outstanding balance for ${formatLoanType(purpose)} Loan (${ref}) is ${formatKES(amountOutstanding)}, ${paymentStatus}.${dueText} Kindly repay by dialling *483*4444#. Thank you.`;
   },
+
+  // ─── MEMBER-FACING — SAVINGS UNLOCK REMINDER (7 days before) ───
+  savingsUnlockReminder: (name, savingsType, amount, unlockDate) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, your ${savingsType.toUpperCase()} savings of ${formatKES(amount)} will unlock in 7 days on ${unlockDate}. Dial *483*4444# to plan your withdrawal.`,
 
   // ─── STAFF-FACING ───
   staffNewMember: (name) =>
@@ -125,8 +144,9 @@ const templates = {
   staffRepayment: (name, amount, ref) =>
     `KEMRI SACCO Admin: Payment of ${formatKES(amount)} received from ${name} for Loan ${ref}.`,
 
-  staffDeposit: (name, amount) =>
-    `KEMRI SACCO Admin: Deposit of ${formatKES(amount)} received from ${name}.`,
+  // Updated to include savings type
+  staffDeposit: (name, amount, savingsType = 'Ordinary') =>
+    `KEMRI SACCO Admin: ${savingsType.toUpperCase()} deposit of ${formatKES(amount)} received from ${name}.`,
 
   staffLoanOverdueAlert: (name, reference, amountBehind) =>
     `KEMRI SACCO Admin: ${name} is ${formatKES(amountBehind)} behind on loan ${reference}. 6 days past month-end - consider calling.`,
@@ -155,7 +175,6 @@ async function sendViaProvider(cleanPhone, message) {
     message,
   };
 
-  // 2026-11-02: Wrapped in retry logic
   return await withRetry(async () => {
     const response = await axios.post(SMS_API_URL, payload, {
       headers: {
@@ -170,7 +189,6 @@ async function sendViaProvider(cleanPhone, message) {
     const statusCode = String(data.statusCode ?? '');
 
     if (status !== 'SUCCESS' || (statusCode && statusCode !== '0')) {
-      // Throw an error to trigger the retry mechanism
       throw new Error(data.desc || `Provider status ${status || '(missing)'}${statusCode ? ` (${statusCode})` : ''}`);
     }
 
@@ -185,7 +203,7 @@ async function sendViaProvider(cleanPhone, message) {
 
 async function sendSMS(phoneNumber, message) {
   if (!isConfigured()) {
-    console.warn('SMS not sent: provider is not configured (SMS_PROVIDER_API_URL / SMS_PROVIDER_API_KEY / SMS_PROVIDER_SENDER_ID missing)');
+    console.warn('SMS not sent: provider is not configured');
     return { sent: false, reason: 'SMS provider is not configured' };
   }
 
@@ -196,7 +214,7 @@ async function sendSMS(phoneNumber, message) {
 
   const cleanPhone = normalizePhone(phoneNumber);
   if (!cleanPhone) {
-    console.warn('SMS not sent: invalid phone number after normalization:', phoneNumber);
+    console.warn('SMS not sent: invalid phone number:', phoneNumber);
     return { sent: false, reason: 'Invalid phone number' };
   }
 
@@ -204,7 +222,7 @@ async function sendSMS(phoneNumber, message) {
     const result = await sendViaProvider(cleanPhone, message);
 
     if (!result.sent) {
-      console.error(`❌ SMS to ${cleanPhone} was NOT delivered — ${result.reason}`);
+      console.error(`❌ SMS to ${cleanPhone} NOT delivered — ${result.reason}`);
     } else {
       console.log(`✅ SMS delivered to ${cleanPhone}${result.msgId ? ` — msgId ${result.msgId}` : ''}${result.cost ? `, cost ${result.cost}` : ''}`);
     }
