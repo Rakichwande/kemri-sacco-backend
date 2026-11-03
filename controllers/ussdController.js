@@ -354,7 +354,7 @@ async function handleDeposit(phoneNumber, steps) {
 
   // Step 1: Select Savings Type
   if (steps.length === 0) {
-    return 'CON Select Savings Type:\n1. Ordinary (Fixed)\n2. Jipange\n3. Holiday';
+    return 'CON Select Savings Type:\n1. Ordinary\n2. Jipange\n3. Holiday';
   }
 
   // Step 2: Enter Amount
