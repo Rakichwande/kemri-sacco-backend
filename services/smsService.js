@@ -45,15 +45,15 @@ const templates = {
   applicationReceived: (name) =>
     `Welcome to KEMRI SACCO, ${firstName(name)}. Your account is active. Save via Ordinary (collateral), Jipange, or Holiday (unlocks in 6 months). Dial *483*4444# to start.`,
 
-  // ─── MEMBER-FACING — DEPOSITS ───
-  depositOrdinary: (name, amount, receipt) =>
-    `KEMRI SACCO: Hi ${firstName(name)}, we received your Ordinary Savings deposit of ${formatKES(amount)}. Receipt: ${receipt}. This acts as collateral for your loans.`,
+  // ─── MEMBER-FACING — DEPOSITS (M-Pesa Style) ───
+  depositOrdinary: (name, amount, receipt, dateTime, newBalance) =>
+    `Ref:${receipt}: Dear ${firstName(name).toUpperCase()}, You have deposited KES ${Number(amount).toLocaleString()} into your Ordinary Savings from KEMRI SACCO at ${dateTime}. The receipt number is: ${receipt}. New Ordinary balance is KES ${Number(newBalance).toLocaleString()}.`,
 
-  depositJipange: (name, amount, receipt, unlockDate) =>
-    `KEMRI SACCO: Hi ${firstName(name)}, we received your Jipange deposit of ${formatKES(amount)}. Receipt: ${receipt}. Funds will be available for withdrawal on ${unlockDate}.`,
+  depositJipange: (name, amount, receipt, dateTime, newBalance, unlockDate) =>
+    `Ref:${receipt}: Dear ${firstName(name).toUpperCase()}, You have deposited KES ${Number(amount).toLocaleString()} into your Jipange Savings from KEMRI SACCO at ${dateTime}. The receipt number is: ${receipt}. New Jipange balance is KES ${Number(newBalance).toLocaleString()}. Funds unlock on ${unlockDate}.`,
 
-  depositHoliday: (name, amount, receipt, unlockDate) =>
-    `KEMRI SACCO: Hi ${firstName(name)}, we received your Holiday Savings deposit of ${formatKES(amount)}. Receipt: ${receipt}. Funds will be available for withdrawal on ${unlockDate}.`,
+  depositHoliday: (name, amount, receipt, dateTime, newBalance, unlockDate) =>
+    `Ref:${receipt}: Dear ${firstName(name).toUpperCase()}, You have deposited KES ${Number(amount).toLocaleString()} into your Holiday Savings from KEMRI SACCO at ${dateTime}. The receipt number is: ${receipt}. New Holiday balance is KES ${Number(newBalance).toLocaleString()}. Funds unlock on ${unlockDate}.`,
 
   paymentFailed: (name) =>
     `KEMRI SACCO: Hi ${firstName(name)}, your deposit did not go through. Nothing was deducted. Please try again or visit our office.`,
@@ -109,9 +109,9 @@ const templates = {
   savingsUnlockReminder: (name, savingsType, amount, unlockDate) =>
     `KEMRI SACCO: Hi ${firstName(name)}, your ${savingsType.toUpperCase()} savings of ${formatKES(amount)} will unlock in 7 days on ${unlockDate}. Dial *483*4444# to plan your withdrawal.`,
 
-  // ─── MEMBER-FACING — ANNUAL INTEREST PAYOUT ───
+  // ─── MEMBER-FACING — 6-MONTH COMPOUNDED INTEREST PAYOUT ───
   interestPaid: (name, savingsType, interestAmount, newBalance) =>
-    `KEMRI SACCO: Congratulations ${firstName(name)}! You earned ${formatKES(interestAmount)} in 10% annual interest on your ${savingsType.toUpperCase()} savings. Your new balance is ${formatKES(newBalance)}.`,
+    `KEMRI SACCO: Congratulations ${firstName(name)}! You earned ${formatKES(interestAmount)} in 6-month compounded interest on your ${savingsType.toUpperCase()} savings. Your new balance is ${formatKES(newBalance)}.`,
 
   // ─── STAFF-FACING ───
   staffNewMember: (name) =>
@@ -130,7 +130,7 @@ const templates = {
     } else {
       closing = 'Awaiting action.';
     }
-    // 2026-11-03: Removed "Board/Staff" because all Mobile loans are now auto-approved.
+    // Removed "Board/Staff" because all Mobile loans are now auto-approved.
     return `KEMRI SACCO Admin: ${formatLoanType(purpose)} Loan for ${name} (Ref: ${ref}). Auto-approved. ${closing}`;
   },
 

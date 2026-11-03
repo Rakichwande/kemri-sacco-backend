@@ -355,31 +355,32 @@ async function debitWallet(memberId, amount, type, reference, walletType = 'gene
   return { wallet_balance: res.rows[0].new_balance, reference: ref };
 }
 
+// 2026-11-03: Set 6-month unlock and 6-month first interest date
 async function setJipangeDates(memberId) {
   await pool.query(
     `UPDATE members 
      SET jipange_unlock_date = (NOW() + INTERVAL '6 months')::date,
-         jipange_interest_date = (NOW() + INTERVAL '1 year')::date
+         jipange_interest_date = (NOW() + INTERVAL '6 months')::date
      WHERE id = $1 AND jipange_unlock_date IS NULL`,
     [memberId]
   );
 }
 
+// 2026-11-03: Set 6-month unlock and 6-month first interest date
 async function setHolidayDates(memberId) {
   await pool.query(
     `UPDATE members 
      SET holiday_unlock_date = (NOW() + INTERVAL '6 months')::date,
-         holiday_interest_date = (NOW() + INTERVAL '1 year')::date
+         holiday_interest_date = (NOW() + INTERVAL '6 months')::date
      WHERE id = $1 AND holiday_unlock_date IS NULL`,
     [memberId]
   );
 }
 
-// 2026-11-02: SUGGESTION 1 - Find members whose Jipange or Holiday savings unlock in exactly 7 days
 async function getUpcomingUnlocks() {
   const targetDate = new Date();
   targetDate.setDate(targetDate.getDate() + 7);
-  const dateString = targetDate.toISOString().split('T')[0]; // YYYY-MM-DD
+  const dateString = targetDate.toISOString().split('T')[0];
 
   const result = await pool.query(
     `SELECT 
@@ -395,7 +396,6 @@ async function getUpcomingUnlocks() {
   return result.rows;
 }
 
-// 2026-11-02: Find members whose 1-year interest date has arrived
 async function getMembersDueForInterest() {
   const result = await pool.query(
     `SELECT 
@@ -412,11 +412,11 @@ async function getMembersDueForInterest() {
   return result.rows;
 }
 
-// 2026-11-02: Update the interest date to +1 year after payout
+// 2026-11-03: Update the interest date by +6 months (compounding) and fix the date drift bug
 async function resetInterestDate(memberId, savingsType, client) {
   const col = savingsType === 'jipange' ? 'jipange_interest_date' : 'holiday_interest_date';
   await client.query(
-    `UPDATE members SET ${col} = (NOW() + INTERVAL '1 year')::date WHERE id = $1`,
+    `UPDATE members SET ${col} = (${col} + INTERVAL '6 months')::date WHERE id = $1`,
     [memberId]
   );
 }
@@ -470,7 +470,7 @@ module.exports = {
   setBoardStaffByReferences, isBoardStaff, creditWallet, debitWallet, 
   setJipangeDates, setHolidayDates,
   getUpcomingUnlocks, 
-  getMembersDueForInterest, // <--- NEW
-  resetInterestDate,        // <--- NEW
+  getMembersDueForInterest,
+  resetInterestDate,
   remove,
 };

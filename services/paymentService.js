@@ -92,15 +92,21 @@ async function notifyDepositSuccess(member, payment, mpesaReceipt) {
   try {
     const savingsType = payment.savings_type || 'ordinary';
     let smsText;
+    
+    // Calculate date and time for the SMS
+    const now = new Date();
+    const dateTime = now.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) + ' ' + now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+    
+    // Get the new balance for the specific savings type
+    const newBalance = await Payment.getMemberBalance(member.id, savingsType);
 
-    // 2026-11-02: Select the correct SMS template and calculate unlock date
     if (savingsType === 'jipange') {
       const unlockDate = new Date();
       unlockDate.setMonth(unlockDate.getMonth() + 6);
       const formattedDate = unlockDate.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
       
       smsText = smsService.templates.depositJipange(
-        member.full_name, payment.amount, mpesaReceipt, formattedDate
+        member.full_name, payment.amount, mpesaReceipt, dateTime, newBalance, formattedDate
       );
     } else if (savingsType === 'holiday') {
       const unlockDate = new Date();
@@ -108,11 +114,11 @@ async function notifyDepositSuccess(member, payment, mpesaReceipt) {
       const formattedDate = unlockDate.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
       
       smsText = smsService.templates.depositHoliday(
-        member.full_name, payment.amount, mpesaReceipt, formattedDate
+        member.full_name, payment.amount, mpesaReceipt, dateTime, newBalance, formattedDate
       );
     } else {
       smsText = smsService.templates.depositOrdinary(
-        member.full_name, payment.amount, mpesaReceipt
+        member.full_name, payment.amount, mpesaReceipt, dateTime, newBalance
       );
     }
 
