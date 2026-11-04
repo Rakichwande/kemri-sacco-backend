@@ -237,17 +237,39 @@ async function sendSMS(phoneNumber, message) {
   }
 }
 
+// 2026-11-04: AUTOMATIC SYNC - Checks is_board_staff badge before sending
 async function notifyStaff(message) {
   const Admin = require('../models/Admin');
+  const Member = require('../models/Member');
+
   try {
     const staff = await Admin.findAll();
     const withPhone = staff.filter((s) => s.phone);
+    
+    const validStaffToAlert = [];
+
+    for (const admin of withPhone) {
+      // Check if this admin's phone number belongs to a SACCO Member
+      const member = await Member.findByPhone(admin.phone);
+      
+      if (member) {
+        // If they are a member, they ONLY get the SMS if they currently hold the Board/Staff badge
+        if (member.is_board_staff === true) {
+          validStaffToAlert.push(admin);
+        }
+      } else {
+        // If they are a pure IT/System Admin (not a member), they always get the SMS.
+        validStaffToAlert.push(admin);
+      }
+    }
+
     const results = await Promise.allSettled(
-      withPhone.map((s) => sendSMS(s.phone, message))
+      validStaffToAlert.map((s) => sendSMS(s.phone, message))
     );
+    
     const failed = results.filter((r) => r.status === 'rejected').length;
     if (failed > 0) {
-      console.warn(`notifyStaff: ${failed} of ${withPhone.length} staff deliveries failed.`);
+      console.warn(`notifyStaff: ${failed} of ${validStaffToAlert.length} staff deliveries failed.`);
     }
   } catch (err) {
     console.error('notifyStaff failed to look up staff accounts:', err.message);
