@@ -21,18 +21,19 @@ class LoanService {
       return { allowed: false, reason: 'You are currently not eligible to take a Mobile loan. Please contact the SACCO office.' };
     }
 
-    // 2. SCENARIO B: Strict Block for active loans.
+    // 2. SCENARIO B: Strict Block for active loans OF THE SAME PURPOSE.
+    // 2026-11-04: Added `purpose = $2` so Mobile, Emergency, and School are independent.
     const activeLoansRes = await db.query(
       `SELECT id FROM loans 
-       WHERE member_id = $1 AND status IN ('pending', 'approved', 'disbursing', 'disbursed')
+       WHERE member_id = $1 AND purpose = $2 AND status IN ('pending', 'approved', 'disbursing', 'disbursed')
        LIMIT 1`,
-      [memberId]
+      [memberId, purpose]
     );
     
     if (activeLoansRes.rows.length > 0) {
       return { 
         allowed: false, 
-        reason: 'You already have an active or pending loan. Please clear your existing balance before applying for another loan.' 
+        reason: `You already have an active or pending ${purpose.toUpperCase()} loan. Please clear it before applying for another.` 
       };
     }
 
@@ -133,7 +134,7 @@ class LoanService {
     if (!disbursement.success) {
       return {
         success: true,
-        message: 'Mobile loan approved. Disbursement is pending — our team will complete it shortly.',
+        message: 'Mobile loan approved. Disbursement is pending — our team will complete this shortly.',
         loan: approval.loan,
         autoApproved: true,
         disbursementFailed: true,
@@ -151,9 +152,10 @@ class LoanService {
 
   static async _notifyApplicationReceived(member, loan, ref) {
     try {
+      // 2026-11-04: Added loan.total_repayment for the new SMS template
       await smsService.sendSMS(
         member.phone_number,
-        smsService.templates.loanApplicationReceived(member.full_name, loan.principal, ref, loan.purpose)
+        smsService.templates.loanApplicationReceived(member.full_name, loan.principal, ref, loan.purpose, loan.total_repayment)
       );
     } catch (smsErr) {
       console.error('Loan application SMS failed:', smsErr.message);
@@ -182,15 +184,15 @@ class LoanService {
 
     const creditLimit = Number(member.credit_limit || 0);
     
-    // Check if they have ANY OTHER active loans
+    // 2026-11-04: Check if they have ANY OTHER active loans OF THE SAME PURPOSE
     const otherLoansRes = await db.query(
       `SELECT id FROM loans 
-       WHERE member_id = $1 AND status IN ('pending', 'approved', 'disbursing', 'disbursed') AND id != $2`,
-      [loanData.member_id, loanId]
+       WHERE member_id = $1 AND purpose = $2 AND status IN ('pending', 'approved', 'disbursing', 'disbursed') AND id != $3`,
+      [loanData.member_id, loanData.purpose, loanId]
     );
     
     if (otherLoansRes.rows.length > 0) {
-      return { success: false, message: `ACTION BLOCKED: Member already has an active or pending loan.` };
+      return { success: false, message: `ACTION BLOCKED: Member already has an active ${loanData.purpose.toUpperCase()} loan.` };
     }
 
     // Only enforce credit limit for Mobile loans. Emergency/School bypass this.
@@ -249,7 +251,7 @@ class LoanService {
     return {
       success: true,
       loan: activeLoan,
-      dueAmount: Number(activeLoan.outstanding_balance), // They can pay whatever they want
+      dueAmount: Number(activeLoan.outstanding_balance),
       message: `Amount payable: KES ${Number(activeLoan.outstanding_balance).toLocaleString()}.`,
     };
   }

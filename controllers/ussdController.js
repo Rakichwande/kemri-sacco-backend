@@ -387,12 +387,7 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
   if (!pinCheck.authenticated) return pinCheck.response;
   const remaining = pinCheck.remainingSteps;
 
-  // 2026-11-04: Check if they have any active loans before showing the menu
-  const activeCheck = await LoanService.canApply(member.id, 'general'); // 'general' bypasses the 0 limit check but enforces Strict Block
-  if (!activeCheck.allowed) {
-    return `END ${activeCheck.reason}`; 
-  }
-
+  // 2026-11-04: REMOVED global activeCheck. The menu now shows first.
   if (remaining.length === 0) {
     return `CON Select Loan Type:\n1. Emergency (Max 100K)\n2. School Fees (Max 300K)\n3. Mobile (Instant to M-Pesa)`;
   }
@@ -407,7 +402,7 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
       return `CON Enter School Fees loan amount (Max 300,000):`;
     }
     if (typeChoice === '3') {
-      // Mobile loans REQUIRE a valid credit limit
+      // 2026-11-04: Only check the limit/block for Mobile loans
       const mobileCheck = await LoanService.canApply(member.id, 'mobile');
       if (!mobileCheck.allowed) return `END ${mobileCheck.reason}`;
       return `CON Enter Mobile loan amount (KES)\nCredit limit: KES ${mobileCheck.creditLimit.toLocaleString()}`;
