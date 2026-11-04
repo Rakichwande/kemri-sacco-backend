@@ -6,11 +6,9 @@ const emailService = require('./emailService');
 const db = require('../config/database'); 
 
 const MIN_LOAN_AMOUNT = 1000;
-const INTEREST_RATE = 6.0;
-const TENURE_MONTHS = 1;
 
 class LoanService {
-  static async canApply(memberId) {
+  static async canApply(memberId, purpose = 'mobile') {
     const member = await Member.findById(memberId);
     if (!member) {
       return { allowed: false, reason: 'Member not found.' };
@@ -18,13 +16,12 @@ class LoanService {
 
     const creditLimit = Number(member.credit_limit || 0);
 
-    // 1. Block if limit is 0 (Member not on the 5k list or Board)
-    if (creditLimit === 0) {
-      return { allowed: false, reason: 'You are currently not eligible to take a loan. Please contact the SACCO office.' };
+    // 1. Block if limit is 0 (Only applies to Mobile loans. Emergency/School can still apply)
+    if (purpose === 'mobile' && creditLimit === 0) {
+      return { allowed: false, reason: 'You are currently not eligible to take a Mobile loan. Please contact the SACCO office.' };
     }
 
     // 2. SCENARIO B: Strict Block for active loans.
-    // Check if they have ANY active or pending loan.
     const activeLoansRes = await db.query(
       `SELECT id FROM loans 
        WHERE member_id = $1 AND status IN ('pending', 'approved', 'disbursing', 'disbursed')
@@ -39,32 +36,38 @@ class LoanService {
       };
     }
 
-    // 3. If no active loans, they are good to apply.
-    return { allowed: true, creditLimit: creditLimit, member, reason: 'Eligible to apply.' };
+    return { allowed: true, creditLimit, member, reason: 'Eligible to apply.' };
   }
 
-  static calculateRepaymentSchedule(principal) {
-    const totalInterest = Math.round(principal * (INTEREST_RATE / 100) * TENURE_MONTHS);
+  static calculateRepaymentSchedule(principal, purpose) {
+    let interestRate = 6;
+    let tenureMonths = 1;
+
+    if (purpose === 'emergency' || purpose === 'school') {
+      interestRate = 16; // 16% flat per annum
+      tenureMonths = 12; // 1 year
+    }
+
+    const totalInterest = Math.round(principal * (interestRate / 100) * tenureMonths);
     const totalRepayment = principal + totalInterest;
-    const amountPayable = totalRepayment; 
 
     return {
       principal,
-      interestRate: INTEREST_RATE,
-      tenureMonths: TENURE_MONTHS,
+      interestRate,
+      tenureMonths,
       totalInterest,
       totalRepayment,
-      monthlyInstallment: amountPayable,
+      monthlyInstallment: totalRepayment, // User pays at their own pace
     };
   }
 
-  static async apply(memberId, requestedAmount, purpose = 'general') {
+  static async apply(memberId, requestedAmount, purpose = 'mobile') {
     const amount = Number(requestedAmount);
     if (!Number.isFinite(amount) || amount <= 0) {
       return { success: false, message: 'Invalid loan amount.' };
     }
 
-    const eligibility = await this.canApply(memberId);
+    const eligibility = await this.canApply(memberId, purpose);
     if (!eligibility.allowed) {
       return { success: false, message: eligibility.reason };
     }
@@ -72,35 +75,36 @@ class LoanService {
     if (amount < MIN_LOAN_AMOUNT) {
       return { success: false, message: `Minimum loan principal is KES ${MIN_LOAN_AMOUNT}.` };
     }
-    
-    // Check against the AVAILABLE limit
-    if (amount > eligibility.creditLimit) {
+
+    // 3. Enforce Limits based on purpose
+    if (purpose === 'mobile' && amount > eligibility.creditLimit) {
       return {
         success: false,
-        message: `Your available credit limit is KES ${eligibility.creditLimit.toLocaleString()}. Requested principal of KES ${amount.toLocaleString()} exceeds this.`,
+        message: `Your available credit limit is KES ${eligibility.creditLimit.toLocaleString()}. Requested amount exceeds this.`,
       };
     }
-
-    // 2026-11-03: ALL Mobile loans are auto-approved if they pass the limit check.
-    const isMobile = purpose === 'mobile';
-    
-    let autoApprove = false;
-    if (isMobile) {
-      autoApprove = true;
+    if (purpose === 'emergency' && amount > 100000) {
+      return { success: false, message: 'Maximum Emergency loan is KES 100,000.' };
     }
+    if (purpose === 'school' && amount > 300000) {
+      return { success: false, message: 'Maximum School Fees loan is KES 300,000.' };
+    }
+
+    const schedule = this.calculateRepaymentSchedule(amount, purpose);
+    const isMobile = purpose === 'mobile';
+    let autoApprove = isMobile; // Only Mobile is auto-approved
 
     const loan = await Loan.create({
       member_id: memberId,
       principal: amount,
-      interest_rate: INTEREST_RATE,
-      tenure_months: TENURE_MONTHS,
+      interest_rate: schedule.interestRate,
+      tenure_months: schedule.tenureMonths,
       purpose: purpose,
     });
 
     const ref = `LN-${String(loan.id).padStart(5, '0')}`;
     const member = eligibility.member;
 
-    // --- Manual review path (Emergency/School Loans) ---
     if (!autoApprove) {
       await this._notifyApplicationReceived(member, loan, ref);
       return {
@@ -111,15 +115,12 @@ class LoanService {
       };
     }
 
-    // --- Auto-approval path (All Mobile Loans) ---
     const approval = await this.approveLoan(loan.id, 'Auto-approved: Mobile Loan', { skipSms: true });
-
     if (!approval.success) {
       await this._notifyApplicationReceived(member, loan, ref);
       return { success: true, message: 'Loan application submitted successfully.', loan, autoApprovalFailed: true };
     }
 
-    // --- Mobile Loan Routing: B2C to M-Pesa ---
     const DisbursementService = require('./disbursementService');
     let disbursement = { success: false, message: 'B2C not attempted' };
     
@@ -155,7 +156,7 @@ class LoanService {
         smsService.templates.loanApplicationReceived(member.full_name, loan.principal, ref, loan.purpose)
       );
     } catch (smsErr) {
-      console.error('Loan application SMS failed (application still recorded):', smsErr.message);
+      console.error('Loan application SMS failed:', smsErr.message);
     }
 
     try {
@@ -164,31 +165,24 @@ class LoanService {
         emailContent: emailService.staffTemplates.loanApplication(member.full_name, loan.principal, ref),
       });
     } catch (notifyErr) {
-      console.error('Staff notification for loan application failed:', notifyErr.message);
+      console.error('Staff notification failed:', notifyErr.message);
     }
   }
 
   static async approveLoan(loanId, adminNotes = '', opts = {}) {
     const { skipSms = false } = opts;
 
-    // --- CRITICAL FIX: Re-verify limits before approval ---
     const loanCheck = await db.query('SELECT * FROM loans WHERE id = $1', [loanId]);
-    if (loanCheck.rows.length === 0) {
-      return { success: false, message: 'Loan not found.' };
-    }
+    if (loanCheck.rows.length === 0) return { success: false, message: 'Loan not found.' };
     const loanData = loanCheck.rows[0];
-    if (loanData.status !== 'pending') {
-      return { success: false, message: 'Loan is not in a pending state.' };
-    }
+    if (loanData.status !== 'pending') return { success: false, message: 'Loan is not in a pending state.' };
 
     const member = await Member.findById(loanData.member_id);
-    if (!member) {
-      return { success: false, message: 'Member not found.' };
-    }
+    if (!member) return { success: false, message: 'Member not found.' };
 
     const creditLimit = Number(member.credit_limit || 0);
     
-    // Check if they have ANY OTHER active loans (excluding the one being approved)
+    // Check if they have ANY OTHER active loans
     const otherLoansRes = await db.query(
       `SELECT id FROM loans 
        WHERE member_id = $1 AND status IN ('pending', 'approved', 'disbursing', 'disbursed') AND id != $2`,
@@ -196,14 +190,11 @@ class LoanService {
     );
     
     if (otherLoansRes.rows.length > 0) {
-      return { 
-        success: false, 
-        message: `ACTION BLOCKED: Member already has an active or pending loan. They must clear it before a new one can be approved.` 
-      };
+      return { success: false, message: `ACTION BLOCKED: Member already has an active or pending loan.` };
     }
 
-    // Prevent admin from approving if it exceeds limit
-    if (Number(loanData.principal) > creditLimit) {
+    // Only enforce credit limit for Mobile loans. Emergency/School bypass this.
+    if (loanData.purpose === 'mobile' && Number(loanData.principal) > creditLimit) {
       return { 
         success: false, 
         message: `ACTION BLOCKED: Member's limit is KES ${creditLimit.toLocaleString()}. Approving this KES ${Number(loanData.principal).toLocaleString()} loan would exceed their limit.` 
@@ -211,9 +202,7 @@ class LoanService {
     }
 
     const loan = await Loan.approve(loanId, adminNotes);
-    if (!loan) {
-      return { success: false, message: 'Loan not found or could not be approved.' };
-    }
+    if (!loan) return { success: false, message: 'Could not approve loan.' };
 
     if (!skipSms) {
       try {
@@ -228,35 +217,23 @@ class LoanService {
           )
         );
       } catch (smsErr) {
-        console.error('Loan approval SMS failed (loan still approved):', smsErr.message);
+        console.error('Loan approval SMS failed:', smsErr.message);
       }
     }
 
-    return {
-      success: true,
-      loan,
-      message: 'Loan approved. Ready for disbursement.',
-    };
+    return { success: true, loan, message: 'Loan approved.' };
   }
 
   static async rejectLoan(loanId, adminNotes = '') {
     const loan = await Loan.reject(loanId, adminNotes);
-    if (!loan) {
-      return { success: false, message: 'Loan not found or not in a pending state.' };
-    }
+    if (!loan) return { success: false, message: 'Loan not found or not pending.' };
 
     const member = await Member.findById(loan.member_id);
     if (member) {
       try {
-        await smsService.sendSMS(
-          member.phone_number,
-          smsService.templates.loanRejected(member.full_name, adminNotes, loan.purpose)
-        );
-      } catch (smsErr) {
-        console.error('Loan rejection SMS failed (loan still rejected):', smsErr.message);
-      }
+        await smsService.sendSMS(member.phone_number, smsService.templates.loanRejected(member.full_name, adminNotes, loan.purpose));
+      } catch (smsErr) { console.error('Loan rejection SMS failed:', smsErr.message); }
     }
-
     return { success: true, loan, message: 'Loan rejected.' };
   }
 
@@ -264,24 +241,15 @@ class LoanService {
     const activeLoan = await Loan.getRepayableLoan(memberId);
     if (!activeLoan) {
       const inFlight = await Loan.getActiveLoan(memberId);
-      if (inFlight && inFlight.status === 'pending') {
-        return { success: false, message: 'Your loan application is still awaiting approval.' };
-      }
-      if (inFlight && inFlight.status === 'approved') {
-        return { success: false, message: 'Your loan has been approved and is awaiting disbursement.' };
-      }
-      if (inFlight && inFlight.status === 'disbursing') {
-        return { success: false, message: 'Your loan is being disbursed. Please wait for the M-Pesa confirmation.' };
-      }
+      if (inFlight && inFlight.status === 'pending') return { success: false, message: 'Your loan application is still awaiting approval.' };
+      if (inFlight && inFlight.status === 'approved') return { success: false, message: 'Your loan has been approved and is awaiting disbursement.' };
+      if (inFlight && inFlight.status === 'disbursing') return { success: false, message: 'Your loan is being disbursed. Please wait for the M-Pesa confirmation.' };
       return { success: false, message: 'No active loan found.' };
     }
-
-    const dueAmount = Math.min(Number(activeLoan.monthly_installment), Number(activeLoan.outstanding_balance));
-
     return {
       success: true,
       loan: activeLoan,
-      dueAmount,
+      dueAmount: Number(activeLoan.outstanding_balance), // They can pay whatever they want
       message: `Amount payable: KES ${Number(activeLoan.outstanding_balance).toLocaleString()}.`,
     };
   }

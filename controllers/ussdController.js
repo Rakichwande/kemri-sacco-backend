@@ -181,7 +181,6 @@ async function handleWallet(phoneNumber, steps, sessionId) {
   const totalWallet = walletBalances.general + walletBalances.emergency + walletBalances.school;
   const totalSavings = savingsBalances.ordinary + savingsBalances.jipange + savingsBalances.holiday;
 
-  // Step 1: Main Wallet Menu
   if (remaining.length === 0) {
     return `CON My Account\n` +
            `Savings: KES ${totalSavings.toLocaleString()}\n` +
@@ -191,11 +190,9 @@ async function handleWallet(phoneNumber, steps, sessionId) {
            `3. Back`;
   }
 
-  // Step 2: User selects Withdraw Wallet or Withdraw Savings
   if (remaining.length === 1) {
     const choice = remaining[0];
     
-    // Withdraw Wallet (Existing logic)
     if (choice === '1') {
       if (totalWallet <= 0) return 'END You have no funds in your wallet to withdraw.';
       
@@ -209,7 +206,6 @@ async function handleWallet(phoneNumber, steps, sessionId) {
       return menu.trim() + '\n0. Cancel';
     }
     
-    // Withdraw Savings (New logic)
     if (choice === '2') {
       let menu = 'CON Select savings to withdraw:\n';
       let available = false;
@@ -226,12 +222,10 @@ async function handleWallet(phoneNumber, steps, sessionId) {
     return 'END Invalid choice.';
   }
 
-  // Step 3: Handle Wallet Withdrawal Amount OR Savings Selection
   if (remaining.length === 2) {
     const choice = remaining[0];
     const subChoice = Number(remaining[1]);
 
-    // --- WALLET WITHDRAWAL FLOW ---
     if (choice === '1') {
       if (subChoice === 0) return 'END Cancelled.';
       
@@ -246,7 +240,6 @@ async function handleWallet(phoneNumber, steps, sessionId) {
       return `CON Withdrawing from ${selectedType.toUpperCase()}.\nMax KES ${walletBalances[selectedType].toLocaleString()}\nEnter amount:`;
     }
 
-    // --- SAVINGS WITHDRAWAL FLOW ---
     if (choice === '2') {
       if (subChoice === 0) return 'END Cancelled.';
       
@@ -258,7 +251,6 @@ async function handleWallet(phoneNumber, steps, sessionId) {
       if (subChoice < 1 || subChoice > validOptions.length) return 'END Invalid selection.';
       selectedType = validOptions[subChoice - 1];
 
-      // 2026-11-02: Check 6-month unlock date
       const unlockDateStr = selectedType === 'jipange' ? currentMember.jipange_unlock_date : currentMember.holiday_unlock_date;
       if (!unlockDateStr) return 'END You have no active unlock date for this savings.';
       
@@ -275,13 +267,11 @@ async function handleWallet(phoneNumber, steps, sessionId) {
     }
   }
 
-  // Step 4: Process the amounts
   if (remaining.length === 3) {
     const choice = remaining[0];
     const subChoice = Number(remaining[1]);
     const amount = Number(remaining[2]);
 
-    // --- WALLET WITHDRAWAL ---
     if (choice === '1') {
       if (!amount || amount <= 0) return 'END Invalid amount. Please dial again.';
       
@@ -311,7 +301,6 @@ async function handleWallet(phoneNumber, steps, sessionId) {
       }
     }
 
-    // --- SAVINGS WITHDRAWAL ---
     if (choice === '2') {
       if (!amount || amount <= 0) return 'END Invalid amount. Please dial again.';
       
@@ -323,10 +312,8 @@ async function handleWallet(phoneNumber, steps, sessionId) {
       if (amount > savingsBalances[selectedType]) return `END Insufficient funds. Max is KES ${savingsBalances[selectedType].toLocaleString()}.`;
 
       try {
-        // 1. Deduct from savings (inserts negative payment)
         await Payment.withdrawSavings(member.id, amount, selectedType, `WD-${Date.now()}`);
         
-        // 2. Send B2C to M-Pesa
         const DisbursementService = require('../services/disbursementService');
         await DisbursementService.disburseWalletToMpesa(member, amount, `SAV-${Date.now()}`, 'savings'); 
 
@@ -400,28 +387,45 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
   if (!pinCheck.authenticated) return pinCheck.response;
   const remaining = pinCheck.remainingSteps;
 
-  const eligibility = await LoanService.canApply(member.id);
-  if (!eligibility.allowed) return `END ${eligibility.reason}`;
+  // 2026-11-04: Check if they have any active loans before showing the menu
+  const activeCheck = await LoanService.canApply(member.id, 'general'); // 'general' bypasses the 0 limit check but enforces Strict Block
+  if (!activeCheck.allowed) {
+    return `END ${activeCheck.reason}`; 
+  }
 
   if (remaining.length === 0) {
-    return `CON Select Loan Type:\n1. Emergency (Coming soon)\n2. School Fees (Coming soon)\n3. Mobile (Instant to M-Pesa)`;
+    return `CON Select Loan Type:\n1. Emergency (Max 100K)\n2. School Fees (Max 300K)\n3. Mobile (Instant to M-Pesa)`;
   }
 
   if (remaining.length === 1) {
     const typeChoice = remaining[0];
-    if (typeChoice === '1') return 'END Emergency loans are not yet available. Please check back later.';
-    if (typeChoice === '2') return 'END School Fees loans are not yet available. Please check back later.';
-    if (typeChoice === '3') return `CON Enter loan amount (KES)\nCredit limit: KES ${eligibility.creditLimit.toLocaleString()}`;
+    
+    if (typeChoice === '1') {
+      return `CON Enter Emergency loan amount (Max 100,000):`;
+    }
+    if (typeChoice === '2') {
+      return `CON Enter School Fees loan amount (Max 300,000):`;
+    }
+    if (typeChoice === '3') {
+      // Mobile loans REQUIRE a valid credit limit
+      const mobileCheck = await LoanService.canApply(member.id, 'mobile');
+      if (!mobileCheck.allowed) return `END ${mobileCheck.reason}`;
+      return `CON Enter Mobile loan amount (KES)\nCredit limit: KES ${mobileCheck.creditLimit.toLocaleString()}`;
+    }
     return 'END Invalid loan type. Please dial again.';
   }
 
   if (remaining.length === 2) {
     const typeChoice = remaining[0];
     const amount = Number(remaining[1]);
-    if (typeChoice !== '3') return 'END Invalid loan type. Please dial again.';
+
     if (!amount || amount <= 0) return 'END Invalid amount. Please dial again.';
 
-    const result = await LoanService.apply(member.id, amount, 'mobile');
+    let purpose = 'mobile';
+    if (typeChoice === '1') purpose = 'emergency';
+    if (typeChoice === '2') purpose = 'school';
+
+    const result = await LoanService.apply(member.id, amount, purpose);
     if (!result.success) return `END ${result.message}`;
 
     const { loan } = result;
@@ -440,6 +444,7 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
                     `Ref: ${ref}. ${closing}`;
     return `END ${summary}`;
   }
+
   return 'END Invalid input. Please dial again.';
 }
 

@@ -257,11 +257,12 @@ async function markDisbursed(loan_id, mpesa_receipt = null, source = 'manual', e
       ? ' | Disbursed to SACCO Wallet. Ref: '
       : ' | Manually disbursed. Receipt: ';
 
+    // 2026-11-04: FIX - Use the loan's actual tenure_months instead of hardcoded '1 month'
     const updateRes = await client.query(
       `UPDATE loans 
        SET status = 'disbursed', 
            disbursed_at = NOW(),
-           next_payment_due = (NOW() + INTERVAL '1 month')::date,
+           next_payment_due = (NOW() + (tenure_months || ' months')::interval)::date,
            admin_notes = COALESCE(admin_notes, '') || $3 || $2
        WHERE id = $1 
        RETURNING *`,
@@ -334,8 +335,6 @@ async function applyRepayment(loan_id, amount, externalClient = null) {
 
     if (isFullyRepaid) {
       // 2026-10-31: CRITICAL FIX: Removed the automatic `credit_limit = 10000` upgrade.
-      // Credit limits are strictly admin-controlled per the CEO/Board rules. 
-      // Repaying a loan only increments the successful repayment count.
       await client.query(
         `UPDATE members 
          SET successful_repayments = successful_repayments + 1
@@ -484,5 +483,5 @@ module.exports = {
   getRepayableLoan,
   findAllDisbursedForReminders,
   markReminderSent,
-  getTimelineByMonth, // <--- ADDED to exports
+  getTimelineByMonth,
 };

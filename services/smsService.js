@@ -59,8 +59,8 @@ const templates = {
     `KEMRI SACCO: Hi ${firstName(name)}, your deposit did not go through. Nothing was deducted. Please try again or visit our office.`,
 
   // ─── MEMBER-FACING — LOANS ───
-  loanApplicationReceived: (name, principal, ref, purpose) =>
-    `KEMRI SACCO: Hi ${firstName(name)}, we received your ${formatLoanType(purpose)} Loan application for ${formatKES(principal)}. Ref: ${ref}. We'll review it and SMS you shortly.`,
+  loanApplicationReceived: (name, principal, ref, purpose, totalRepayment) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, we received your ${formatLoanType(purpose)} Loan application for ${formatKES(principal)}. Total payable: ${formatKES(totalRepayment)}. Ref: ${ref}. We'll review it and SMS you shortly.`,
 
   loanApproved: (name, principal, interest, totalPayable, purpose) =>
     `KEMRI SACCO: Hi ${firstName(name)}, your ${formatLoanType(purpose)} Loan is approved. Principal: ${formatKES(principal)}. Interest: ${formatKES(interest)}. Total payable: ${formatKES(totalPayable)}. Our team will process the funds shortly.`,
@@ -130,7 +130,6 @@ const templates = {
     } else {
       closing = 'Awaiting action.';
     }
-    // Removed "Board/Staff" because all Mobile loans are now auto-approved.
     return `KEMRI SACCO Admin: ${formatLoanType(purpose)} Loan for ${name} (Ref: ${ref}). Auto-approved. ${closing}`;
   },
 
