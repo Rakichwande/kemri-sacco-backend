@@ -14,15 +14,7 @@ class LoanService {
       return { allowed: false, reason: 'Member not found.' };
     }
 
-    const creditLimit = Number(member.credit_limit || 0);
-
-    // 1. Block if limit is 0 (Only applies to Mobile loans. Emergency/School can still apply)
-    if (purpose === 'mobile' && creditLimit === 0) {
-      return { allowed: false, reason: 'You are currently not eligible to take a Mobile loan. Please contact the SACCO office.' };
-    }
-
-    // 2. SCENARIO B: Strict Block for active loans OF THE SAME PURPOSE.
-    // 2026-11-04: Added `purpose = $2` so Mobile, Emergency, and School are independent.
+    // 1. SCENARIO B: Check for active loans OF THE SAME PURPOSE FIRST.
     const activeLoansRes = await db.query(
       `SELECT id FROM loans 
        WHERE member_id = $1 AND purpose = $2 AND status IN ('pending', 'approved', 'disbursing', 'disbursed')
@@ -35,6 +27,12 @@ class LoanService {
         allowed: false, 
         reason: `You already have an active or pending ${purpose.toUpperCase()} loan. Please clear it before applying for another.` 
       };
+    }
+
+    // 2. Block if limit is 0 (Only applies to Mobile loans)
+    const creditLimit = Number(member.credit_limit || 0);
+    if (purpose === 'mobile' && creditLimit === 0) {
+      return { allowed: false, reason: 'You are currently not eligible to take a Mobile loan. Please contact the SACCO office.' };
     }
 
     return { allowed: true, creditLimit, member, reason: 'Eligible to apply.' };
@@ -152,7 +150,6 @@ class LoanService {
 
   static async _notifyApplicationReceived(member, loan, ref) {
     try {
-      // 2026-11-04: Added loan.total_repayment for the new SMS template
       await smsService.sendSMS(
         member.phone_number,
         smsService.templates.loanApplicationReceived(member.full_name, loan.principal, ref, loan.purpose, loan.total_repayment)
@@ -184,7 +181,6 @@ class LoanService {
 
     const creditLimit = Number(member.credit_limit || 0);
     
-    // 2026-11-04: Check if they have ANY OTHER active loans OF THE SAME PURPOSE
     const otherLoansRes = await db.query(
       `SELECT id FROM loans 
        WHERE member_id = $1 AND purpose = $2 AND status IN ('pending', 'approved', 'disbursing', 'disbursed') AND id != $3`,
@@ -195,7 +191,6 @@ class LoanService {
       return { success: false, message: `ACTION BLOCKED: Member already has an active ${loanData.purpose.toUpperCase()} loan.` };
     }
 
-    // Only enforce credit limit for Mobile loans. Emergency/School bypass this.
     if (loanData.purpose === 'mobile' && Number(loanData.principal) > creditLimit) {
       return { 
         success: false, 

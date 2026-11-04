@@ -389,17 +389,17 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
 
   // 2026-11-04: REMOVED global activeCheck. The menu now shows first.
   if (remaining.length === 0) {
-    return `CON Select Loan Type:\n1. Emergency (Max 100K)\n2. School Fees (Max 300K)\n3. Mobile (Instant to M-Pesa)`;
+    return `CON Select Loan Type:\n1. Emergency\n2. School Fees\n3. Mobile Loan`;
   }
 
   if (remaining.length === 1) {
     const typeChoice = remaining[0];
     
     if (typeChoice === '1') {
-      return `CON Enter Emergency loan amount (Max 100,000):`;
+      return `CON Enter Emergency loan amount:`;
     }
     if (typeChoice === '2') {
-      return `CON Enter School Fees loan amount (Max 300,000):`;
+      return `CON Enter School Fees loan amount:`;
     }
     if (typeChoice === '3') {
       // 2026-11-04: Only check the limit/block for Mobile loans
