@@ -14,27 +14,27 @@ class LoanService {
       return { allowed: false, reason: 'Member not found.' };
     }
 
-    // 1. SCENARIO B: Check for active loans OF THE SAME PURPOSE FIRST.
-    const activeLoansRes = await db.query(
-      `SELECT id FROM loans 
-       WHERE member_id = $1 AND purpose = $2 AND status IN ('pending', 'approved', 'disbursing', 'disbursed')
-       LIMIT 1`,
-      [memberId, purpose]
-    );
-    
-    if (activeLoansRes.rows.length > 0) {
-      return { 
-        allowed: false, 
-        reason: `You already have an active or pending ${purpose.toUpperCase()} loan. Please clear it before applying for another.` 
-      };
-    }
-
-    // 2. Block if limit is 0 (Only applies to Mobile loans)
     const creditLimit = Number(member.credit_limit || 0);
-    if (purpose === 'mobile' && creditLimit === 0) {
-      return { allowed: false, reason: 'You are currently not eligible to take a Mobile loan. Please contact the SACCO office.' };
+
+    // 2026-11-05: STRICT BLOCK ONLY APPLIES TO MOBILE LOANS
+    if (purpose === 'mobile') {
+      const activeLoansRes = await db.query(
+        `SELECT id FROM loans 
+         WHERE member_id = $1 AND purpose = 'mobile' AND status IN ('pending', 'approved', 'disbursing', 'disbursed')
+         LIMIT 1`,
+        [memberId]
+      );
+      
+      if (activeLoansRes.rows.length > 0) {
+        return { allowed: false, reason: 'You already have an active Mobile loan. Please clear it first.' };
+      }
+
+      if (creditLimit === 0) {
+        return { allowed: false, reason: 'You are currently not eligible to take a Mobile loan. Please contact the SACCO office.' };
+      }
     }
 
+    // Emergency and School loans bypass the block completely
     return { allowed: true, creditLimit, member, reason: 'Eligible to apply.' };
   }
 
@@ -181,21 +181,24 @@ class LoanService {
 
     const creditLimit = Number(member.credit_limit || 0);
     
-    const otherLoansRes = await db.query(
-      `SELECT id FROM loans 
-       WHERE member_id = $1 AND purpose = $2 AND status IN ('pending', 'approved', 'disbursing', 'disbursed') AND id != $3`,
-      [loanData.member_id, loanData.purpose, loanId]
-    );
-    
-    if (otherLoansRes.rows.length > 0) {
-      return { success: false, message: `ACTION BLOCKED: Member already has an active ${loanData.purpose.toUpperCase()} loan.` };
-    }
+    // 2026-11-05: ONLY BLOCK IF IT'S A MOBILE LOAN
+    if (loanData.purpose === 'mobile') {
+      const otherLoansRes = await db.query(
+        `SELECT id FROM loans 
+         WHERE member_id = $1 AND purpose = 'mobile' AND status IN ('pending', 'approved', 'disbursing', 'disbursed') AND id != $2`,
+        [loanData.member_id, loanId]
+      );
+      
+      if (otherLoansRes.rows.length > 0) {
+        return { success: false, message: `ACTION BLOCKED: Member already has an active Mobile loan.` };
+      }
 
-    if (loanData.purpose === 'mobile' && Number(loanData.principal) > creditLimit) {
-      return { 
-        success: false, 
-        message: `ACTION BLOCKED: Member's limit is KES ${creditLimit.toLocaleString()}. Approving this KES ${Number(loanData.principal).toLocaleString()} loan would exceed their limit.` 
-      };
+      if (Number(loanData.principal) > creditLimit) {
+        return { 
+          success: false, 
+          message: `ACTION BLOCKED: Member's limit is KES ${creditLimit.toLocaleString()}. Approving this KES ${Number(loanData.principal).toLocaleString()} loan would exceed their limit.` 
+        };
+      }
     }
 
     const loan = await Loan.approve(loanId, adminNotes);

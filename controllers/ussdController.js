@@ -43,16 +43,22 @@ async function handleUssd(req, res) {
       const choice = input[0];
       const steps = input.slice(1);
 
-      switch (choice) {
-        case '1': response = await handleRegister(phoneNumber, steps); break;
-        case '2': response = await handleWallet(phoneNumber, steps, sessionId); break;
-        case '3': response = await handleDeposit(phoneNumber, steps); break;
-        case '4': response = await handleLoanApplication(phoneNumber, steps, sessionId); break;
-        case '5': response = await handleRepayLoan(phoneNumber, steps, sessionId); break;
-        case '6': response = await handleTransactions(phoneNumber, steps, sessionId); break;
-        case '7': response = await handleChangePin(phoneNumber, steps); break;
-        case '8': response = 'END Thank you for using KEMRI SACCO. Goodbye.'; break;
-        default: response = 'END Invalid choice. Please dial again.';
+      // 2026-11-05: GLOBAL CANCEL OPTION
+      // If they type '0' at the main menu, or '0' at the very end of any menu, safely exit.
+      if (choice === '0' || (steps.length > 0 && steps[steps.length - 1] === '0')) {
+        response = 'END Session cancelled. Thank you for using KEMRI SACCO.';
+      } else {
+        switch (choice) {
+          case '1': response = await handleRegister(phoneNumber, steps); break;
+          case '2': response = await handleWallet(phoneNumber, steps, sessionId); break;
+          case '3': response = await handleDeposit(phoneNumber, steps); break;
+          case '4': response = await handleLoanApplication(phoneNumber, steps, sessionId); break;
+          case '5': response = await handleRepayLoan(phoneNumber, steps, sessionId); break;
+          case '6': response = await handleTransactions(phoneNumber, steps, sessionId); break;
+          case '7': response = await handleChangePin(phoneNumber, steps); break;
+          case '8': response = 'END Thank you for using KEMRI SACCO. Goodbye.'; break;
+          default: response = 'END Invalid choice. Please dial again.';
+        }
       }
     }
   } catch (err) {
@@ -187,7 +193,8 @@ async function handleWallet(phoneNumber, steps, sessionId) {
            `Wallet: KES ${totalWallet.toLocaleString()}\n` +
            `1. Withdraw Wallet to M-Pesa\n` +
            `2. Withdraw Savings to M-Pesa\n` +
-           `3. Back`;
+           `3. Back\n` +
+           `0. Cancel`;
   }
 
   if (remaining.length === 1) {
@@ -341,7 +348,7 @@ async function handleDeposit(phoneNumber, steps) {
 
   // Step 1: Select Savings Type
   if (steps.length === 0) {
-    return 'CON Select Savings Type:\n1. Ordinary\n2. Jipange\n3. Holiday';
+    return 'CON Select Savings Type:\n1. Ordinary\n2. Jipange\n3. Holiday\n0. Cancel';
   }
 
   // Step 2: Enter Amount
@@ -387,9 +394,9 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
   if (!pinCheck.authenticated) return pinCheck.response;
   const remaining = pinCheck.remainingSteps;
 
-  // 2026-11-04: REMOVED global activeCheck. The menu now shows first.
+  // 2026-11-05: Added 0. Cancel to the menu
   if (remaining.length === 0) {
-    return `CON Select Loan Type:\n1. Emergency\n2. School Fees\n3. Mobile Loan`;
+    return `CON Select Loan Type:\n1. Emergency\n2. School Fees\n3. Mobile Loan\n0. Cancel`;
   }
 
   if (remaining.length === 1) {
@@ -402,7 +409,6 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
       return `CON Enter School Fees loan amount:`;
     }
     if (typeChoice === '3') {
-      // 2026-11-04: Only check the limit/block for Mobile loans
       const mobileCheck = await LoanService.canApply(member.id, 'mobile');
       if (!mobileCheck.allowed) return `END ${mobileCheck.reason}`;
       return `CON Enter Mobile loan amount (KES)\nCredit limit: KES ${mobileCheck.creditLimit.toLocaleString()}`;

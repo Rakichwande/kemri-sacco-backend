@@ -15,8 +15,8 @@ const PERMISSIONS = {
   [ROLES.SUPER_ADMIN]: [
     'system:configure',
     'staff:manage',
-    'members:read', 'members:write', 'members:set_board_status', 'members:delete',
-    'members:edit_limit', // <--- 2026-10-31: ADDED FOR CEO ONLY
+    // 2026-11-05: CEO has exclusive rights to edit members, limits, board status, and deletion.
+    'members:read', 'members:write', 'members:set_board_status', 'members:delete', 'members:edit_limit',
     'loans:read', 'loans:approve', 'loans:disburse',
     'payments:read', 'payments:write',
     'withdrawals:read', 'withdrawals:write',
@@ -25,8 +25,9 @@ const PERMISSIONS = {
   ],
   [ROLES.SACCO_ADMIN]: [
     'staff:manage',
-    'members:read', 'members:write', 'members:set_board_status', 'members:delete',
-    // 'members:edit_limit', // <--- NOT ALLOWED FOR SACCO ADMIN
+    // 2026-11-05: Stripped of members:write, members:set_board_status, and members:delete. 
+    // They can only view members now. Only the CEO can edit them.
+    'members:read', 
     'loans:read', 'loans:approve', 'loans:disburse',
     'payments:read',
     'withdrawals:read', 'withdrawals:write',
@@ -48,7 +49,7 @@ const PERMISSIONS = {
     'withdrawals:read',
   ],
   [ROLES.MEMBER_SUPPORT]: [
-    'members:read', 'members:write',
+    'members:read', // 2026-11-05: Stripped of members:write. Read-only.
     'withdrawals:read',
   ],
   [ROLES.AUDITOR]: [
