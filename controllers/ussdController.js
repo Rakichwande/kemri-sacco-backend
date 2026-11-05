@@ -43,10 +43,10 @@ async function handleUssd(req, res) {
       const choice = input[0];
       const steps = input.slice(1);
 
-      // 2026-11-05: GLOBAL CANCEL OPTION
-      // If they type '0' at the main menu, or '0' at the very end of any menu, safely exit.
+      // 2026-11-05: GLOBAL BACK OPTION
+      // If they type '0' at the main menu, or '0' at the very end of any menu, return to main menu.
       if (choice === '0' || (steps.length > 0 && steps[steps.length - 1] === '0')) {
-        response = 'END Session cancelled. Thank you for using KEMRI SACCO.';
+        response = mainMenu();
       } else {
         switch (choice) {
           case '1': response = await handleRegister(phoneNumber, steps); break;
@@ -194,7 +194,7 @@ async function handleWallet(phoneNumber, steps, sessionId) {
            `1. Withdraw Wallet to M-Pesa\n` +
            `2. Withdraw Savings to M-Pesa\n` +
            `3. Back\n` +
-           `0. Cancel`;
+           `0. Main Menu`;
   }
 
   if (remaining.length === 1) {
@@ -210,7 +210,7 @@ async function handleWallet(phoneNumber, steps, sessionId) {
 
       let menu = 'CON Select wallet to withdraw from:\n';
       activeWallets.forEach((w, idx) => { menu += `${idx + 1}. ${w.name} (KES ${w.bal})\n`; });
-      return menu.trim() + '\n0. Cancel';
+      return menu.trim() + '\n0. Main Menu';
     }
     
     if (choice === '2') {
@@ -222,7 +222,7 @@ async function handleWallet(phoneNumber, steps, sessionId) {
       if (savingsBalances.holiday > 0) { menu += `${index++}. Holiday (KES ${savingsBalances.holiday.toLocaleString()})\n`; available = true; }
       
       if (!available) return 'END You have no withdrawable savings (Jipange or Holiday) at this time.';
-      return menu.trim() + '\n0. Cancel';
+      return menu.trim() + '\n0. Main Menu';
     }
     
     if (choice === '3') return 'END Thank you for using KEMRI SACCO.';
@@ -234,7 +234,7 @@ async function handleWallet(phoneNumber, steps, sessionId) {
     const subChoice = Number(remaining[1]);
 
     if (choice === '1') {
-      if (subChoice === 0) return 'END Cancelled.';
+      if (subChoice === 0) return mainMenu();
       
       const activeWallets = [];
       if (walletBalances.emergency > 0) activeWallets.push('emergency');
@@ -248,7 +248,7 @@ async function handleWallet(phoneNumber, steps, sessionId) {
     }
 
     if (choice === '2') {
-      if (subChoice === 0) return 'END Cancelled.';
+      if (subChoice === 0) return mainMenu();
       
       let selectedType = null;
       let validOptions = [];
@@ -348,7 +348,7 @@ async function handleDeposit(phoneNumber, steps) {
 
   // Step 1: Select Savings Type
   if (steps.length === 0) {
-    return 'CON Select Savings Type:\n1. Ordinary\n2. Jipange\n3. Holiday\n0. Cancel';
+    return 'CON Select Savings Type:\n1. Ordinary\n2. Jipange\n3. Holiday\n0. Back';
   }
 
   // Step 2: Enter Amount
@@ -394,9 +394,9 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
   if (!pinCheck.authenticated) return pinCheck.response;
   const remaining = pinCheck.remainingSteps;
 
-  // 2026-11-05: Added 0. Cancel to the menu
+  // 2026-11-05: Added 0. Back to the menu
   if (remaining.length === 0) {
-    return `CON Select Loan Type:\n1. Emergency\n2. School Fees\n3. Mobile Loan\n0. Cancel`;
+    return `CON Select Loan Type:\n1. Emergency\n2. School Fees\n3. Mobile Loan\n0. Back`;
   }
 
   if (remaining.length === 1) {
@@ -480,7 +480,7 @@ async function handleRepayLoan(phoneNumber, steps, sessionId) {
     if (remaining.length === 0) {
       let menu = 'CON Select loan to repay:\n';
       activeLoans.forEach((l, index) => { menu += `${index + 1}. ${l.reference} (KES ${Number(l.outstanding_balance).toLocaleString()})\n`; });
-      return menu.trim();
+      return menu.trim() + '\n0. Back';
     }
     if (remaining.length === 1) {
       const selection = Number(remaining[0]);
