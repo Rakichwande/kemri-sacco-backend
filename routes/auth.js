@@ -8,8 +8,11 @@ const { JWT_SECRET } = require('../config/env');
 const AuditLog = require('../models/AuditLog');
 const StaffInvite = require('../models/StaffInvite');
 const emailService = require('../services/emailService');
-const smsService = require('../services/smsService'); // <-- ADDED
+const smsService = require('../services/smsService');
 const crypto = require('crypto');
+const speakeasy = require('speakeasy'); // 2026-11-06: Added for TOTP
+const QRCode = require('qrcode');       // 2026-11-06: Added for TOTP
+
 const {
   loginLimiter,
   otpLimiter,
@@ -62,6 +65,72 @@ const VALID_ROLES = [
   ROLES.STAFF_LEGACY,
 ];
 
+// ============================================================
+// 2FA (TOTP) SETUP ENDPOINTS
+// ============================================================
+router.post('/2fa/setup', authenticate, async (req, res) => {
+  try {
+    const admin = await Admin.findById(req.user.id);
+    if (!admin) return res.status(404).json({ error: 'Account not found' });
+    if (admin.two_factor_enabled) return res.status(400).json({ error: '2FA is already enabled' });
+
+    // Generate a new secret
+    const secret = speakeasy.generateSecret({
+      name: `KEMRI SACCO (${admin.username})`
+    });
+    
+    // Save the secret temporarily (not enabled yet until verified)
+    await Admin.setTwoFactorSecret(admin.id, secret.base32);
+
+    // Generate QR code
+    QRCode.toDataURL(secret.otpauth_url, (err, data_url) => {
+      if (err) return res.status(500).json({ error: 'Failed to generate QR code' });
+      res.json({ secret: secret.base32, qrCode: data_url });
+    });
+  } catch (err) {
+    console.error('2FA setup error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.post('/2fa/verify', authenticate, async (req, res) => {
+  try {
+    const { token } = req.body;
+    if (!token) return res.status(400).json({ error: 'Token required' });
+
+    const admin = await Admin.findByIdWithAuthFields(req.user.id);
+    if (!admin || !admin.two_factor_secret) return res.status(400).json({ error: '2FA setup not initiated' });
+
+    const verified = speakeasy.totp.verify({
+      secret: admin.two_factor_secret,
+      encoding: 'base32',
+      token: token,
+      window: 1 // Allow 1 step of time drift
+    });
+
+    if (!verified) return res.status(400).json({ error: 'Invalid 2FA code. Please try again.' });
+
+    await Admin.enableTwoFactor(admin.id);
+    res.json({ message: '2FA enabled successfully.' });
+  } catch (err) {
+    console.error('2FA verification error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.post('/2fa/disable', authenticate, async (req, res) => {
+  try {
+    await Admin.disableTwoFactor(req.user.id);
+    res.json({ message: '2FA disabled successfully.' });
+  } catch (err) {
+    console.error('2FA disable error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================
+// LOGIN FLOW (Updated for TOTP)
+// ============================================================
 router.post('/login', loginLimiter, async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -77,6 +146,18 @@ router.post('/login', loginLimiter, async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
+    // 2026-11-06: Check for TOTP 2FA FIRST
+    if (admin.two_factor_enabled) {
+      const otpToken = jwt.sign({ id: admin.id, purpose: 'totp' }, JWT_SECRET, { expiresIn: '15m' });
+      return res.json({
+        otpRequired: true,
+        method: 'totp',
+        otpToken,
+        message: 'Please enter the 6-digit code from your Authenticator app.'
+      });
+    }
+
+    // Fallback to Email OTP
     const otpEligible = admin.notify_email && admin.email && emailService.isConfigured();
 
     if (!otpEligible) {
@@ -90,10 +171,11 @@ router.post('/login', loginLimiter, async (req, res) => {
     const { subject, html, text } = emailService.otpEmailContent(code);
     await emailService.sendEmail({ to: admin.email, subject, html, text });
 
-    const otpToken = jwt.sign({ id: admin.id, purpose: 'otp' }, JWT_SECRET, { expiresIn: '15m' });
+    const otpToken = jwt.sign({ id: admin.id, purpose: 'email_otp' }, JWT_SECRET, { expiresIn: '15m' });
 
     res.json({
       otpRequired: true,
+      method: 'email',
       otpToken,
       message: `A verification code was sent to ${admin.email.replace(/(.{2}).+(@.+)/, '$1***$2')}.`,
     });
@@ -103,6 +185,48 @@ router.post('/login', loginLimiter, async (req, res) => {
   }
 });
 
+// Verify TOTP Code
+router.post('/verify-2fa', otpLimiter, async (req, res) => {
+  try {
+    const { otpToken, code } = req.body;
+    if (!otpToken || !code) {
+      return res.status(400).json({ error: 'otpToken and code are required' });
+    }
+
+    let payload;
+    try {
+      payload = jwt.verify(otpToken, JWT_SECRET);
+    } catch (err) {
+      return res.status(401).json({ error: 'This verification session has expired. Please log in again.' });
+    }
+    if (payload.purpose !== 'totp') {
+      return res.status(401).json({ error: 'Invalid verification session.' });
+    }
+
+    const admin = await Admin.findByIdWithAuthFields(payload.id);
+    if (!admin || !admin.two_factor_secret) {
+      return res.status(401).json({ error: '2FA not configured. Please log in again.' });
+    }
+
+    const verified = speakeasy.totp.verify({
+      secret: admin.two_factor_secret,
+      encoding: 'base32',
+      token: code,
+      window: 1
+    });
+
+    if (!verified) {
+      return res.status(401).json({ error: 'Invalid 2FA code.' });
+    }
+
+    res.json(issueSessionToken(admin));
+  } catch (err) {
+    console.error('TOTP verification error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Verify Email Code
 router.post('/verify-otp', otpLimiter, async (req, res) => {
   try {
     const { otpToken, code } = req.body;
@@ -116,7 +240,7 @@ router.post('/verify-otp', otpLimiter, async (req, res) => {
     } catch (err) {
       return res.status(401).json({ error: 'This verification session has expired. Please log in again.' });
     }
-    if (payload.purpose !== 'otp') {
+    if (payload.purpose !== 'email_otp') {
       return res.status(401).json({ error: 'Invalid verification session.' });
     }
 
@@ -155,6 +279,10 @@ router.post('/resend-otp', emailActionLimiter, emailPerAddressLimiter, async (re
     } catch (err) {
       return res.status(401).json({ error: 'This verification session has expired. Please log in again.' });
     }
+    if (payload.purpose !== 'email_otp') {
+      return res.status(401).json({ error: 'Invalid verification session.' });
+    }
+
     const admin = await Admin.findByIdWithAuthFields(payload.id);
     if (!admin || !admin.email) {
       return res.status(401).json({ error: 'No pending verification. Please log in again.' });
@@ -174,7 +302,10 @@ router.post('/resend-otp', emailActionLimiter, emailPerAddressLimiter, async (re
   }
 });
 
+// [ ... KEEP THE REST OF THE FILE (forgot-password, invites, users, etc.) EXACTLY AS THEY ARE ... ]
+
 router.post('/forgot-password', emailActionLimiter, emailPerAddressLimiter, async (req, res) => {
+  // ... keep existing code ...
   const genericResponse = { message: 'If an account with that username or email exists and has an email on file, a reset link has been sent.' };
   try {
     const { identifier } = req.body;
@@ -441,7 +572,6 @@ router.post('/invites/:token/accept', async (req, res) => {
         details: `Accepted invite as "${username}" (${invite.role}), invited to ${invite.email}.`,
       });
 
-      // 2026-10-21: Send Welcome SMS
       try {
         if (newAccount.phone) {
           await smsService.sendSMS(
@@ -572,7 +702,6 @@ router.delete('/users/:id', authenticate, requirePermission('staff:manage'), asy
       details: `Removed account "${target.username}" (${target.role}).`,
     });
 
-    // 2026-10-21: Send Removal SMS
     try {
       if (target.phone) {
         await smsService.sendSMS(
