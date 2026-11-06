@@ -41,13 +41,18 @@ class LoanService {
   static calculateRepaymentSchedule(principal, purpose) {
     let interestRate = 6;
     let tenureMonths = 1;
+    let totalInterest = 0;
 
     if (purpose === 'emergency' || purpose === 'school') {
       interestRate = 16; // 16% flat per annum
       tenureMonths = 12; // 1 year
+      // 2026-11-06 FIX: 16% p.a. for 12 months is just 16% of the principal once.
+      totalInterest = Math.round(principal * (interestRate / 100));
+    } else {
+      // Mobile Loan: 6% Flat for 1 month
+      totalInterest = Math.round(principal * (interestRate / 100) * tenureMonths);
     }
 
-    const totalInterest = Math.round(principal * (interestRate / 100) * tenureMonths);
     const totalRepayment = principal + totalInterest;
 
     return {
