@@ -154,8 +154,24 @@ class DisbursementService {
       return { handled: true, failed: true, reason };
     }
 
-    // SUCCESS
-    console.log(`✅ B2C Wallet withdrawal confirmed for member ${tx.member_id}`);
+    // 2026-11-06: SUCCESS - Extract the M-Pesa receipt and update the DB!
+    const params = result.ResultParameters?.ResultParameter || [];
+    const receipt = params.find((p) => p.Key === 'TransactionReceipt')?.Value || null;
+
+    if (receipt) {
+      try {
+        await db.query(
+          `UPDATE wallet_transactions SET reference = $1 WHERE id = $2`,
+          [receipt, tx.id]
+        );
+        console.log(`✅ B2C Wallet withdrawal confirmed. Saved M-Pesa Ref: ${receipt}`);
+      } catch (err) {
+        console.error('Failed to update wallet transaction with M-Pesa receipt:', err.message);
+      }
+    } else {
+      console.log(`✅ B2C Wallet withdrawal confirmed for member ${tx.member_id}, but no receipt was provided in the payload.`);
+    }
+
     return { handled: true, failed: false };
   }
 
