@@ -290,10 +290,12 @@ async function handleWallet(phoneNumber, steps, sessionId) {
       const selectedType = activeWallets[subChoice - 1];
       if (amount > walletBalances[selectedType]) return `END Insufficient funds. Max is KES ${walletBalances[selectedType].toLocaleString()}.`;
 
+      let uniqueRef = null; // <-- 2026-11-06: Added to track transaction for failures
+
       try {
         const debitResult = await Member.debitWallet(member.id, amount, 'withdrawal', null, selectedType);
         const newBalance = debitResult.wallet_balance;
-        const uniqueRef = debitResult.reference;
+        uniqueRef = debitResult.reference;
 
         const DisbursementService = require('../services/disbursementService');
         await DisbursementService.disburseWalletToMpesa(member, amount, uniqueRef, selectedType);
@@ -303,6 +305,17 @@ async function handleWallet(phoneNumber, steps, sessionId) {
         return `END KES ${amount.toLocaleString()} sent to M-Pesa.\nNew ${selectedType.toUpperCase()} Balance: KES ${Number(newBalance).toLocaleString()}`;
       } catch (err) {
         console.error('Wallet withdrawal failed:', err.message);
+        
+        // 2026-11-06: Mark original debit as failed so the dashboard catches it
+        if (uniqueRef) {
+          try {
+            await require('../config/database').query(
+              `UPDATE wallet_transactions SET transaction_type = 'withdrawal_failed' WHERE reference = $1`,
+              [uniqueRef]
+            );
+          } catch (markErr) { console.error('Failed to mark tx as failed:', markErr.message); }
+        }
+
         try { await Member.creditWallet(member.id, amount, 'withdrawal_refund', 'B2C Failed', selectedType); } catch (refundErr) { console.error('Refund failed:', refundErr.message); }
         return 'END Withdrawal failed. Your funds have been returned to your wallet.';
       }
