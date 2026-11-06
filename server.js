@@ -78,6 +78,9 @@ app.use('/api/reports', require('./routes/reports'));
 app.use('/api/system-health', require('./routes/systemHealth'));
 app.use('/api/income', require('./routes/income'));
 
+// ----- WALLET ROUTES (NEW) -----
+app.use('/api/wallet', require('./routes/wallet'));
+
 app.use('/internal', require('./routes/internal'));
 
 // Health check
