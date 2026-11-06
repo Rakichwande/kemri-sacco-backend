@@ -407,9 +407,9 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
   if (!pinCheck.authenticated) return pinCheck.response;
   const remaining = pinCheck.remainingSteps;
 
-  // 2026-11-05: Added 0. Back to the menu
+  // 2026-11-06: Added BizBoost and SME
   if (remaining.length === 0) {
-    return `CON Select Loan Type:\n1. Emergency\n2. School Fees\n3. Mobile Loan\n0. Back`;
+    return `CON Select Loan Type:\n1. Emergency\n2. School Fees\n3. Mobile Loan\n4. BizBoost (7.5%)\n5. SME Loan (7.5%)\n0. Back`;
   }
 
   if (remaining.length === 1) {
@@ -426,6 +426,12 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
       if (!mobileCheck.allowed) return `END ${mobileCheck.reason}`;
       return `CON Enter Mobile loan amount (KES)\nCredit limit: KES ${mobileCheck.creditLimit.toLocaleString()}`;
     }
+    if (typeChoice === '4') {
+      return `CON Enter BizBoost loan amount (KES):`;
+    }
+    if (typeChoice === '5') {
+      return `CON Enter SME loan amount (KES):`;
+    }
     return 'END Invalid loan type. Please dial again.';
   }
 
@@ -438,6 +444,8 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
     let purpose = 'mobile';
     if (typeChoice === '1') purpose = 'emergency';
     if (typeChoice === '2') purpose = 'school';
+    if (typeChoice === '4') purpose = 'bizboost';
+    if (typeChoice === '5') purpose = 'sme';
 
     const result = await LoanService.apply(member.id, amount, purpose);
     if (!result.success) return `END ${result.message}`;

@@ -55,14 +55,17 @@ exports.approveLoan = async (req, res) => {
             details: `Approved KES ${result.loan.principal} ${result.loan.purpose} loan.${adminNotes ? ' Notes: ' + adminNotes : ''}`,
         });
 
-        if (result.loan.purpose === 'mobile') {
+        // 2026-11-06: Added bizboost and sme to the instant B2C payout flow
+        const b2cPurposes = ['mobile', 'bizboost', 'sme'];
+        
+        if (b2cPurposes.includes(result.loan.purpose)) {
             const disbursement = await DisbursementService.disburseLoan(loanId);
             if (!disbursement.success) {
                 return res.status(400).json({ error: disbursement.message });
             }
             return res.json({ 
                 success: true, 
-                message: 'Mobile loan approved and B2C initiated.', 
+                message: `${result.loan.purpose.toUpperCase()} loan approved and B2C initiated.`, 
                 loan: disbursement.loan 
             });
         } else {
@@ -179,7 +182,7 @@ exports.repayLoan = async (req, res) => {
 };
 
 // ============================================================
-// 6. Admin: Manual Disbursement (Mobile or Wallet)
+// 6. Admin: Manual Disbursement (Mobile, BizBoost, SME, or Wallet)
 // ============================================================
 exports.markDisbursed = async (req, res) => {
     try {
@@ -197,8 +200,11 @@ exports.markDisbursed = async (req, res) => {
         try {
             await client.query('BEGIN');
             
-            if (loanCheck.purpose === 'mobile') {
-                // 1. Manual Mobile Payment
+            // 2026-11-06: Group B2C loan types
+            const b2cPurposes = ['mobile', 'bizboost', 'sme'];
+
+            if (b2cPurposes.includes(loanCheck.purpose)) {
+                // 1. Manual M-Pesa Payment
                 loan = await Loan.markDisbursed(loanId, mpesaReceipt || 'Manual M-Pesa', 'manual', client);
             } else {
                 // 2. Wallet Credit (Emergency/School)
@@ -235,9 +241,11 @@ exports.markDisbursed = async (req, res) => {
         dueDate.setMonth(dueDate.getMonth() + 1);
         const dueDateFormatted = dueDate.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
 
+        const isB2C = ['mobile', 'bizboost', 'sme'].includes(loan.purpose);
+
         // 3. Send the correct SMS
         try {
-            if (loan.purpose === 'mobile') {
+            if (isB2C) {
                 await smsService.sendSMS(
                     member.phone_number,
                     smsService.templates.loanManuallyDisbursed(
@@ -259,7 +267,7 @@ exports.markDisbursed = async (req, res) => {
         // 4. Notify Staff
         try {
             await notificationService.notifyStaff({
-                smsText: loan.purpose === 'mobile' 
+                smsText: isB2C 
                     ? smsService.templates.staffLoanDisbursed(member.full_name, ref, mpesaReceipt)
                     : smsService.templates.staffWalletCredited(member.full_name, loan.principal, ref, loan.purpose),
                 emailContent: null,
@@ -271,7 +279,7 @@ exports.markDisbursed = async (req, res) => {
         await AuditLog.log({
             actorId: req.user.id,
             actorUsername: req.user.username,
-            action: loan.purpose === 'mobile' ? 'Manually disbursed mobile loan' : 'Credited loan to wallet',
+            action: isB2C ? 'Manually disbursed loan' : 'Credited loan to wallet',
             category: 'loan_decision',
             targetType: 'loan',
             targetId: loanId,
@@ -281,7 +289,7 @@ exports.markDisbursed = async (req, res) => {
 
         res.json({
             success: true,
-            message: loan.purpose === 'mobile' ? 'Mobile loan marked as manually disbursed.' : `Loan credited to ${loan.purpose} Wallet.`,
+            message: isB2C ? 'Loan marked as manually disbursed.' : `Loan credited to ${loan.purpose} Wallet.`,
             loan,
         });
     } catch (err) {
@@ -306,7 +314,8 @@ exports.disburseLoan = async (req, res) => {
         const currentLimit = Number(memberCheck.credit_limit || 0);
         const loanAmount = Number(loanCheck.principal);
 
-        if (loanAmount > currentLimit) {
+        // 2026-11-06: BizBoost and SME are open limits. Only check limit for Mobile.
+        if (loanCheck.purpose === 'mobile' && loanAmount > currentLimit) {
             return res.status(400).json({ 
                 error: `ACTION BLOCKED: Member's limit is KES ${currentLimit.toLocaleString()}. This loan is KES ${loanAmount.toLocaleString()}. Update their limit first.` 
             });

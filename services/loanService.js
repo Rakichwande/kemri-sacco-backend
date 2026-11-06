@@ -34,7 +34,7 @@ class LoanService {
       }
     }
 
-    // Emergency and School loans bypass the block completely
+    // Emergency, School, BizBoost, and SME loans bypass the block completely
     return { allowed: true, creditLimit, member, reason: 'Eligible to apply.' };
   }
 
@@ -43,7 +43,12 @@ class LoanService {
     let tenureMonths = 1;
     let totalInterest = 0;
 
-    if (purpose === 'emergency' || purpose === 'school') {
+    if (purpose === 'bizboost' || purpose === 'sme') {
+      // 2026-11-06: BizBoost and SME - 7.5% Flat for 1 Month
+      interestRate = 7.5;
+      tenureMonths = 1;
+      totalInterest = Math.round(principal * (interestRate / 100) * tenureMonths);
+    } else if (purpose === 'emergency' || purpose === 'school') {
       interestRate = 16; // 16% flat per annum
       tenureMonths = 12; // 1 year
       // 2026-11-06 FIX: 16% p.a. for 12 months is just 16% of the principal once.
@@ -93,10 +98,11 @@ class LoanService {
     if (purpose === 'school' && amount > 300000) {
       return { success: false, message: 'Maximum School Fees loan is KES 300,000.' };
     }
+    // Note: BizBoost and SME have no maximum limit checks here.
 
     const schedule = this.calculateRepaymentSchedule(amount, purpose);
     const isMobile = purpose === 'mobile';
-    let autoApprove = isMobile; // Only Mobile is auto-approved
+    let autoApprove = isMobile; // Only Mobile is auto-approved. BizBoost/SME require CEO approval.
 
     const loan = await Loan.create({
       member_id: memberId,
@@ -110,7 +116,7 @@ class LoanService {
     const member = eligibility.member;
 
     if (!autoApprove) {
-      // --- MANUAL REVIEW PATH (Emergency/School) ---
+      // --- MANUAL REVIEW PATH (Emergency/School/BizBoost/SME) ---
       await this._notifyApplicationReceived(member, loan, ref);
       return {
         success: true,
@@ -252,8 +258,9 @@ class LoanService {
         console.error('Loan approval SMS failed:', smsErr.message);
       }
       
-      // 2026-11-05: If Emergency/School is approved by Admin, notify staff via email
-      if (loanData.purpose !== 'mobile') {
+      // 2026-11-06: FIX - Only notify staff of "Wallet Credited" for Emergency and School loans.
+      // BizBoost and SME go straight to M-Pesa, so this email would be inaccurate.
+      if (loanData.purpose === 'emergency' || loanData.purpose === 'school') {
         try {
           await notificationService.notifyStaff({
             smsText: smsService.templates.staffWalletCredited(member.full_name, loan.principal, loan.reference || `LN-${loan.id}`, loan.purpose),
