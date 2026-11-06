@@ -53,11 +53,7 @@ function inviteEmailContent({ inviteLink, role, inviterName }) {
   return { subject, html, text };
 }
 
-// Multi-paragraph staff event email. bodyLine may contain blank-line-
-// separated paragraphs (\n\n) which are rendered as separate HTML <p>
-// tags. This lets a template supply a richer body — a headline sentence,
-// a details block, and an action instruction — without needing its own
-// bespoke HTML wrapper for every new template.
+// Multi-paragraph staff event email.
 function staffEventEmail(title, bodyLine) {
   const subject = `KEMRI SACCO Admin: ${title}`;
   const paragraphs = String(bodyLine)
@@ -77,58 +73,71 @@ function staffEventEmail(title, bodyLine) {
   return { subject, html, text };
 }
 
-const staffTemplates = {
-  newMember: (name) =>
-    staffEventEmail('New member registered', `${name} has just registered as a SACCO member.`),
+function formatLoanType(purpose) {
+  if (!purpose) return 'SACCO';
+  return purpose.charAt(0).toUpperCase() + purpose.slice(1).toLowerCase();
+}
 
-  loanApplication: (name, amount, ref) =>
+const staffTemplates = {
+  // 2026-11-05: Synced with SMS. Notes the default 0 limit.
+  newMember: (name) =>
     staffEventEmail(
-      'Loan application received',
-      `${name} applied for a loan of KES ${Number(amount).toLocaleString()}.\n\nReference: ${ref}\n\nAwaiting review. Approve or reject from the Approval Queue.`
+      'New member registered', 
+      `${name} has just registered as a SACCO member.\n\nNote: Their credit limit defaults to 0 until manually approved by the CEO.`
     ),
 
-  // Sent when a board/staff loan auto-approves. With Option A, this fires
-  // AFTER the B2C disbursement attempt, so the email can tell staff what
-  // actually happened — not just that a decision was made. The opts object
-  // carries the additional context the earlier two-line version lacked.
-  //
-  //   status = 'disbursing'          B2C accepted, awaiting callback
-  //   status = 'failed'              B2C rejected or transport failed
-  //   status = 'pending_disbursement' B2C not attempted (config missing)
-  loanAutoApproved: (name, amount, ref, opts = {}) => {
-    const { installment, tenureMonths, memberPhone, status, failureReason } = opts;
+  // 2026-11-05: Added purpose (Mobile, Emergency, School).
+  loanApplication: (name, amount, ref, purpose = 'Mobile') =>
+    staffEventEmail(
+      `${formatLoanType(purpose)} Loan application received`,
+      `${name} applied for a ${formatLoanType(purpose)} loan of KES ${Number(amount).toLocaleString()}.\n\nReference: ${ref}\n\nAwaiting review. Approve or reject from the Approval Queue.`
+    ),
 
-    const details = [];
-    if (installment) details.push(`Monthly repayment: KES ${Number(installment).toLocaleString()}`);
-    if (tenureMonths) details.push(`Term: ${tenureMonths} months`);
-    if (memberPhone) details.push(`Member phone: ${memberPhone}`);
-
+  // 2026-11-05: Only Mobile loans are auto-approved now. Removed "Board/Staff" and fixed the math.
+  mobileLoanAutoApproved: (name, amount, totalRepayment, ref, opts = {}) => {
+    const { status, memberPhone } = opts;
+    
     const paragraphs = [
-      `${name} applied for a loan of KES ${Number(amount).toLocaleString()}.`,
+      `${name} applied for a Mobile loan of KES ${Number(amount).toLocaleString()}.`,
     ];
-    if (details.length) paragraphs.push(details.join('\n'));
-    paragraphs.push(`Reference: ${ref}`);
+    if (memberPhone) paragraphs.push(`Member phone: ${memberPhone}`);
+    paragraphs.push(`Reference: ${ref}\nTotal amount payable: KES ${Number(totalRepayment).toLocaleString()} (1 month term)`);
 
     if (status === 'disbursing') {
       paragraphs.push(
-        'The loan was auto-approved and M-Pesa B2C disbursement has been initiated. Safaricom will confirm shortly — no action is required. The loan will appear as Disbursed in the log once the callback resolves.'
+        'The loan was auto-approved and M-Pesa B2C disbursement has been initiated. Safaricom will confirm shortly — no action is required.'
       );
     } else if (status === 'failed') {
       paragraphs.push(
-        `AUTO-APPROVED, BUT B2C DISBURSEMENT FAILED.${failureReason ? ` Reason: ${failureReason}.` : ''}\n\nThe loan is currently in the Approved state and requires manual disbursement. Open the Disbursement Log to record the M-Pesa receipt manually.`
+        `AUTO-APPROVED, BUT B2C DISBURSEMENT FAILED.\n\nThe loan is currently in the Approved state and requires manual disbursement. Open the Disbursement Log to record the M-Pesa receipt manually.`
       );
     } else {
-      paragraphs.push('Auto-approved — ready for disbursement. Open the Disbursement Log to trigger the payout.');
+      paragraphs.push('Auto-approved - ready for disbursement. Open the Disbursement Log to trigger the payout.');
     }
 
-    return staffEventEmail('Board/Staff loan auto-approved', paragraphs.join('\n\n'));
+    return staffEventEmail('Mobile Loan auto-approved', paragraphs.join('\n\n'));
   },
 
-  repayment: (name, amount) =>
-    staffEventEmail('Loan repayment received', `A repayment of KES ${Number(amount).toLocaleString()} was received from ${name}.`),
+  // 2026-11-05: New template for Emergency/School loans approved by Admin.
+  emergencySchoolApproved: (name, amount, totalRepayment, ref, purpose) =>
+    staffEventEmail(
+      `${formatLoanType(purpose)} Loan approved`,
+      `You approved a ${formatLoanType(purpose)} loan of KES ${Number(amount).toLocaleString()} for ${name}.\n\nReference: ${ref}\nTotal amount payable: KES ${Number(totalRepayment).toLocaleString()} (12 month term)\n\nThe funds have been credited to their SACCO Wallet. The member can now withdraw to M-Pesa.`
+    ),
 
-  deposit: (name, amount) =>
-    staffEventEmail('Deposit received', `A deposit of KES ${Number(amount).toLocaleString()} was received from ${name}.`),
+  // 2026-11-05: Added loan reference and remaining balance to the repayment email.
+  repayment: (name, amount, ref, amountOutstanding) =>
+    staffEventEmail(
+      'Loan repayment received', 
+      `A repayment of KES ${Number(amount).toLocaleString()} was received from ${name}.\n\nLoan Ref: ${ref}\nRemaining balance: KES ${Number(amountOutstanding).toLocaleString()}`
+    ),
+
+  // 2026-11-05: Added the specific savings type (Ordinary, Jipange, Holiday).
+  deposit: (name, amount, savingsType = 'Ordinary') =>
+    staffEventEmail(
+      'Deposit received', 
+      `A ${savingsType.toUpperCase()} deposit of KES ${Number(amount).toLocaleString()} was received from ${name}.`
+    ),
 };
 
 function otpEmailContent(code) {

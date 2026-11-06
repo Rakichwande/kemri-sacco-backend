@@ -105,6 +105,7 @@ class LoanService {
     const member = eligibility.member;
 
     if (!autoApprove) {
+      // --- MANUAL REVIEW PATH (Emergency/School) ---
       await this._notifyApplicationReceived(member, loan, ref);
       return {
         success: true,
@@ -114,6 +115,7 @@ class LoanService {
       };
     }
 
+    // --- AUTO-APPROVAL PATH (Mobile) ---
     const approval = await this.approveLoan(loan.id, 'Auto-approved: Mobile Loan', { skipSms: true });
     if (!approval.success) {
       await this._notifyApplicationReceived(member, loan, ref);
@@ -130,6 +132,9 @@ class LoanService {
     }
 
     if (!disbursement.success) {
+      // Notify staff that the B2C failed and needs manual intervention
+      await this._notifyAutoApprovedStaff(member, approval.loan, ref, { status: 'failed', failureReason: disbursement.message });
+      
       return {
         success: true,
         message: 'Mobile loan approved. Disbursement is pending — our team will complete this shortly.',
@@ -138,6 +143,9 @@ class LoanService {
         disbursementFailed: true,
       };
     }
+
+    // Notify staff that the B2C was successfully initiated
+    await this._notifyAutoApprovedStaff(member, disbursement.loan || approval.loan, ref, { status: 'disbursing' });
 
     return {
       success: true,
@@ -161,10 +169,29 @@ class LoanService {
     try {
       await notificationService.notifyStaff({
         smsText: smsService.templates.staffLoanApplication(member.full_name, loan.principal, ref, loan.purpose),
-        emailContent: emailService.staffTemplates.loanApplication(member.full_name, loan.principal, ref),
+        emailContent: emailService.staffTemplates.loanApplication(member.full_name, loan.principal, ref, loan.purpose),
       });
     } catch (notifyErr) {
       console.error('Staff notification failed:', notifyErr.message);
+    }
+  }
+
+  static async _notifyAutoApprovedStaff(member, loan, ref, opts = {}) {
+    const { status, failureReason } = opts;
+
+    try {
+      await notificationService.notifyStaff({
+        smsText: smsService.templates.staffLoanAutoApproved(member.full_name, loan.principal, ref, {
+          status,
+          purpose: loan.purpose
+        }),
+        emailContent: emailService.staffTemplates.mobileLoanAutoApproved(member.full_name, loan.principal, loan.total_repayment, ref, {
+          status,
+          memberPhone: member.phone_number
+        }),
+      });
+    } catch (notifyErr) {
+      console.error('Staff notification for auto-approved loan failed:', notifyErr.message);
     }
   }
 
@@ -218,6 +245,18 @@ class LoanService {
         );
       } catch (smsErr) {
         console.error('Loan approval SMS failed:', smsErr.message);
+      }
+      
+      // 2026-11-05: If Emergency/School is approved by Admin, notify staff via email
+      if (loanData.purpose !== 'mobile') {
+        try {
+          await notificationService.notifyStaff({
+            smsText: smsService.templates.staffWalletCredited(member.full_name, loan.principal, loan.reference || `LN-${loan.id}`, loan.purpose),
+            emailContent: emailService.staffTemplates.emergencySchoolApproved(member.full_name, loan.principal, loan.total_repayment, loan.reference || `LN-${loan.id}`, loan.purpose),
+          });
+        } catch (err) {
+          console.error('Staff notification for wallet credit failed:', err.message);
+        }
       }
     }
 
