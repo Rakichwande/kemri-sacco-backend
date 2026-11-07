@@ -105,7 +105,7 @@ router.post('/2fa/verify', authenticate, async (req, res) => {
       secret: admin.two_factor_secret,
       encoding: 'base32',
       token: token,
-      window: 1 // Allow 1 step of time drift
+      window: 2 // 2026-11-06: Allow 1 minute of time drift
     });
 
     if (!verified) return res.status(400).json({ error: 'Invalid 2FA code. Please try again.' });
@@ -129,7 +129,7 @@ router.post('/2fa/disable', authenticate, async (req, res) => {
 });
 
 // ============================================================
-// LOGIN FLOW (Updated for TOTP)
+// LOGIN FLOW (Updated for Account Lockout)
 // ============================================================
 router.post('/login', loginLimiter, async (req, res) => {
   try {
@@ -137,16 +137,33 @@ router.post('/login', loginLimiter, async (req, res) => {
     if (!username || !password) {
       return res.status(400).json({ error: 'Username and password required' });
     }
+    
     const admin = await Admin.findByUsernameOrEmail(username);
     if (!admin) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
+
+    // 2026-11-07: Check if the account is locked BEFORE verifying the password
+    if (Admin.isAccountLocked(admin)) {
+      const unlockTime = new Date(admin.locked_until).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+      return res.status(403).json({ error: `Account is locked due to too many failed attempts. Try again after ${unlockTime}.` });
+    }
+
     const valid = await Admin.verifyPassword(admin, password);
+    
     if (!valid) {
+      // 2026-11-07: Increment failed attempts
+      const updated = await Admin.recordFailedLogin(admin.id);
+      if (updated.failed_login_attempts >= 5) {
+        return res.status(403).json({ error: 'Too many failed attempts. Your account has been locked for 30 minutes.' });
+      }
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    // 2026-11-06: Check for TOTP 2FA FIRST
+    // 2026-11-07: Reset attempts on successful password verification
+    await Admin.resetLoginAttempts(admin.id);
+
+    // Check for TOTP 2FA FIRST
     if (admin.two_factor_enabled) {
       const otpToken = jwt.sign({ id: admin.id, purpose: 'totp' }, JWT_SECRET, { expiresIn: '15m' });
       return res.json({
@@ -212,7 +229,7 @@ router.post('/verify-2fa', otpLimiter, async (req, res) => {
       secret: admin.two_factor_secret,
       encoding: 'base32',
       token: code,
-      window: 1
+      window: 2 // 2026-11-06: Allow 1 minute of time drift
     });
 
     if (!verified) {
@@ -302,10 +319,7 @@ router.post('/resend-otp', emailActionLimiter, emailPerAddressLimiter, async (re
   }
 });
 
-// [ ... KEEP THE REST OF THE FILE (forgot-password, invites, users, etc.) EXACTLY AS THEY ARE ... ]
-
 router.post('/forgot-password', emailActionLimiter, emailPerAddressLimiter, async (req, res) => {
-  // ... keep existing code ...
   const genericResponse = { message: 'If an account with that username or email exists and has an email on file, a reset link has been sent.' };
   try {
     const { identifier } = req.body;

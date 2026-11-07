@@ -39,6 +39,12 @@ ALTER TABLE admins ADD COLUMN IF NOT EXISTS two_factor_secret VARCHAR(255);
 ALTER TABLE admins ADD COLUMN IF NOT EXISTS two_factor_enabled BOOLEAN DEFAULT false;
 `;
 
+// 2026-11-07: Added Account Lockout Columns
+const addLockoutColumnsQuery = `
+ALTER TABLE admins ADD COLUMN IF NOT EXISTS failed_login_attempts INT DEFAULT 0;
+ALTER TABLE admins ADD COLUMN IF NOT EXISTS locked_until TIMESTAMP;
+`;
+
 function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
@@ -53,7 +59,8 @@ async function init() {
   await db.query(addPhoneColumnQuery);
   await db.query(addNotificationColumnsQuery);
   await db.query(addAuthSecurityColumnsQuery);
-  await db.query(add2FAColumnsQuery); // <-- Initialize 2FA columns
+  await db.query(add2FAColumnsQuery);
+  await db.query(addLockoutColumnsQuery);
 
   const existing = await db.query('SELECT * FROM admins LIMIT 1');
   if (existing.rows.length > 0) return;
@@ -137,7 +144,9 @@ async function resetPasswordWithToken(token, newPassword) {
      SET password_hash = $1,
          must_change_password = false,
          reset_token = NULL,
-         reset_token_expires_at = NULL
+         reset_token_expires_at = NULL,
+         failed_login_attempts = 0,
+         locked_until = NULL
      WHERE reset_token = $2 AND reset_token_expires_at > NOW()
      RETURNING id, username`,
     [hash, hashToken(token)]
@@ -145,7 +154,6 @@ async function resetPasswordWithToken(token, newPassword) {
   return result.rows[0] || null;
 }
 
-// 2026-11-06: Updated findById to return two_factor_enabled so the Settings page knows if it's active
 async function findById(id) {
   const result = await db.query(
     'SELECT id, username, full_name, role, phone, email, notify_sms, notify_email, two_factor_enabled, must_change_password, created_at FROM admins WHERE id = $1',
@@ -203,7 +211,7 @@ async function findAll() {
 async function updatePassword(id, newPassword) {
   const hash = await bcrypt.hash(newPassword, 10);
   const result = await db.query(
-    `UPDATE admins SET password_hash = $1, must_change_password = false WHERE id = $2
+    `UPDATE admins SET password_hash = $1, must_change_password = false, failed_login_attempts = 0, locked_until = NULL WHERE id = $2
      RETURNING id, username, full_name, role, must_change_password`,
     [hash, id]
   );
@@ -228,7 +236,6 @@ async function remove(id) {
   await db.query('DELETE FROM admins WHERE id = $1', [id]);
 }
 
-// 2026-11-06: New 2FA helper functions
 async function setTwoFactorSecret(id, secret) {
   await db.query(
     'UPDATE admins SET two_factor_secret = $1 WHERE id = $2',
@@ -247,6 +254,34 @@ async function disableTwoFactor(id) {
   await db.query(
     'UPDATE admins SET two_factor_enabled = false, two_factor_secret = NULL WHERE id = $1',
     [id]
+  );
+}
+
+// 2026-11-07: Account Lockout Helpers
+function isAccountLocked(admin) {
+  return !!admin.locked_until && new Date(admin.locked_until) > new Date();
+}
+
+async function recordFailedLogin(adminId) {
+  // Increment failed attempts. If it reaches 5, lock the account for 30 minutes.
+  const result = await db.query(
+    `UPDATE admins
+     SET failed_login_attempts = failed_login_attempts + 1,
+         locked_until = CASE 
+           WHEN failed_login_attempts + 1 >= 5 THEN NOW() + INTERVAL '30 minutes'
+           ELSE locked_until 
+         END
+     WHERE id = $1
+     RETURNING failed_login_attempts, locked_until`,
+    [adminId]
+  );
+  return result.rows[0];
+}
+
+async function resetLoginAttempts(adminId) {
+  await db.query(
+    'UPDATE admins SET failed_login_attempts = 0, locked_until = NULL WHERE id = $1',
+    [adminId]
   );
 }
 
@@ -270,8 +305,10 @@ module.exports = {
   setResetToken,
   findByResetToken,
   resetPasswordWithToken,
-  // 2FA Methods
   setTwoFactorSecret,
   enableTwoFactor,
   disableTwoFactor,
+  isAccountLocked,
+  recordFailedLogin,
+  resetLoginAttempts,
 };
