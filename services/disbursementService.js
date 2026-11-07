@@ -177,6 +177,16 @@ class DisbursementService {
           [receipt, tx.id]
         );
         console.log(`✅ B2C Wallet withdrawal confirmed. Saved M-Pesa Ref: ${receipt}`);
+        
+        // 2026-11-07: Send Final Success SMS
+        if (member) {
+          const refundType = tx.wallet_type || 'general';
+          await smsService.sendSMS(
+            member.phone_number,
+            `KEMRI SACCO: KES ${Math.abs(tx.amount)} has been successfully sent to your M-Pesa from your ${refundType.toUpperCase()} wallet. M-Pesa Ref: ${receipt}`
+          );
+        }
+
       } catch (err) {
         console.error('Failed to update wallet transaction with M-Pesa receipt:', err.message);
       }
@@ -187,7 +197,7 @@ class DisbursementService {
     return { handled: true, failed: false };
   }
 
-  // 2026-11-07: NEW - Handler for Savings Withdrawals
+  // 2026-11-07: Handler for Savings Withdrawals
   static async _handleSavingsWithdrawalB2CResult(payment, result) {
     const member = await Member.findById(payment.member_id);
     
@@ -222,6 +232,17 @@ class DisbursementService {
 
     // SUCCESS
     console.log(`✅ B2C Savings withdrawal confirmed for member ${payment.member_id}`);
+    
+    // 2026-11-07: Send Final Success SMS for Savings
+    if (member) {
+      const params = result.ResultParameters?.ResultParameter || [];
+      const receipt = params.find((p) => p.Key === 'TransactionReceipt')?.Value || 'N/A';
+      await smsService.sendSMS(
+        member.phone_number,
+        `KEMRI SACCO: KES ${Math.abs(payment.amount)} has been successfully sent to your M-Pesa from your ${payment.savings_type.toUpperCase()} savings. M-Pesa Ref: ${receipt}`
+      );
+    }
+
     return { handled: true, failed: false };
   }
 
@@ -239,7 +260,7 @@ class DisbursementService {
 
       if (member) {
         try {
-          await smsService.sendSMS(member.phone_number, smsService.templates.loanDisbursementFailed(member.full_name));
+          await smsService.sendSMS(member.phone_number, smsService.templates.loanDisbursementFailed(member.full_name, loan.purpose));
         } catch (err) {
           console.error('B2C failure SMS to member failed:', err.message);
         }
@@ -273,7 +294,7 @@ class DisbursementService {
       try {
         await smsService.sendSMS(
           member.phone_number,
-          smsService.templates.loanDisbursed(member.full_name, loan.principal, amountOutstanding, dueDateFormatted, loan.reference)
+          smsService.templates.loanDisbursed(member.full_name, loan.principal, amountOutstanding, dueDateFormatted, loan.reference, loan.purpose)
         );
       } catch (err) {
         console.error('B2C success SMS to member failed:', err.message);
@@ -282,7 +303,7 @@ class DisbursementService {
 
     try {
       await notificationService.notifyStaff({
-        smsText: smsService.templates.staffLoanDisbursed(member?.full_name || 'a member', loan.reference, receipt),
+        smsText: smsService.templates.staffLoanDisbursed(member?.full_name || 'a member', loan.reference, receipt, loan.purpose),
         emailContent: null,
       });
     } catch (err) {

@@ -37,8 +37,6 @@ async function handleUssd(req, res) {
   let response;
 
   try {
-    // 2026-11-07: CRITICAL USSD BACK BUTTON FIX
-    // If the user types '0' to go back, we must reset the entire session string.
     const lastZeroIndex = input.lastIndexOf('0');
     
     if (lastZeroIndex !== -1) {
@@ -87,9 +85,6 @@ function mainMenu() {
   return 'CON Welcome to KEMRI SACCO\n1. Register\n2. My Wallet\n3. Deposit\n4. Loan\n5. Loan Repayment\n6. Transactions\n7. Change PIN\n8. Exit';
 }
 
-// ============================================================
-// PIN AUTHENTICATION
-// ============================================================
 async function requirePin(member, steps, sessionId) {
   const cached = pinSessionState.get(sessionId);
   if (cached) return { authenticated: true, remainingSteps: steps.slice(cached.pinStepsConsumed) };
@@ -132,9 +127,6 @@ async function requirePin(member, steps, sessionId) {
   return { authenticated: true, remainingSteps: steps.slice(1) };
 }
 
-// ============================================================
-// 1. REGISTER
-// ============================================================
 async function handleRegister(phoneNumber, steps) {
   const existing = await Member.findByPhone(phoneNumber);
   if (existing) return 'END This phone number is already registered with KEMRI SACCO.';
@@ -166,9 +158,6 @@ async function handleRegister(phoneNumber, steps) {
   return 'END Invalid input. Please dial again.';
 }
 
-// ============================================================
-// 2. MY WALLET (Wallets + Savings Withdrawal)
-// ============================================================
 async function handleWallet(phoneNumber, steps, sessionId) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) return 'END You are not registered. Dial and select option 1 to register first.';
@@ -194,7 +183,6 @@ async function handleWallet(phoneNumber, steps, sessionId) {
   const totalSavings = savingsBalances.ordinary + savingsBalances.jipange + savingsBalances.holiday;
 
   if (remaining.length === 0) {
-    // 2026-11-07: Removed "3. Back" to prevent redundancy with "0. Main Menu"
     return `CON My Account\n` +
            `Savings: KES ${totalSavings.toLocaleString()}\n` +
            `Wallet: KES ${totalWallet.toLocaleString()}\n` +
@@ -231,7 +219,6 @@ async function handleWallet(phoneNumber, steps, sessionId) {
       return menu.trim() + '\n0. Main Menu';
     }
     
-    // 2026-11-07: Removed the '3' handling. Invalid inputs will just fall through.
     return 'END Invalid choice.';
   }
 
@@ -300,15 +287,17 @@ async function handleWallet(phoneNumber, steps, sessionId) {
 
       try {
         const debitResult = await Member.debitWallet(member.id, amount, 'withdrawal', null, selectedType);
-        const newBalance = debitResult.wallet_balance;
         uniqueRef = debitResult.reference;
 
         const DisbursementService = require('../services/disbursementService');
         await DisbursementService.disburseWalletToMpesa(member, amount, uniqueRef, selectedType);
 
-        try { await smsService.sendSMS(member.phone_number, smsService.templates.walletWithdrawalConfirmed(member.full_name, amount, newBalance)); } catch (smsErr) { console.error('SMS failed:', smsErr.message); }
+        // 2026-11-07: Send "Processing" SMS instead of Success
+        try { 
+          await smsService.sendSMS(member.phone_number, `KEMRI SACCO: Your withdrawal of KES ${amount.toLocaleString()} from your ${selectedType.toUpperCase()} wallet is processing. You will receive another SMS shortly.`); 
+        } catch (smsErr) { console.error('SMS failed:', smsErr.message); }
 
-        return `END KES ${amount.toLocaleString()} sent to M-Pesa.\nNew ${selectedType.toUpperCase()} Balance: KES ${Number(newBalance).toLocaleString()}`;
+        return `END Your withdrawal of KES ${amount.toLocaleString()} is processing.\nYou will receive an SMS shortly.`;
       } catch (err) {
         console.error('Wallet withdrawal failed:', err.message);
         
@@ -322,6 +311,10 @@ async function handleWallet(phoneNumber, steps, sessionId) {
         }
 
         try { await Member.creditWallet(member.id, amount, 'withdrawal_refund', 'B2C Failed', selectedType); } catch (refundErr) { console.error('Refund failed:', refundErr.message); }
+        
+        // 2026-11-07: Send failure SMS for sync failures
+        try { await smsService.sendSMS(member.phone_number, `KEMRI SACCO: Your withdrawal of KES ${amount.toLocaleString()} failed. The funds have been returned to your ${selectedType.toUpperCase()} wallet.`); } catch (smsErr) {}
+        
         return 'END Withdrawal failed. Your funds have been returned to your wallet.';
       }
     }
@@ -345,11 +338,12 @@ async function handleWallet(phoneNumber, steps, sessionId) {
         const DisbursementService = require('../services/disbursementService');
         await DisbursementService.disburseWalletToMpesa(member, amount, uniqueRef, 'savings'); 
 
+        // 2026-11-07: Send "Processing" SMS instead of Success
         try { 
-          await smsService.sendSMS(member.phone_number, `KEMRI SACCO: KES ${amount.toLocaleString()} has been sent to your M-Pesa from your ${selectedType.toUpperCase()} savings.`); 
+          await smsService.sendSMS(member.phone_number, `KEMRI SACCO: Your withdrawal of KES ${amount.toLocaleString()} from your ${selectedType.toUpperCase()} savings is processing. You will receive another SMS shortly.`); 
         } catch (smsErr) { console.error('SMS failed:', smsErr.message); }
 
-        return `END KES ${amount.toLocaleString()} sent to M-Pesa from ${selectedType.toUpperCase()} savings.`;
+        return `END Your withdrawal of KES ${amount.toLocaleString()} is processing.\nYou will receive an SMS shortly.`;
       } catch (err) {
         console.error('Savings withdrawal failed (sync):', err.message);
         
@@ -366,6 +360,9 @@ async function handleWallet(phoneNumber, steps, sessionId) {
             console.error('Sync refund failed:', refundErr.message);
           }
         }
+        
+        // 2026-11-07: Send failure SMS for sync failures
+        try { await smsService.sendSMS(member.phone_number, `KEMRI SACCO: Your withdrawal of KES ${amount.toLocaleString()} failed. The funds have been returned to your ${selectedType.toUpperCase()} savings.`); } catch (smsErr) {}
 
         return 'END Could not process withdrawal. Please try again later or visit the office.';
       }
@@ -375,9 +372,6 @@ async function handleWallet(phoneNumber, steps, sessionId) {
   return 'END Invalid input.';
 }
 
-// ============================================================
-// 3. DEPOSIT (New Sub-Menu)
-// ============================================================
 async function handleDeposit(phoneNumber, steps) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) return 'END You are not registered. Dial and select option 1 to register first.';
@@ -416,9 +410,6 @@ async function handleDeposit(phoneNumber, steps) {
   return 'END Invalid input. Please dial again.';
 }
 
-// ============================================================
-// 4. LOAN APPLICATION (PIN required)
-// ============================================================
 async function handleLoanApplication(phoneNumber, steps, sessionId) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) return 'END You are not registered. Dial and select option 1 to register first.';
@@ -491,9 +482,6 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
   return 'END Invalid input. Please dial again.';
 }
 
-// ============================================================
-// 5. LOAN REPAYMENT (PIN required)
-// ============================================================
 async function handleRepayLoan(phoneNumber, steps, sessionId) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) return 'END You are not registered. Dial and select option 1 to register first.';
@@ -544,9 +532,6 @@ async function handleRepayLoan(phoneNumber, steps, sessionId) {
   return 'END Invalid input.';
 }
 
-// ============================================================
-// 6. TRANSACTIONS (PIN required)
-// ============================================================
 async function handleTransactions(phoneNumber, steps, sessionId) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) return 'END You are not registered. Dial and select option 1 to register first.';
@@ -571,9 +556,6 @@ async function handleTransactions(phoneNumber, steps, sessionId) {
   return `END Recent transactions:\n${lines.join('\n')}`;
 }
 
-// ============================================================
-// 7. CHANGE PIN
-// ============================================================
 async function handleChangePin(phoneNumber, steps) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) return 'END You are not registered. Dial and select option 1 to register first.';
