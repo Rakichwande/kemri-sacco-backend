@@ -1,17 +1,6 @@
 const Loan = require('../models/Loan');
-const Member = require('../models/Member'); // <--- ADDED for the new unlock reminder
+const Member = require('../models/Member');
 const smsService = require('./smsService');
-
-// Daily reminder orchestrator. Called by GitHub Actions once a day at
-// 09:00 EAT via POST /internal/run-reminders. Decides what (if anything)
-// to send today based on the calendar date and each loan's state.
-//
-// CADENCE
-//   15th of each month      → mid-month balance reminder to every member
-//   last day of each month  → end-of-month status reminder to every member
-//   day 3 of the month      → overdue nudge to members who are behind
-//   day 6 of the month      → staff alert for members still behind
-//   every Monday            → weekly digest to staff (only if there's content)
 
 class ReminderService {
   static async runDaily(today = new Date(), opts = {}) {
@@ -20,6 +9,10 @@ class ReminderService {
     const summary = {
       date: today.toISOString().slice(0, 10),
       dryRun,
+      dueDate7DaysSent: 0,
+      dueDate3DaysSent: 0,
+      dueDate1DaySent: 0,
+      dueDateTodaySent: 0,
       midMonthSent: 0,
       endMonthSent: 0,
       day3Sent: 0,
@@ -45,16 +38,59 @@ class ReminderService {
     for (const loan of loans) {
       try {
         const status = this.computeStatus(loan, today);
+        const daysUntilDue = this.daysUntilDue(loan, today);
 
+        // Track weekly stats for the Monday staff digest
         if (isMonday) {
-          const dueThisWeek = this.isDueThisWeek(loan, today);
-          if (dueThisWeek) {
+          if (this.isDueThisWeek(loan, today)) {
             weeklyDueCount++;
             weeklyDueTotal += Number(loan.monthly_installment);
           }
           if (status.behind) weeklyOverdueCount++;
         }
 
+        // ============================================================
+        // 2026-11-07: NEW RELATIVE DUE DATE REMINDERS
+        // These take priority over the calendar-based reminders.
+        // ============================================================
+        let sentRelativeReminder = false;
+
+        if (daysUntilDue === 7) {
+          if (!this.alreadySentToday(loan.last_member_reminder_at, today)) {
+            await this.sendRelativeReminder(loan, status, '7days', dryRun);
+            if (!dryRun) await Loan.markReminderSent(loan.id, 'member');
+            summary.dueDate7DaysSent++;
+            sentRelativeReminder = true;
+          }
+        } else if (daysUntilDue === 3) {
+          if (!this.alreadySentToday(loan.last_member_reminder_at, today)) {
+            await this.sendRelativeReminder(loan, status, '3days', dryRun);
+            if (!dryRun) await Loan.markReminderSent(loan.id, 'member');
+            summary.dueDate3DaysSent++;
+            sentRelativeReminder = true;
+          }
+        } else if (daysUntilDue === 1) {
+          if (!this.alreadySentToday(loan.last_member_reminder_at, today)) {
+            await this.sendRelativeReminder(loan, status, '1day', dryRun);
+            if (!dryRun) await Loan.markReminderSent(loan.id, 'member');
+            summary.dueDate1DaySent++;
+            sentRelativeReminder = true;
+          }
+        } else if (daysUntilDue === 0) {
+          if (!this.alreadySentToday(loan.last_member_reminder_at, today)) {
+            await this.sendRelativeReminder(loan, status, 'today', dryRun);
+            if (!dryRun) await Loan.markReminderSent(loan.id, 'member');
+            summary.dueDateTodaySent++;
+            sentRelativeReminder = true;
+          }
+        }
+
+        // If we just sent a specific due-date reminder today, skip the generic calendar reminders
+        if (sentRelativeReminder) continue;
+
+        // ============================================================
+        // CALENDAR-BASED REMINDERS (Existing Logic)
+        // ============================================================
         if (isMidMonth) {
           if (this.alreadySentToday(loan.last_member_reminder_at, today)) {
             summary.skipped++;
@@ -113,9 +149,6 @@ class ReminderService {
     return summary;
   }
 
-  // ============================================================
-  // 2026-11-02: SUGGESTION 1 - 7-Day Savings Unlock Reminder
-  // ============================================================
   static async runSavingsUnlockReminders(dryRun = false) {
     const upcoming = await Member.getUpcomingUnlocks();
     let sentCount = 0;
@@ -152,7 +185,6 @@ class ReminderService {
     
     return { totalUnlocks: upcoming.length, smsSent: sentCount };
   }
-  // ============================================================
 
   static computeStatus(loan, today) {
     const disbursed = new Date(loan.disbursed_at);
@@ -167,12 +199,44 @@ class ReminderService {
     return { monthsElapsed, instalmentsDue, threshold, amountPaid, outstanding, behind, amountBehind };
   }
 
-  // Helper to format the date for the SMS
+  // 2026-11-07: Helper to calculate exactly how many days until the next payment
+  static daysUntilDue(loan, today) {
+    if (!loan.next_payment_due) return null;
+    
+    // Normalize both dates to midnight to get exact day differences
+    const due = new Date(loan.next_payment_due);
+    due.setHours(0, 0, 0, 0);
+    
+    const current = new Date(today);
+    current.setHours(0, 0, 0, 0);
+    
+    const diffTime = due - current;
+    return Math.round(diffTime / (1000 * 60 * 60 * 24));
+  }
+
   static formatDueDate(dateString) {
     if (!dateString) return '';
     return new Date(dateString).toLocaleDateString('en-GB', { 
       day: '2-digit', month: 'short', year: 'numeric' 
     });
+  }
+
+  // 2026-11-07: New method to handle relative due date SMS
+  static async sendRelativeReminder(loan, status, timeframe, dryRun) {
+    const dueDate = this.formatDueDate(loan.next_payment_due);
+    let message = '';
+
+    if (timeframe === '7days') {
+      message = smsService.templates.loanDueIn7Days(loan.full_name, loan.reference, loan.monthly_installment, dueDate, loan.purpose);
+    } else if (timeframe === '3days') {
+      message = smsService.templates.loanDueIn3Days(loan.full_name, loan.reference, loan.monthly_installment, dueDate, loan.purpose);
+    } else if (timeframe === '1day') {
+      message = smsService.templates.loanDueTomorrow(loan.full_name, loan.reference, loan.monthly_installment, loan.purpose);
+    } else if (timeframe === 'today') {
+      message = smsService.templates.loanDueToday(loan.full_name, loan.reference, loan.monthly_installment, loan.purpose);
+    }
+
+    await this.deliver({ dryRun, to: loan.phone_number, message, logLabel: `${timeframe} due reminder → ${loan.reference}` });
   }
 
   static async sendMidMonth(loan, status, dryRun) {
@@ -188,12 +252,7 @@ class ReminderService {
     const message = smsService.templates.loanReminderBoardApproved(
       loan.full_name, status.outstanding, status.amountPaid, loan.reference, loan.purpose, dueDate
     );
-    await this.deliver({
-      dryRun,
-      to: loan.phone_number,
-      message,
-      logLabel: `end-of-month → ${loan.reference}`,
-    });
+    await this.deliver({ dryRun, to: loan.phone_number, message, logLabel: `end-of-month → ${loan.reference}` });
   }
 
   static async sendDay3Overdue(loan, status, dryRun) {

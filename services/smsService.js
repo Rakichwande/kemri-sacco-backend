@@ -69,19 +69,15 @@ const templates = {
   loanApproved: (name, principal, interest, totalPayable, purpose) =>
     `KEMRI SACCO: Hi ${firstName(name)}, your ${formatLoanType(purpose)} Loan is approved. Principal: ${formatKES(principal)}. Interest: ${formatKES(interest)}. Total payable: ${formatKES(totalPayable)}. Our team will process the funds shortly.`,
 
-  // 2026-11-07: Added purpose parameter to dynamic B2C loans
   loanDisbursed: (name, principal, totalPayable, dueDate, ref, purpose) =>
     `KEMRI SACCO: Hi ${firstName(name)}, ${formatKES(principal)} has been sent to your M-Pesa for your ${formatLoanType(purpose)} Loan (Ref: ${ref}). Total payable: ${formatKES(totalPayable)}, due ${dueDate}. Please settle on time.`,
 
-  // 2026-11-07: Added purpose parameter
   loanRetryB2C: (name, principal, ref, purpose) =>
     `KEMRI SACCO: Hi ${firstName(name)}, we are retrying your ${formatLoanType(purpose)} Loan disbursement of ${formatKES(principal)} (Ref: ${ref}). You will receive another SMS once it hits your M-Pesa.`,
 
-  // 2026-11-07: Added purpose parameter
   loanManuallyDisbursed: (name, principal, totalPayable, dueDate, ref, receipt, purpose) =>
     `KEMRI SACCO: Hi ${firstName(name)}, your ${formatLoanType(purpose)} loan of ${formatKES(principal)} has been manually disbursed (Ref: ${ref}). Receipt: ${receipt}. Total payable: ${formatKES(totalPayable)}, due ${dueDate}.`,
 
-  // Used specifically for Emergency/School Loans (Wallet)
   loanWalletCredited: (name, principal, totalRepayment, date, ref, purpose) =>
     `KEMRI SACCO: Hi ${firstName(name)}, on ${date}, your ${formatLoanType(purpose)} Loan of ${formatKES(principal)} was credited to your SACCO Wallet (Ref: ${ref}). Total payable: ${formatKES(totalRepayment)}. Dial *483*4444# and select '2. My Wallet' to withdraw to M-Pesa.`,
 
@@ -108,6 +104,19 @@ const templates = {
 
     return `KEMRI SACCO: Dear ${firstName(name)}, your current outstanding balance for ${formatLoanType(purpose)} Loan (${ref}) is ${formatKES(amountOutstanding)}, ${paymentStatus}.${dueText} Kindly repay by dialling *483*4444#. Thank you.`;
   },
+
+  // 2026-11-07: NEW - Relative Due Date Reminders
+  loanDueIn7Days: (name, ref, amount, dueDate, purpose) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, a reminder that your ${formatLoanType(purpose)} Loan (${ref}) payment of ${formatKES(amount)} is due in 7 days on ${dueDate}. Dial *483*4444# to pay.`,
+
+  loanDueIn3Days: (name, ref, amount, dueDate, purpose) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, your ${formatLoanType(purpose)} Loan (${ref}) payment of ${formatKES(amount)} is due in 3 days on ${dueDate}. Please ensure you have funds ready.`,
+
+  loanDueTomorrow: (name, ref, amount, purpose) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, your ${formatLoanType(purpose)} Loan (${ref}) payment of ${formatKES(amount)} is due TOMORROW. Dial *483*4444# to pay now to avoid penalties.`,
+
+  loanDueToday: (name, ref, amount, purpose) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, your ${formatLoanType(purpose)} Loan (${ref}) payment of ${formatKES(amount)} is due TODAY. Please dial *483*4444# to settle your balance.`,
 
   // ─── MEMBER-FACING — SAVINGS UNLOCK REMINDER ───
   savingsUnlockReminder: (name, savingsType, amount, unlockDate) =>
@@ -137,7 +146,6 @@ const templates = {
     return `KEMRI SACCO Admin: ${formatLoanType(purpose)} Loan for ${name} (Ref: ${ref}). Auto-approved. ${closing}`;
   },
 
-  // 2026-11-07: Added purpose parameter
   staffLoanDisbursed: (name, reference, receipt, purpose) =>
     `KEMRI SACCO Admin: ${formatLoanType(purpose)} Loan ${reference} for ${name} disbursed via B2C. Receipt: ${receipt || 'N/A'}.`,
 
@@ -242,7 +250,6 @@ async function sendSMS(phoneNumber, message) {
   }
 }
 
-// 2026-11-04: AUTOMATIC SYNC - Checks is_board_staff badge before sending
 async function notifyStaff(message) {
   const Admin = require('../models/Admin');
   const Member = require('../models/Member');
