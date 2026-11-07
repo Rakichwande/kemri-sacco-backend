@@ -39,16 +39,12 @@ async function handleUssd(req, res) {
   try {
     // 2026-11-07: CRITICAL USSD BACK BUTTON FIX
     // If the user types '0' to go back, we must reset the entire session string.
-    // E.g., if text is "4*1234*0*4", we only want to process the "4" that comes after the "0".
     const lastZeroIndex = input.lastIndexOf('0');
     
     if (lastZeroIndex !== -1) {
       if (lastZeroIndex === input.length - 1) {
-        // The user just pressed '0' to go back. Show the main menu.
         input = []; 
       } else {
-        // The user pressed '0', then typed something else (e.g., 4). 
-        // We slice the array to only process what came after the '0'.
         input = input.slice(lastZeroIndex + 1);
       }
     }
@@ -198,12 +194,12 @@ async function handleWallet(phoneNumber, steps, sessionId) {
   const totalSavings = savingsBalances.ordinary + savingsBalances.jipange + savingsBalances.holiday;
 
   if (remaining.length === 0) {
+    // 2026-11-07: Removed "3. Back" to prevent redundancy with "0. Main Menu"
     return `CON My Account\n` +
            `Savings: KES ${totalSavings.toLocaleString()}\n` +
            `Wallet: KES ${totalWallet.toLocaleString()}\n` +
            `1. Withdraw Wallet to M-Pesa\n` +
            `2. Withdraw Savings to M-Pesa\n` +
-           `3. Back\n` +
            `0. Main Menu`;
   }
 
@@ -219,7 +215,6 @@ async function handleWallet(phoneNumber, steps, sessionId) {
       if (walletBalances.general > 0) activeWallets.push({ type: 'general', name: 'General' });
 
       let menu = 'CON Select wallet to withdraw from:\n';
-      // 2026-11-07: Removed balances from the menu for privacy
       activeWallets.forEach((w, idx) => { menu += `${idx + 1}. ${w.name}\n`; });
       return menu.trim() + '\n0. Main Menu';
     }
@@ -229,7 +224,6 @@ async function handleWallet(phoneNumber, steps, sessionId) {
       let available = false;
       let index = 1;
       
-      // 2026-11-07: Removed balances from the menu for privacy
       if (savingsBalances.jipange > 0) { menu += `${index++}. Jipange\n`; available = true; }
       if (savingsBalances.holiday > 0) { menu += `${index++}. Holiday\n`; available = true; }
       
@@ -237,7 +231,7 @@ async function handleWallet(phoneNumber, steps, sessionId) {
       return menu.trim() + '\n0. Main Menu';
     }
     
-    if (choice === '3') return 'END Thank you for using KEMRI SACCO.';
+    // 2026-11-07: Removed the '3' handling. Invalid inputs will just fall through.
     return 'END Invalid choice.';
   }
 
@@ -433,7 +427,6 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
   if (!pinCheck.authenticated) return pinCheck.response;
   const remaining = pinCheck.remainingSteps;
 
-  // 2026-11-07: Removed 7.5% from the menu to keep it clean
   if (remaining.length === 0) {
     return `CON Select Loan Type:\n1. Emergency\n2. School Fees\n3. Mobile Loan\n4. BizBoost\n5. SME Loan\n0. Back`;
   }
@@ -479,7 +472,6 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
     const { loan } = result;
     const ref = `LN-${String(loan.id).padStart(5, '0')}`;
 
-    // 2026-11-07: Explicitly display the loan category in the summary
     const loanTypeName = purpose === 'mobile' ? 'Mobile' : purpose === 'emergency' ? 'Emergency' : purpose === 'school' ? 'School Fees' : purpose === 'bizboost' ? 'BizBoost' : 'SME';
 
     let opening, closing;
