@@ -258,8 +258,7 @@ class LoanService {
         console.error('Loan approval SMS failed:', smsErr.message);
       }
       
-      // 2026-11-06: FIX - Only notify staff of "Wallet Credited" for Emergency and School loans.
-      // BizBoost and SME go straight to M-Pesa, so this email would be inaccurate.
+      // 2026-11-07: Added B2C email for BizBoost and SME
       if (loanData.purpose === 'emergency' || loanData.purpose === 'school') {
         try {
           await notificationService.notifyStaff({
@@ -268,6 +267,15 @@ class LoanService {
           });
         } catch (err) {
           console.error('Staff notification for wallet credit failed:', err.message);
+        }
+      } else if (loanData.purpose === 'bizboost' || loanData.purpose === 'sme') {
+        try {
+          await notificationService.notifyStaff({
+            smsText: smsService.templates.staffLoanAutoApproved(member.full_name, loan.principal, loan.reference || `LN-${loan.id}`, { status: 'disbursing', purpose: loan.purpose }),
+            emailContent: emailService.staffTemplates.b2cLoanApproved(member.full_name, loan.principal, loan.total_repayment, loan.reference || `LN-${loan.id}`, loan.purpose),
+          });
+        } catch (err) {
+          console.error('Staff notification for B2C approval failed:', err.message);
         }
       }
     }

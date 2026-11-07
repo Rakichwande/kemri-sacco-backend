@@ -43,8 +43,6 @@ async function handleUssd(req, res) {
       const choice = input[0];
       const steps = input.slice(1);
 
-      // 2026-11-05: GLOBAL BACK OPTION
-      // If they type '0' at the main menu, or '0' at the very end of any menu, return to main menu.
       if (choice === '0' || (steps.length > 0 && steps[steps.length - 1] === '0')) {
         response = mainMenu();
       } else {
@@ -204,12 +202,13 @@ async function handleWallet(phoneNumber, steps, sessionId) {
       if (totalWallet <= 0) return 'END You have no funds in your wallet to withdraw.';
       
       const activeWallets = [];
-      if (walletBalances.emergency > 0) activeWallets.push({ type: 'emergency', name: 'Emergency', bal: walletBalances.emergency });
-      if (walletBalances.school > 0) activeWallets.push({ type: 'school', name: 'School', bal: walletBalances.school });
-      if (walletBalances.general > 0) activeWallets.push({ type: 'general', name: 'General', bal: walletBalances.general });
+      if (walletBalances.emergency > 0) activeWallets.push({ type: 'emergency', name: 'Emergency' });
+      if (walletBalances.school > 0) activeWallets.push({ type: 'school', name: 'School' });
+      if (walletBalances.general > 0) activeWallets.push({ type: 'general', name: 'General' });
 
       let menu = 'CON Select wallet to withdraw from:\n';
-      activeWallets.forEach((w, idx) => { menu += `${idx + 1}. ${w.name} (KES ${w.bal})\n`; });
+      // 2026-11-07: Removed balances from the menu for privacy
+      activeWallets.forEach((w, idx) => { menu += `${idx + 1}. ${w.name}\n`; });
       return menu.trim() + '\n0. Main Menu';
     }
     
@@ -218,8 +217,9 @@ async function handleWallet(phoneNumber, steps, sessionId) {
       let available = false;
       let index = 1;
       
-      if (savingsBalances.jipange > 0) { menu += `${index++}. Jipange (KES ${savingsBalances.jipange.toLocaleString()})\n`; available = true; }
-      if (savingsBalances.holiday > 0) { menu += `${index++}. Holiday (KES ${savingsBalances.holiday.toLocaleString()})\n`; available = true; }
+      // 2026-11-07: Removed balances from the menu for privacy
+      if (savingsBalances.jipange > 0) { menu += `${index++}. Jipange\n`; available = true; }
+      if (savingsBalances.holiday > 0) { menu += `${index++}. Holiday\n`; available = true; }
       
       if (!available) return 'END You have no withdrawable savings (Jipange or Holiday) at this time.';
       return menu.trim() + '\n0. Main Menu';
@@ -259,7 +259,7 @@ async function handleWallet(phoneNumber, steps, sessionId) {
       selectedType = validOptions[subChoice - 1];
 
       const unlockDateStr = selectedType === 'jipange' ? currentMember.jipange_unlock_date : currentMember.holiday_unlock_date;
-      if (!unlockDateStr) return 'END You have no active unlock date for this savings.';
+      if (!unlockDateStr) return 'END Your JIPANGE savings are currently unavailable. Please contact the SACCO office.';
       
       const unlockDate = new Date(unlockDateStr);
       const today = new Date();
@@ -290,7 +290,7 @@ async function handleWallet(phoneNumber, steps, sessionId) {
       const selectedType = activeWallets[subChoice - 1];
       if (amount > walletBalances[selectedType]) return `END Insufficient funds. Max is KES ${walletBalances[selectedType].toLocaleString()}.`;
 
-      let uniqueRef = null; // 2026-11-06: Added to track transaction for failures
+      let uniqueRef = null;
 
       try {
         const debitResult = await Member.debitWallet(member.id, amount, 'withdrawal', null, selectedType);
@@ -306,7 +306,6 @@ async function handleWallet(phoneNumber, steps, sessionId) {
       } catch (err) {
         console.error('Wallet withdrawal failed:', err.message);
         
-        // 2026-11-06: Mark original debit as failed so the dashboard catches it
         if (uniqueRef) {
           try {
             await require('../config/database').query(
@@ -331,7 +330,6 @@ async function handleWallet(phoneNumber, steps, sessionId) {
       const selectedType = validOptions[subChoice - 1];
       if (amount > savingsBalances[selectedType]) return `END Insufficient funds. Max is KES ${savingsBalances[selectedType].toLocaleString()}.`;
 
-      // 2026-11-07: Fixed Reference generation and Sync Refund Logic
       let uniqueRef = null;
 
       try {
@@ -378,12 +376,10 @@ async function handleDeposit(phoneNumber, steps) {
   const member = await Member.findByPhone(phoneNumber);
   if (!member) return 'END You are not registered. Dial and select option 1 to register first.';
 
-  // Step 1: Select Savings Type
   if (steps.length === 0) {
     return 'CON Select Savings Type:\n1. Ordinary\n2. Jipange\n3. Holiday\n0. Back';
   }
 
-  // Step 2: Enter Amount
   if (steps.length === 1) {
     const typeChoice = steps[0];
     if (!['1', '2', '3'].includes(typeChoice)) return 'END Invalid selection.';
@@ -394,7 +390,6 @@ async function handleDeposit(phoneNumber, steps) {
     return `CON Enter amount to deposit into ${typeName} (KES)`;
   }
 
-  // Step 3: Initiate STK Push
   if (steps.length === 2) {
     const typeChoice = steps[0];
     const amount = Number(steps[1]);
@@ -426,9 +421,9 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
   if (!pinCheck.authenticated) return pinCheck.response;
   const remaining = pinCheck.remainingSteps;
 
-  // 2026-11-06: Added BizBoost and SME
+  // 2026-11-07: Removed 7.5% from the menu to keep it clean
   if (remaining.length === 0) {
-    return `CON Select Loan Type:\n1. Emergency\n2. School Fees\n3. Mobile Loan\n4. BizBoost (7.5%)\n5. SME Loan (7.5%)\n0. Back`;
+    return `CON Select Loan Type:\n1. Emergency\n2. School Fees\n3. Mobile Loan\n4. BizBoost\n5. SME Loan\n0. Back`;
   }
 
   if (remaining.length === 1) {
@@ -472,14 +467,17 @@ async function handleLoanApplication(phoneNumber, steps, sessionId) {
     const { loan } = result;
     const ref = `LN-${String(loan.id).padStart(5, '0')}`;
 
+    // 2026-11-07: Explicitly display the loan category in the summary
+    const loanTypeName = purpose === 'mobile' ? 'Mobile' : purpose === 'emergency' ? 'Emergency' : purpose === 'school' ? 'School Fees' : purpose === 'bizboost' ? 'BizBoost' : 'SME';
+
     let opening, closing;
     if (result.walletCredited) { opening = 'Loan approved'; closing = 'Funds credited to your Wallet. Dial *483*4444# to withdraw.'; }
     else if (result.disbursing) { opening = 'Loan approved'; closing = 'Funds on the way to your M-Pesa.'; }
     else if (result.disbursementFailed) { opening = 'Loan approved'; closing = 'Our team will complete this shortly.'; }
     else if (result.autoApproved) { opening = 'Loan approved'; closing = 'Disbursement shortly.'; }
-    else { opening = 'Loan application received'; closing = 'Awaiting SACCO review.'; }
+    else { opening = 'application received'; closing = 'Awaiting SACCO review.'; }
 
-    const summary = `${opening}: Principal KES ${Number(loan.principal).toLocaleString()}\n` +
+    const summary = `${loanTypeName} loan ${opening}: Principal KES ${Number(loan.principal).toLocaleString()}\n` +
                     `Interest: KES ${Number(loan.total_interest).toLocaleString()}\n` +
                     `Total amount payable: KES ${Number(loan.total_repayment).toLocaleString()}\n` +
                     `Ref: ${ref}. ${closing}`;

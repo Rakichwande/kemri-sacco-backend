@@ -35,8 +35,12 @@ function firstName(fullName) {
   return String(fullName).trim().split(/\s+/)[0];
 }
 
+// 2026-11-07: Updated to cleanly format BizBoost and SME
 function formatLoanType(purpose) {
   if (!purpose) return 'SACCO';
+  if (purpose.toLowerCase() === 'bizboost') return 'BizBoost';
+  if (purpose.toLowerCase() === 'sme') return 'SME';
+  if (purpose.toLowerCase() === 'mobile') return 'Mobile';
   return purpose.charAt(0).toUpperCase() + purpose.slice(1).toLowerCase();
 }
 
@@ -65,17 +69,17 @@ const templates = {
   loanApproved: (name, principal, interest, totalPayable, purpose) =>
     `KEMRI SACCO: Hi ${firstName(name)}, your ${formatLoanType(purpose)} Loan is approved. Principal: ${formatKES(principal)}. Interest: ${formatKES(interest)}. Total payable: ${formatKES(totalPayable)}. Our team will process the funds shortly.`,
 
-  // Used specifically for Mobile Loans (B2C)
-  loanDisbursed: (name, principal, totalPayable, dueDate, ref) =>
-    `KEMRI SACCO: Hi ${firstName(name)}, ${formatKES(principal)} has been sent to your M-Pesa (Ref: ${ref}). Total payable: ${formatKES(totalPayable)}, due ${dueDate}. Please settle on time.`,
+  // 2026-11-07: Added purpose parameter to dynamic B2C loans
+  loanDisbursed: (name, principal, totalPayable, dueDate, ref, purpose) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, ${formatKES(principal)} has been sent to your M-Pesa for your ${formatLoanType(purpose)} Loan (Ref: ${ref}). Total payable: ${formatKES(totalPayable)}, due ${dueDate}. Please settle on time.`,
 
-  // Used when Admin clicks "Retry B2C"
-  loanRetryB2C: (name, principal, ref) =>
-    `KEMRI SACCO: Hi ${firstName(name)}, we are retrying your Mobile Loan disbursement of ${formatKES(principal)} (Ref: ${ref}). You will receive another SMS once it hits your M-Pesa.`,
+  // 2026-11-07: Added purpose parameter
+  loanRetryB2C: (name, principal, ref, purpose) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, we are retrying your ${formatLoanType(purpose)} Loan disbursement of ${formatKES(principal)} (Ref: ${ref}). You will receive another SMS once it hits your M-Pesa.`,
 
-  // Used when Admin clicks "Mark Manually Paid"
-  loanManuallyDisbursed: (name, principal, totalPayable, dueDate, ref, receipt) =>
-    `KEMRI SACCO: Hi ${firstName(name)}, your loan of ${formatKES(principal)} has been manually disbursed (Ref: ${ref}). Receipt: ${receipt}. Total payable: ${formatKES(totalPayable)}, due ${dueDate}.`,
+  // 2026-11-07: Added purpose parameter
+  loanManuallyDisbursed: (name, principal, totalPayable, dueDate, ref, receipt, purpose) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, your ${formatLoanType(purpose)} loan of ${formatKES(principal)} has been manually disbursed (Ref: ${ref}). Receipt: ${receipt}. Total payable: ${formatKES(totalPayable)}, due ${dueDate}.`,
 
   // Used specifically for Emergency/School Loans (Wallet)
   loanWalletCredited: (name, principal, totalRepayment, date, ref, purpose) =>
@@ -90,8 +94,8 @@ const templates = {
   loanRejected: (name, reason, purpose) =>
     `KEMRI SACCO: Hi ${firstName(name)}, your ${formatLoanType(purpose)} Loan application was not approved.${reason ? ' Reason: ' + reason + '.' : ''} Contact our office for details.`,
 
-  loanDisbursementFailed: (name) =>
-    `KEMRI SACCO: Hi ${firstName(name)}, we could not complete your loan disbursement right now. Our team will contact you shortly.`,
+  loanDisbursementFailed: (name, purpose) =>
+    `KEMRI SACCO: Hi ${firstName(name)}, we could not complete your ${formatLoanType(purpose)} loan disbursement right now. Our team will contact you shortly.`,
 
   // ─── MEMBER-FACING — LOAN REMINDERS ───
   loanReminderBoardApproved: (name, amountOutstanding, amountPaid, ref, purpose, dueDate) => {
@@ -133,8 +137,9 @@ const templates = {
     return `KEMRI SACCO Admin: ${formatLoanType(purpose)} Loan for ${name} (Ref: ${ref}). Auto-approved. ${closing}`;
   },
 
-  staffLoanDisbursed: (name, reference, receipt) =>
-    `KEMRI SACCO Admin: Mobile Loan ${reference} for ${name} disbursed via B2C. Receipt: ${receipt || 'N/A'}.`,
+  // 2026-11-07: Added purpose parameter
+  staffLoanDisbursed: (name, reference, receipt, purpose) =>
+    `KEMRI SACCO Admin: ${formatLoanType(purpose)} Loan ${reference} for ${name} disbursed via B2C. Receipt: ${receipt || 'N/A'}.`,
 
   staffWalletCredited: (name, amount, ref, purpose = 'Emergency/School') =>
     `KEMRI SACCO Admin: Credited ${formatKES(amount)} to ${name}'s Wallet for ${formatLoanType(purpose)} Loan (Ref: ${ref}).`,
@@ -249,16 +254,13 @@ async function notifyStaff(message) {
     const validStaffToAlert = [];
 
     for (const admin of withPhone) {
-      // Check if this admin's phone number belongs to a SACCO Member
       const member = await Member.findByPhone(admin.phone);
       
       if (member) {
-        // If they are a member, they ONLY get the SMS if they currently hold the Board/Staff badge
         if (member.is_board_staff === true) {
           validStaffToAlert.push(admin);
         }
       } else {
-        // If they are a pure IT/System Admin (not a member), they always get the SMS.
         validStaffToAlert.push(admin);
       }
     }

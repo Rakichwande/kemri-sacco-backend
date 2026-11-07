@@ -53,7 +53,6 @@ function inviteEmailContent({ inviteLink, role, inviterName }) {
   return { subject, html, text };
 }
 
-// Multi-paragraph staff event email.
 function staffEventEmail(title, bodyLine) {
   const subject = `KEMRI SACCO Admin: ${title}`;
   const paragraphs = String(bodyLine)
@@ -75,25 +74,26 @@ function staffEventEmail(title, bodyLine) {
 
 function formatLoanType(purpose) {
   if (!purpose) return 'SACCO';
+  const lower = purpose.toLowerCase();
+  if (lower === 'bizboost') return 'BizBoost';
+  if (lower === 'sme') return 'SME';
+  if (lower === 'mobile') return 'Mobile';
   return purpose.charAt(0).toUpperCase() + purpose.slice(1).toLowerCase();
 }
 
 const staffTemplates = {
-  // 2026-11-05: Synced with SMS. Notes the default 0 limit.
   newMember: (name) =>
     staffEventEmail(
       'New member registered', 
       `${name} has just registered as a SACCO member.\n\nNote: Their credit limit defaults to 0 until manually approved by the CEO.`
     ),
 
-  // 2026-11-05: Added purpose (Mobile, Emergency, School).
   loanApplication: (name, amount, ref, purpose = 'Mobile') =>
     staffEventEmail(
       `${formatLoanType(purpose)} Loan application received`,
       `${name} applied for a ${formatLoanType(purpose)} loan of KES ${Number(amount).toLocaleString()}.\n\nReference: ${ref}\n\nAwaiting review. Approve or reject from the Approval Queue.`
     ),
 
-  // 2026-11-05: Only Mobile loans are auto-approved now. Removed "Board/Staff" and fixed the math.
   mobileLoanAutoApproved: (name, amount, totalRepayment, ref, opts = {}) => {
     const { status, memberPhone } = opts;
     
@@ -118,21 +118,25 @@ const staffTemplates = {
     return staffEventEmail('Mobile Loan auto-approved', paragraphs.join('\n\n'));
   },
 
-  // 2026-11-05: New template for Emergency/School loans approved by Admin.
   emergencySchoolApproved: (name, amount, totalRepayment, ref, purpose) =>
     staffEventEmail(
       `${formatLoanType(purpose)} Loan approved`,
       `You approved a ${formatLoanType(purpose)} loan of KES ${Number(amount).toLocaleString()} for ${name}.\n\nReference: ${ref}\nTotal amount payable: KES ${Number(totalRepayment).toLocaleString()} (12 month term)\n\nThe funds have been credited to their SACCO Wallet. The member can now withdraw to M-Pesa.`
     ),
 
-  // 2026-11-05: Added loan reference and remaining balance to the repayment email.
+  // 2026-11-07: NEW B2C LOAN APPROVED TEMPLATE
+  b2cLoanApproved: (name, amount, totalRepayment, ref, purpose) =>
+    staffEventEmail(
+      `${formatLoanType(purpose)} Loan approved`,
+      `You approved a ${formatLoanType(purpose)} loan of KES ${Number(amount).toLocaleString()} for ${name}.\n\nReference: ${ref}\nTotal amount payable: KES ${Number(totalRepayment).toLocaleString()} (1 month term)\n\nThe funds are being sent to their M-Pesa via B2C. Check the Disbursement Log if the Safaricom request fails and requires a retry.`
+    ),
+
   repayment: (name, amount, ref, amountOutstanding) =>
     staffEventEmail(
       'Loan repayment received', 
       `A repayment of KES ${Number(amount).toLocaleString()} was received from ${name}.\n\nLoan Ref: ${ref}\nRemaining balance: KES ${Number(amountOutstanding).toLocaleString()}`
     ),
 
-  // 2026-11-05: Added the specific savings type (Ordinary, Jipange, Holiday).
   deposit: (name, amount, savingsType = 'Ordinary') =>
     staffEventEmail(
       'Deposit received', 
