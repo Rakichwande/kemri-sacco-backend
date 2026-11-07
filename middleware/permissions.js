@@ -15,7 +15,6 @@ const PERMISSIONS = {
   [ROLES.SUPER_ADMIN]: [
     'system:configure',
     'staff:manage',
-    // 2026-11-05: CEO has exclusive rights to edit members, limits, board status, and deletion.
     'members:read', 'members:write', 'members:set_board_status', 'members:delete', 'members:edit_limit',
     'loans:read', 'loans:approve', 'loans:disburse',
     'payments:read', 'payments:write',
@@ -25,10 +24,8 @@ const PERMISSIONS = {
   ],
   [ROLES.SACCO_ADMIN]: [
     'staff:manage',
-    // 2026-11-05: Stripped of members:write, members:set_board_status, and members:delete. 
-    // They can only view members now. Only the CEO can edit them.
     'members:read', 
-    'loans:read', 'loans:approve', 'loans:disburse',
+    'loans:read', 'loans:approve', 'loans:disburse', // SACCO Admin can approve/disburse per Master Doc
     'payments:read',
     'withdrawals:read', 'withdrawals:write',
     'reports:read',
@@ -45,11 +42,12 @@ const PERMISSIONS = {
   ],
   [ROLES.LOANS_OFFICER]: [
     'members:read',
-    'loans:read', 'loans:approve', 'loans:disburse',
+    'loans:read', 
+    // 2026-11-07: REMOVED loans:approve and loans:disburse. Loans Officers are read-only.
     'withdrawals:read',
   ],
   [ROLES.MEMBER_SUPPORT]: [
-    'members:read', // 2026-11-05: Stripped of members:write. Read-only.
+    'members:read', 
     'withdrawals:read',
   ],
   [ROLES.AUDITOR]: [
