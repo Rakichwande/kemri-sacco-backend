@@ -315,44 +315,67 @@ const VALID_WALLETS = {
   school: 'wallet_balance_school'
 };
 
+// 2026-11-07: Added ACID safety to creditWallet
 async function creditWallet(memberId, amount, type, reference, walletType = 'general', client = null) {
   const dbClient = client || pool;
+  const isTransactionOwner = !client;
   const col = VALID_WALLETS[walletType] || VALID_WALLETS.general;
-  
-  await dbClient.query(
-    `UPDATE members SET ${col} = ${col} + $1 WHERE id = $2`,
-    [Math.round(Number(amount)), memberId]
-  );
-  
-  await dbClient.query(
-    `INSERT INTO wallet_transactions (member_id, amount, transaction_type, reference, wallet_type) 
-     VALUES ($1, $2, $3, $4, $5)`,
-    [memberId, Math.round(Number(amount)), type, reference, walletType]
-  );
+  const amt = Math.round(Number(amount));
+
+  if (isTransactionOwner) await dbClient.query('BEGIN');
+
+  try {
+    await dbClient.query(
+      `UPDATE members SET ${col} = ${col} + $1 WHERE id = $2`,
+      [amt, memberId]
+    );
+    
+    await dbClient.query(
+      `INSERT INTO wallet_transactions (member_id, amount, transaction_type, reference, wallet_type) 
+       VALUES ($1, $2, $3, $4, $5)`,
+      [memberId, amt, type, reference, walletType]
+    );
+
+    if (isTransactionOwner) await dbClient.query('COMMIT');
+  } catch (err) {
+    if (isTransactionOwner) await dbClient.query('ROLLBACK');
+    throw err;
+  }
 }
 
+// 2026-11-07: Added ACID safety to debitWallet
 async function debitWallet(memberId, amount, type, reference, walletType = 'general', client = null) {
   const dbClient = client || pool;
+  const isTransactionOwner = !client; // If we own the connection, we manage the transaction
   const col = VALID_WALLETS[walletType] || VALID_WALLETS.general;
   const amt = Math.round(Number(amount));
   
-  const res = await dbClient.query(
-    `UPDATE members SET ${col} = ${col} - $1 
-     WHERE id = $2 AND ${col} >= $1 RETURNING ${col} AS new_balance`,
-    [amt, memberId]
-  );
+  if (isTransactionOwner) await dbClient.query('BEGIN');
   
-  if (res.rows.length === 0) throw new Error(`Insufficient ${walletType} wallet balance`);
-  
-  const ref = reference || `WD-${Date.now()}-${memberId}`;
+  try {
+    const res = await dbClient.query(
+      `UPDATE members SET ${col} = ${col} - $1 
+       WHERE id = $2 AND ${col} >= $1 RETURNING ${col} AS new_balance`,
+      [amt, memberId]
+    );
+    
+    if (res.rows.length === 0) throw new Error(`Insufficient ${walletType} wallet balance`);
+    
+    const ref = reference || `WD-${Date.now()}-${memberId}`;
 
-  await dbClient.query(
-    `INSERT INTO wallet_transactions (member_id, amount, transaction_type, reference, wallet_type) 
-     VALUES ($1, $2, $3, $4, $5)`,
-    [memberId, -amt, type, ref, walletType]
-  );
+    await dbClient.query(
+      `INSERT INTO wallet_transactions (member_id, amount, transaction_type, reference, wallet_type) 
+       VALUES ($1, $2, $3, $4, $5)`,
+      [memberId, -amt, type, ref, walletType]
+    );
 
-  return { wallet_balance: res.rows[0].new_balance, reference: ref };
+    if (isTransactionOwner) await dbClient.query('COMMIT');
+    
+    return { wallet_balance: res.rows[0].new_balance, reference: ref };
+  } catch (err) {
+    if (isTransactionOwner) await dbClient.query('ROLLBACK');
+    throw err;
+  }
 }
 
 // 2026-11-03: Set 6-month unlock and 6-month first interest date
