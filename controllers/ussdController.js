@@ -29,7 +29,7 @@ function cleanupStalePinSessions() {
 
 async function handleUssd(req, res) {
   const { sessionId, phoneNumber, serviceCode, text } = req.body;
-  const input = (text || '').split('*').filter(Boolean);
+  let input = (text || '').split('*').filter(Boolean);
   const startedAt = Date.now();
 
   cleanupStalePinSessions();
@@ -37,26 +37,38 @@ async function handleUssd(req, res) {
   let response;
 
   try {
+    // 2026-11-07: CRITICAL USSD BACK BUTTON FIX
+    // If the user types '0' to go back, we must reset the entire session string.
+    // E.g., if text is "4*1234*0*4", we only want to process the "4" that comes after the "0".
+    const lastZeroIndex = input.lastIndexOf('0');
+    
+    if (lastZeroIndex !== -1) {
+      if (lastZeroIndex === input.length - 1) {
+        // The user just pressed '0' to go back. Show the main menu.
+        input = []; 
+      } else {
+        // The user pressed '0', then typed something else (e.g., 4). 
+        // We slice the array to only process what came after the '0'.
+        input = input.slice(lastZeroIndex + 1);
+      }
+    }
+
     if (input.length === 0) {
       response = mainMenu();
     } else {
       const choice = input[0];
       const steps = input.slice(1);
 
-      if (choice === '0' || (steps.length > 0 && steps[steps.length - 1] === '0')) {
-        response = mainMenu();
-      } else {
-        switch (choice) {
-          case '1': response = await handleRegister(phoneNumber, steps); break;
-          case '2': response = await handleWallet(phoneNumber, steps, sessionId); break;
-          case '3': response = await handleDeposit(phoneNumber, steps); break;
-          case '4': response = await handleLoanApplication(phoneNumber, steps, sessionId); break;
-          case '5': response = await handleRepayLoan(phoneNumber, steps, sessionId); break;
-          case '6': response = await handleTransactions(phoneNumber, steps, sessionId); break;
-          case '7': response = await handleChangePin(phoneNumber, steps); break;
-          case '8': response = 'END Thank you for using KEMRI SACCO. Goodbye.'; break;
-          default: response = 'END Invalid choice. Please dial again.';
-        }
+      switch (choice) {
+        case '1': response = await handleRegister(phoneNumber, steps); break;
+        case '2': response = await handleWallet(phoneNumber, steps, sessionId); break;
+        case '3': response = await handleDeposit(phoneNumber, steps); break;
+        case '4': response = await handleLoanApplication(phoneNumber, steps, sessionId); break;
+        case '5': response = await handleRepayLoan(phoneNumber, steps, sessionId); break;
+        case '6': response = await handleTransactions(phoneNumber, steps, sessionId); break;
+        case '7': response = await handleChangePin(phoneNumber, steps); break;
+        case '8': response = 'END Thank you for using KEMRI SACCO. Goodbye.'; break;
+        default: response = 'END Invalid choice. Please dial again.';
       }
     }
   } catch (err) {
