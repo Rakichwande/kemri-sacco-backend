@@ -21,7 +21,6 @@ class DisbursementService {
 
     // 2026-11-02: CRITICAL SECURITY FIX
     // Ensure the loan principal does not exceed the member's CURRENT credit limit.
-    // This prevents loans approved before a limit downgrade from being disbursed.
     const currentLimit = Number(member.credit_limit || 0);
     const loanAmount = Number(loan.principal);
     
@@ -76,7 +75,7 @@ class DisbursementService {
       response = await darajaB2CService.b2cPayment({
         phoneNumber: member.phone_number,
         amount: amount,
-        remarks: `KEMRI SACCO Wallet Withdrawal`,
+        remarks: `KEMRI SACCO Withdrawal`,
       });
     } catch (err) {
       throw new Error(`Could not reach Safaricom: ${err.message}`);
@@ -86,11 +85,18 @@ class DisbursementService {
       throw new Error(`Safaricom rejected the withdrawal: ${response.ResponseDescription || 'unknown reason'}`);
     }
 
-    // 2026-10-31: Save the ConversationID to the wallet transaction so we can track failures.
-    await db.query(
-      `UPDATE wallet_transactions SET reference = $1 WHERE reference = $2`,
-      [response.ConversationID, reference]
-    );
+    // 2026-11-07: Save ConversationID to the correct table
+    if (walletType === 'savings') {
+      await db.query(
+        `UPDATE payments SET checkout_request_id = $1 WHERE checkout_request_id = $2`,
+        [response.ConversationID, reference]
+      );
+    } else {
+      await db.query(
+        `UPDATE wallet_transactions SET reference = $1 WHERE reference = $2`,
+        [response.ConversationID, reference]
+      );
+    }
 
     return { success: true, conversationId: response.ConversationID };
   }
@@ -122,6 +128,15 @@ class DisbursementService {
       return this._handleWalletWithdrawalB2CResult(walletTxRes.rows[0], result);
     }
 
+    // 2026-11-07: Check if this is a Savings Withdrawal
+    const paymentRes = await db.query(
+      `SELECT * FROM payments WHERE checkout_request_id = $1 AND account_reference = 'SAVINGS-WITHDRAWAL'`,
+      [result.ConversationID]
+    );
+    if (paymentRes.rows.length > 0) {
+      return this._handleSavingsWithdrawalB2CResult(paymentRes.rows[0], result);
+    }
+
     console.error(`B2C result callback: Unknown ConversationID ${result.ConversationID}`);
     return { handled: false, reason: 'Unknown ConversationID' };
   }
@@ -135,11 +150,8 @@ class DisbursementService {
       console.error(`B2C Wallet withdrawal failed for member ${tx.member_id}. Refunding KES ${Math.abs(tx.amount)}.`);
       
       try {
-        // 2026-11-01: Refund to the specific wallet type
         const refundType = tx.wallet_type || 'general';
         await Member.creditWallet(tx.member_id, Math.abs(tx.amount), 'withdrawal_refund', 'B2C Failed', refundType);
-        
-        // Update the original failed transaction so it doesn't show as a pending withdrawal
         await db.query(`UPDATE wallet_transactions SET transaction_type = 'withdrawal_failed' WHERE id = $1`, [tx.id]);
 
         if (member) {
@@ -154,7 +166,7 @@ class DisbursementService {
       return { handled: true, failed: true, reason };
     }
 
-    // 2026-11-06: SUCCESS - Extract the M-Pesa receipt and update the DB!
+    // SUCCESS - Extract the M-Pesa receipt and update the DB!
     const params = result.ResultParameters?.ResultParameter || [];
     const receipt = params.find((p) => p.Key === 'TransactionReceipt')?.Value || null;
 
@@ -169,9 +181,47 @@ class DisbursementService {
         console.error('Failed to update wallet transaction with M-Pesa receipt:', err.message);
       }
     } else {
-      console.log(`✅ B2C Wallet withdrawal confirmed for member ${tx.member_id}, but no receipt was provided in the payload.`);
+      console.log(`✅ B2C Wallet withdrawal confirmed for member ${tx.member_id}, but no receipt was provided.`);
     }
 
+    return { handled: true, failed: false };
+  }
+
+  // 2026-11-07: NEW - Handler for Savings Withdrawals
+  static async _handleSavingsWithdrawalB2CResult(payment, result) {
+    const member = await Member.findById(payment.member_id);
+    
+    if (Number(result.ResultCode) !== 0) {
+      // IT FAILED: Refund the savings
+      const reason = result.ResultDesc || `ResultCode ${result.ResultCode}`;
+      console.error(`B2C Savings withdrawal failed for member ${payment.member_id}. Refunding KES ${Math.abs(payment.amount)}.`);
+      
+      try {
+        // 1. Mark the original withdrawal as failed
+        await db.query(`UPDATE payments SET status = 'failed' WHERE id = $1`, [payment.id]);
+
+        // 2. Insert a positive payment to refund the balance
+        await db.query(
+          `INSERT INTO payments 
+            (member_id, amount, phone_number, account_reference, description, checkout_request_id, loan_id, channel, status, savings_type)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+          [payment.member_id, Math.abs(payment.amount), payment.phone_number, 'SAVINGS-REFUND', 'Refund for failed B2C withdrawal', `REF-${Date.now()}-${payment.member_id}`, null, 'system', 'completed', payment.savings_type]
+        );
+
+        if (member) {
+          await smsService.sendSMS(
+            member.phone_number,
+            `KEMRI SACCO: Your ${payment.savings_type.toUpperCase()} savings withdrawal of KES ${Math.abs(payment.amount)} failed. The funds have been returned to your savings.`
+          );
+        }
+      } catch (err) {
+        console.error('Failed to refund savings after async B2C failure:', err.message);
+      }
+      return { handled: true, failed: true, reason };
+    }
+
+    // SUCCESS
+    console.log(`✅ B2C Savings withdrawal confirmed for member ${payment.member_id}`);
     return { handled: true, failed: false };
   }
 
@@ -262,10 +312,25 @@ class DisbursementService {
     );
     if (walletTxRes.rows.length > 0) {
        const tx = walletTxRes.rows[0];
-       // 2026-11-01: Refund to the specific wallet type
        const refundType = tx.wallet_type || 'general';
        await Member.creditWallet(tx.member_id, Math.abs(tx.amount), 'withdrawal_refund', 'B2C Timeout', refundType);
        await db.query(`UPDATE wallet_transactions SET transaction_type = 'withdrawal_failed' WHERE id = $1`, [tx.id]);
+       return { handled: true, failed: true, reason: 'Timeout' };
+    }
+
+    // 2026-11-07: Check for savings timeout
+    const paymentRes = await db.query(
+      `SELECT * FROM payments WHERE checkout_request_id = $1 AND account_reference = 'SAVINGS-WITHDRAWAL'`,
+      [conversationId]
+    );
+    if (paymentRes.rows.length > 0) {
+       const payment = paymentRes.rows[0];
+       await db.query(`UPDATE payments SET status = 'failed' WHERE id = $1`, [payment.id]);
+       await db.query(
+          `INSERT INTO payments (member_id, amount, phone_number, account_reference, description, checkout_request_id, loan_id, channel, status, savings_type)
+           VALUES ($1, $2, $3, 'SAVINGS-REFUND', 'Refund for timeout B2C failure', $4, null, 'system', 'completed', $5)`,
+          [payment.member_id, Math.abs(payment.amount), payment.phone_number, `REF-${Date.now()}-${payment.member_id}`, payment.savings_type]
+       );
        return { handled: true, failed: true, reason: 'Timeout' };
     }
 

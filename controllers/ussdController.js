@@ -290,7 +290,7 @@ async function handleWallet(phoneNumber, steps, sessionId) {
       const selectedType = activeWallets[subChoice - 1];
       if (amount > walletBalances[selectedType]) return `END Insufficient funds. Max is KES ${walletBalances[selectedType].toLocaleString()}.`;
 
-      let uniqueRef = null; // <-- 2026-11-06: Added to track transaction for failures
+      let uniqueRef = null; // 2026-11-06: Added to track transaction for failures
 
       try {
         const debitResult = await Member.debitWallet(member.id, amount, 'withdrawal', null, selectedType);
@@ -331,11 +331,15 @@ async function handleWallet(phoneNumber, steps, sessionId) {
       const selectedType = validOptions[subChoice - 1];
       if (amount > savingsBalances[selectedType]) return `END Insufficient funds. Max is KES ${savingsBalances[selectedType].toLocaleString()}.`;
 
+      // 2026-11-07: Fixed Reference generation and Sync Refund Logic
+      let uniqueRef = null;
+
       try {
-        await Payment.withdrawSavings(member.id, amount, selectedType, `WD-${Date.now()}`);
+        const paymentRecord = await Payment.withdrawSavings(member.id, amount, selectedType, `SAV-${Date.now()}-${member.id}`);
+        uniqueRef = paymentRecord.checkout_request_id;
         
         const DisbursementService = require('../services/disbursementService');
-        await DisbursementService.disburseWalletToMpesa(member, amount, `SAV-${Date.now()}`, 'savings'); 
+        await DisbursementService.disburseWalletToMpesa(member, amount, uniqueRef, 'savings'); 
 
         try { 
           await smsService.sendSMS(member.phone_number, `KEMRI SACCO: KES ${amount.toLocaleString()} has been sent to your M-Pesa from your ${selectedType.toUpperCase()} savings.`); 
@@ -343,7 +347,22 @@ async function handleWallet(phoneNumber, steps, sessionId) {
 
         return `END KES ${amount.toLocaleString()} sent to M-Pesa from ${selectedType.toUpperCase()} savings.`;
       } catch (err) {
-        console.error('Savings withdrawal failed:', err.message);
+        console.error('Savings withdrawal failed (sync):', err.message);
+        
+        if (uniqueRef) {
+          try {
+            const db = require('../config/database');
+            await db.query(`UPDATE payments SET status = 'failed' WHERE checkout_request_id = $1`, [uniqueRef]);
+            await db.query(
+              `INSERT INTO payments (member_id, amount, phone_number, account_reference, description, checkout_request_id, loan_id, channel, status, savings_type)
+               VALUES ($1, $2, $3, 'SAVINGS-REFUND', 'Refund for sync B2C failure', $4, null, 'system', 'completed', $5)`,
+              [member.id, amount, member.phone_number, `REF-${Date.now()}-${member.id}`, selectedType]
+            );
+          } catch (refundErr) {
+            console.error('Sync refund failed:', refundErr.message);
+          }
+        }
+
         return 'END Could not process withdrawal. Please try again later or visit the office.';
       }
     }

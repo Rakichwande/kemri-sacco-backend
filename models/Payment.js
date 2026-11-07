@@ -53,7 +53,7 @@ async function create({
   loan_id = null,
   channel = 'mpesa',
   savings_type = 'ordinary',
-  status = 'pending', // <--- NEW: Allow passing status (e.g. 'completed' for interest)
+  status = 'pending',
 }) {
   const result = await pool.query(
     `INSERT INTO payments 
@@ -136,6 +136,7 @@ async function getMemberBalance(member_id, savingsType = 'ordinary') {
 async function withdrawSavings(memberId, amount, savingsType, reference, client = null) {
   const dbClient = client || pool;
   const amt = Math.round(Number(amount));
+  const ref = reference || `SAV-${Date.now()}-${memberId}`; // 2026-11-07: Use the passed reference
 
   // Insert a negative payment to reduce the balance
   const result = await dbClient.query(
@@ -143,7 +144,7 @@ async function withdrawSavings(memberId, amount, savingsType, reference, client 
       (member_id, amount, phone_number, account_reference, description, checkout_request_id, loan_id, channel, status, savings_type)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      RETURNING *`,
-    [memberId, -amt, 'N/A', 'SAVINGS-WITHDRAWAL', `Withdrawal from ${savingsType}`, `WD-${Date.now()}-${memberId}`, null, 'mpesa', 'completed', savingsType]
+    [memberId, -amt, 'N/A', 'SAVINGS-WITHDRAWAL', `Withdrawal from ${savingsType}`, ref, null, 'mpesa', 'completed', savingsType]
   );
   return result.rows[0];
 }
