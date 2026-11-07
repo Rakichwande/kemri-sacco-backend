@@ -19,6 +19,7 @@ const Repayment = require('./models/Repayment');
 const Withdrawal = require('./models/Withdrawal');
 const authRoutes = require('./routes/auth');
 const Admin = require('./models/Admin');
+const notificationService = require('./services/notificationService'); // <-- Added for sweeper alerts
 
 const memberRoutes = require('./routes/members');
 const paymentRoutes = require('./routes/payments');
@@ -95,7 +96,6 @@ app.use(errorHandler);
 async function sweepStuckWithdrawals() {
   try {
     // Find withdrawals older than 10 minutes that still have the 'WD-' reference.
-    // If Safaricom was reached, the reference would have been replaced by the ConversationID.
     const res = await pool.query(`
       SELECT id, member_id, amount, wallet_type, reference 
       FROM wallet_transactions 
@@ -106,28 +106,20 @@ async function sweepStuckWithdrawals() {
 
     if (res.rows.length === 0) return;
 
-    console.log(`⚠️ Found ${res.rows.length} stuck wallet withdrawals. Refunding...`);
+    console.warn(`⚠️ Found ${res.rows.length} stuck wallet withdrawals. Manual review required.`);
 
+    // 2026-11-07: DO NOT AUTO-REFUND. Alert staff instead.
     for (const tx of res.rows) {
+      console.log(`🚨 STUCK TRANSACTION: Member ${tx.member_id}, Amount KES ${Math.abs(tx.amount)}, Ref: ${tx.reference}`);
+      
       try {
-        // 1. Refund the money to the specific wallet
-        await Member.creditWallet(
-          tx.member_id, 
-          Math.abs(tx.amount), 
-          'withdrawal_refund', 
-          'System Sweep: Stuck B2C', 
-          tx.wallet_type
-        );
-        
-        // 2. Mark the original transaction as failed
-        await pool.query(
-          `UPDATE wallet_transactions SET transaction_type = 'withdrawal_failed' WHERE id = $1`,
-          [tx.id]
-        );
-
-        console.log(`✅ Refunded stuck withdrawal for member ${tx.member_id} (KES ${Math.abs(tx.amount)})`);
+        // Send SMS to staff so they can check the M-Pesa statement manually
+        await notificationService.notifyStaff({
+          smsText: `KEMRI SACCO Admin: URGENT. Wallet withdrawal timeout for member ${tx.member_id} (KES ${Math.abs(tx.amount)}). Please check M-Pesa statement before refunding.`,
+          emailContent: null
+        });
       } catch (err) {
-        console.error(`Failed to sweep transaction ${tx.id}:`, err.message);
+        console.error(`Failed to notify staff about stuck tx ${tx.id}:`, err.message);
       }
     }
   } catch (err) {
@@ -138,8 +130,6 @@ async function sweepStuckWithdrawals() {
 async function start() {
   try {
     // Creates tables if they don't exist yet
-    // 2026-11-01: Re-ordered initialization so core tables (Admins, Members) 
-    // are created BEFORE dependent tables (Withdrawal, AuditLog).
     await Admin.init();
     await Member.init();
     await AuditLog.init();
@@ -166,22 +156,18 @@ async function start() {
     });
 
     // 2026-11-02: GRACEFUL SHUTDOWN
-    // When Render deploys a new version, it sends a SIGTERM signal. 
-    // We stop accepting new connections, finish active requests, and then close the DB pool.
     const shutdown = () => {
       console.log('🛑 SIGTERM/SIGINT received. Shutting down gracefully...');
       
       server.close(() => {
         console.log('✅ HTTP server closed.');
         
-        // Close the PostgreSQL connection pool
         pool.pool.end(() => {
           console.log('✅ Database pool closed. Exiting process.');
           process.exit(0);
         });
       });
 
-      // Force shutdown if it takes longer than 10 seconds (e.g., stuck callback)
       setTimeout(() => {
         console.error('❌ Could not close connections in time, forcefully shutting down.');
         process.exit(1);

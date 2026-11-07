@@ -333,26 +333,33 @@ class DisbursementService {
     );
     if (walletTxRes.rows.length > 0) {
        const tx = walletTxRes.rows[0];
-       const refundType = tx.wallet_type || 'general';
-       await Member.creditWallet(tx.member_id, Math.abs(tx.amount), 'withdrawal_refund', 'B2C Timeout', refundType);
-       await db.query(`UPDATE wallet_transactions SET transaction_type = 'withdrawal_failed' WHERE id = $1`, [tx.id]);
-       return { handled: true, failed: true, reason: 'Timeout' };
+       // 2026-11-07 FIX: DO NOT AUTO-REFUND ON TIMEOUT.
+       console.warn(`⚠️ B2C Wallet Timeout for member ${tx.member_id}. DO NOT AUTO-REFUND. Manual check required.`);
+       
+       await notificationService.notifyStaff({
+         smsText: `KEMRI SACCO Admin: URGENT. Wallet withdrawal timeout for member ${tx.member_id} (KES ${Math.abs(tx.amount)}). Please check M-Pesa statement before refunding.`,
+         emailContent: null
+       });
+       
+       return { handled: true, failed: false, reason: 'Timeout - Manual Review Required' };
     }
 
-    // 2026-11-07: Check for savings timeout
+    // Check for savings timeout
     const paymentRes = await db.query(
       `SELECT * FROM payments WHERE checkout_request_id = $1 AND account_reference = 'SAVINGS-WITHDRAWAL'`,
       [conversationId]
     );
     if (paymentRes.rows.length > 0) {
        const payment = paymentRes.rows[0];
-       await db.query(`UPDATE payments SET status = 'failed' WHERE id = $1`, [payment.id]);
-       await db.query(
-          `INSERT INTO payments (member_id, amount, phone_number, account_reference, description, checkout_request_id, loan_id, channel, status, savings_type)
-           VALUES ($1, $2, $3, 'SAVINGS-REFUND', 'Refund for timeout B2C failure', $4, null, 'system', 'completed', $5)`,
-          [payment.member_id, Math.abs(payment.amount), payment.phone_number, `REF-${Date.now()}-${payment.member_id}`, payment.savings_type]
-       );
-       return { handled: true, failed: true, reason: 'Timeout' };
+       // 2026-11-07 FIX: DO NOT AUTO-REFUND ON TIMEOUT.
+       console.warn(`⚠️ B2C Savings Timeout for member ${payment.member_id}. DO NOT AUTO-REFUND. Manual check required.`);
+       
+       await notificationService.notifyStaff({
+         smsText: `KEMRI SACCO Admin: URGENT. Savings withdrawal timeout for member ${payment.member_id} (KES ${Math.abs(payment.amount)}). Please check M-Pesa statement before refunding.`,
+         emailContent: null
+       });
+       
+       return { handled: true, failed: false, reason: 'Timeout - Manual Review Required' };
     }
 
     console.error(`B2C timeout callback: unknown ConversationID ${conversationId}`);
